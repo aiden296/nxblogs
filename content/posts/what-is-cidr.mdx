@@ -1,0 +1,94 @@
+---
+title: 'Understanding CIDR: A Comprehensive Guide'
+date: '2024-12-03'
+tags: ['devops']
+enableComment: true
+---
+
+# Understanding CIDR: A Comprehensive Guide
+
+![CIDR text banner](/cidr-text.png)
+
+## What is CIDR?
+
+CIDR (Classless Inter-Domain Routing) is an improved method for allocating IP addresses and routing data on the internet. It replaced the older system to make internet communications more efficient.
+
+## Why is CIDR Important?
+
+Every device connected to the internet needs a unique address, called an IP address. These addresses allow devices to communicate with each other. CIDR helps manage these addresses better than older methods.
+
+## Understanding IP Addresses
+
+### IPv4 Addresses
+
+An IPv4 address consists of 32 bits, usually shown as four numbers separated by periods. Each number can range from 0 to 255.
+
+Example: `192.23.12.3` is an IPv4 address
+
+## The Old Way vs. CIDR
+
+### The Old Way (Classful IP Addressing)
+
+Organizations would buy IP addresses in three fixed classes:
+
+- Class A: 8 bits for network, 24 for hosts (e.g., `44.0.0.1`)
+- Class B: 16 bits for network, 16 for hosts (e.g., `128.16.0.2`)
+- Class C: 24 bits for network, 8 for hosts (e.g., `192.168.1.100`)
+
+#### Limitations of the Old Way
+
+- Class A supported 16,777,214 hosts
+- Class B supported 65,534 hosts
+- Class C supported 254 hosts
+
+This system often led to wasted IP addresses. For example, if you needed 300 IP addresses, you'd have to buy a Class B block, wasting over 65,000 addresses.
+
+It also made network design inflexible. You couldn't easily combine addresses from different classes into a single network.
+
+### The New Way (CIDR)
+
+![What is CIDR](/what-is-cidr.webp)
+
+CIDR allows for more flexible sizing of network addresses. It uses a notation like `192.168.1.0/24`, where the number after the slash indicates how many bits are used for the network part of the address.
+
+## How CIDR Works
+
+CIDR notation shows how many bits of an IP address belong to the network. For example:
+
+- In `192.168.1.0/24`, the first 24 bits are for the network, leaving 8 bits for individual devices.
+
+### Calculating Available Addresses
+
+To find out how many addresses are in a CIDR block, use this formula:
+
+Number of addresses = 2^(32 - CIDR prefix length)
+
+Example: For `192.168.1.0/24`
+- Number of addresses = 2^(32 - 24) = 2^8 = 256
+
+This means you have 256 IP addresses, from `192.168.1.0` to `192.168.1.255`.
+
+## Benefits of CIDR
+
+1. **Efficient IP Address Use**: Allocate only the addresses you need.
+2. **Improved Routing**: Helps routers work more efficiently, improving internet speed.
+3. **Flexibility**: Create custom-sized networks to fit your needs.
+4. **Scalability**: Easily grow networks as organizations expand.
+
+## Real-World Examples
+
+1. **Home or Small Office**: 
+   - Might use: `192.168.1.0/24`
+   - Provides 256 addresses (254 usable)
+
+2. **Large Company**: 
+   - Might use: `10.0.0.0/16`
+   - Provides 65,536 addresses
+
+3. **Part of a Data Center**: 
+   - Might use: `172.16.0.0/20`
+   - Provides 4,096 addresses
+
+## In Simple Terms
+
+Think of CIDR like a flexible apartment numbering system. Instead of having fixed-size buildings with 100 apartments each, CIDR allows for buildings with exactly the number of apartments needed - no waste and easy to expand!

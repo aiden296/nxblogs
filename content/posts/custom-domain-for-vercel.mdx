@@ -1,0 +1,69 @@
+---
+title: 'Hướng dẫn cấu hình Custom Domain từ Cloudflare cho dự án Vercel'
+date: '2025-02-13'
+tags: ['devops']
+enableComment: true
+---
+
+# Hướng dẫn cấu hình Custom Domain từ Cloudflare cho dự án Vercel
+
+Sau khi hoàn thiện một dự án tuyệt vời và deploy lên Vercel, bước tiếp theo chắc chắn là gắn một chiếc "tên miền thương hiệu" thay cho domain mặc định của Vercel. Nếu bạn mua domain tại Cloudflare, hãy thực hiện theo các bước dưới đây để cấu hình chỉ trong "vài nốt nhạc".
+
+---
+
+## 1. Chuẩn bị Domain trên Cloudflare
+
+* **Bước 1:** Đăng ký và đăng nhập vào [Cloudflare](https://dash.cloudflare.com/sign-up).
+* **Bước 2:** Tại Dashboard, chọn tab **Domain Registration** > **Register Domains**.
+* **Bước 3:** Tìm kiếm tên miền bạn yêu thích và tiến hành thanh toán. (Ví dụ trong bài này là `aidenthenotorious.com`).
+
+---
+
+## 2. Thêm Domain vào dự án Vercel
+
+* **Bước 4:** Đăng nhập vào Vercel, truy cập Dashboard và chọn dự án bạn muốn gắn domain.
+* **Bước 5:** Ở thanh menu phía trên, chọn tab **Settings**, sau đó chọn mục **Domains** ở cột bên trái.
+* **Bước 6:** Nhập tên miền của bạn vào ô văn bản (ví dụ: `aidenthenotorious.com`) và nhấn **Add**.
+* **Bước 7:** Vercel sẽ đưa ra gợi ý (Recommended): Thêm cả `www.aidenthenotorious.com` và tự động chuyển hướng (redirect) domain gốc về đó. Bạn nên chọn tùy chọn này để tối ưu SEO và trải nghiệm người dùng.
+
+---
+
+## 3. Cấu hình DNS trên Cloudflare (Bước quan trọng)
+
+Sau khi thêm, Vercel sẽ báo lỗi **Invalid Configuration** vì bạn chưa trỏ DNS. Hãy làm như sau:
+
+* **Bước 8:** Quay lại Cloudflare Dashboard, chọn domain của bạn.
+* **Bước 9:** Tìm đến mục **DNS** > **Records**.
+* **Bước 10:** Thêm 2 bản ghi quan trọng sau đây:
+
+### Bản ghi A (Cho domain gốc)
+
+Thông tin này được Vercel cung cấp tại bước 7.
+
+| Type | Name | IPv4 address | Proxy status |
+| --- | --- | --- | --- |
+| **A** | `@` | *IP từ Vercel (ví dụ: 76.76.21.21)* | **DNS only (Tắt mây màu cam)** |
+
+### Bản ghi CNAME (Cho subdomain www)
+
+| Type | Name | Target | Proxy status |
+| --- | --- | --- | --- |
+| **CNAME** | `www` | `cname.vercel-dns.com` | **DNS only (Tắt mây màu cam)** |
+
+> **Lưu ý cực kỳ quan trọng:** Bạn phải tắt **Proxy status** (chuyển từ màu cam sang màu xám - DNS Only). Nếu bật Proxy, Vercel có thể sẽ không xác thực được chứng chỉ SSL và báo lỗi cấu hình mãi mãi.
+
+---
+
+## 4. Kiểm tra kết quả
+
+* Đợi khoảng 1-5 phút để hệ thống DNS toàn cầu cập nhật (DNS Propagation).
+* Quay lại tab Domains trên Vercel. Khi bạn thấy dòng chữ **Active** màu xanh hiện lên bên cạnh tên miền, nghĩa là bạn đã thành công!
+* Bây giờ, hãy truy cập vào `aidenthenotorious.com`, dự án của bạn đã sẵn sàng phục vụ độc giả.
+
+---
+
+## Tổng kết & Lưu ý
+
+Việc kết hợp này giúp bạn tận dụng được hạ tầng mạnh mẽ của Vercel và khả năng quản lý DNS tin cậy của Cloudflare.
+
+**Một mẹo nhỏ:** Sau khi Vercel đã xác thực thành công và cấp chứng chỉ SSL (thường mất vài phút sau khi Active), bạn có thể thử bật lại Proxy (mây cam) trên Cloudflare nếu muốn sử dụng thêm các tính năng bảo mật như DDoS Protection hoặc CDN của Cloudflare. Tuy nhiên, nếu xảy ra lỗi SSL, hãy ưu tiên để chế độ "DNS Only".

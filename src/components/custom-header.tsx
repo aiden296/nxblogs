@@ -1,17 +1,15 @@
-import React from 'react';
-import Logo from "@/components/logo";
+import React from 'react'
+import Logo from '@/components/logo'
 
 const CustomHeader = async () => {
-    return (
-        <div className="custom-header flex items-center justify-between mb-10">
-            <div className="flex items-center gap-2">
-                <Logo/>
-                <span className="font-bold">Felix</span>
-            </div>
+  return (
+    <div className="custom-header flex items-center justify-between mb-10">
+      <div className="flex items-center gap-2">
+        <Logo />
+        <span className="font-bold">Aiden Tran</span>
+      </div>
+    </div>
+  )
+}
 
-
-        </div>
-    );
-};
-
-export default CustomHeader;
+export default CustomHeader

@@ -1,0 +1,101 @@
+---
+title: 'Load Balancer: Chọn ALB "Thông Minh" hay NLB "Thần Tốc"? Đừng để ngân sách hạ tầng "bốc hơi" vô ích!'
+date: '2026-01-02'
+tags: ['devops', 'aws']
+enableComment: true
+---
+
+# Load Balancer: Chọn ALB "Thông Minh" hay NLB "Thần Tốc"? Đừng để ngân sách hạ tầng "bốc hơi" vô ích!
+
+Trong kiến trúc hệ thống hiện đại, Load Balancer (Bộ cân bằng tải) không chỉ đơn thuần là công cụ phân phối lưu lượng. Nó là "người gác cổng" quyết định độ ổn định, tính bảo mật và quan trọng nhất là **hóa đơn Cloud hàng tháng** của bạn. Tuy nhiên, cuộc chiến giữa việc chọn **Application Load Balancer (ALB)** hay **Network Load Balancer (NLB)** vẫn luôn là bài toán đau đầu của không ít kỹ sư.
+
+Bài viết này sẽ mổ xẻ sự khác biệt và giúp bạn đưa ra lựa chọn kinh tế nhất cho hệ thống của mình.
+
+---
+
+## 1. Load Balancer là gì?
+
+Về bản chất, Load Balancer đóng vai trò là "trọng tài" giữa người dùng và các server phía sau (backend). Thay vì để client kết nối trực tiếp vào một server cụ thể, họ sẽ đi qua Load Balancer. Tại đây, lưu lượng sẽ được điều phối đến những tài nguyên đang khỏe mạnh và sẵn sàng nhất.
+
+Trong hệ sinh thái AWS, chúng ta có 3 "anh tài" chính:
+
+* **ALB (Layer 7):** Hiểu "ngôn ngữ ứng dụng" (HTTP/HTTPS).
+* **NLB (Layer 4):** Tập trung vào kết nối mạng thuần túy (TCP/UDP/IP).
+* **GLB (Layer 3):** Chuyên dụng để quản lý các thiết bị ảo bên thứ ba (Firewall/IDS).
+
+---
+
+## 2. ALB: "Nàng lễ tân" thông minh
+
+Hoạt động tại **Tầng ứng dụng (Layer 7)**, ALB có khả năng "soi" vào nội dung của các gói tin dữ liệu.
+
+### Điểm mạnh:
+
+* **Điều hướng linh hoạt (Routing):** Có thể điều hướng dựa trên URL (Ví dụ: `/api` thì đẩy vào cụm API, còn `/images` thì đẩy về S3 hoặc Storage).
+* **Bảo mật mức ứng dụng:** Tích hợp sâu với WAF (Web Application Firewall) để chặn các cuộc tấn công như SQL Injection hay XSS.
+* **SSL/TLS Offloading:** Tự động xử lý việc giải mã chứng chỉ bảo mật, giúp giảm tải tính toán cho server backend.
+
+### Điểm yếu:
+
+* **Độ trễ cao hơn:** Vì phải "mở hộp" gói tin để kiểm tra nội dung, ALB tốn nhiều thời gian xử lý hơn (tính bằng mili giây - ms).
+* **IP động (Dynamic IP):** Địa chỉ IP của ALB thay đổi thường xuyên. Đây là "cơn ác mộng" nếu đối tác của bạn yêu cầu một IP tĩnh để cấu hình Whitelist.
+
+> **Dùng khi nào?** Web App, Microservices, các hệ thống cần chia tách traffic theo đường dẫn (path-based) hoặc tên miền (host-based).
+
+---
+
+## 3. NLB: "Đường ống" siêu tốc
+
+Hoạt động tại **Tầng truyền tải (Layer 4)**, NLB cực kỳ tối giản: nó chỉ nhìn vào IP và Cổng (Port), sau đó đẩy gói tin đi ngay lập tức.
+
+### Điểm mạnh:
+
+* **Hiệu năng cực khủng:** Có khả năng xử lý hàng triệu request mỗi giây với độ trễ cực thấp (tính bằng micro giây - μs).
+* **Địa chỉ IP tĩnh (Static IP):** Cung cấp một Elastic IP cố định, cực kỳ dễ dàng khi làm việc với Firewall của doanh nghiệp.
+* **Giữ nguyên IP gốc (Source IP Preservation):** Server backend sẽ thấy trực tiếp IP của khách hàng mà không cần cấu hình header phức tạp.
+
+### Điểm yếu:
+
+* **Kém "thông minh":** Nó không quan tâm bạn đang truy cập trang web nào; nó chỉ biết đẩy dữ liệu từ cổng này sang cổng kia.
+* **Hạn chế tính năng bảo mật:** Không thể chặn các cuộc tấn công ẩn sâu trong nội dung web (Layer 7).
+
+> **Dùng khi nào?** Game online (UDP), hệ thống tài chính cần độ trễ bằng 0, IoT (MQTT), hoặc các kết nối B2B yêu cầu IP tĩnh.
+
+---
+
+## 4. Hiệu năng vs Chi phí: Bạn có đang "lạm dụng" ALB?
+
+Nhiều kỹ sư có thói quen "tiện tay" chọn ALB vì sự đa năng của nó. Nhưng hãy nhìn vào thực tế:
+
+### Về Hiệu năng:
+
+ALB thực hiện cơ chế **"Connection Termination"** (ngắt kết nối từ client và tạo một kết nối mới tới backend). Ngược lại, NLB chỉ đơn giản là **"Forward"** (chuyển tiếp) gói tin. Điều này giúp NLB bền bỉ hơn hẳn khi gặp các đợt traffic tăng đột biến (như Flash Sale).
+
+### Về Chi phí:
+
+Dù phí duy trì theo giờ là tương đương, nhưng phí xử lý dữ liệu (Capacity Units) lại là một câu chuyện khác:
+
+* **ALB (LCU):** Tính phí dựa trên số lượng rule điều hướng, xử lý SSL và băng thông.
+* **NLB (NLCU):** Chủ yếu tính phí dựa trên băng thông và số lượng kết nối.
+
+> **Mẹo từ chuyên gia:** Với các hệ thống nặng về dữ liệu (Video Streaming, Big Data), việc chuyển từ ALB sang NLB có thể giúp bạn tiết kiệm từ **30-50%** hóa đơn Load Balancer.
+
+---
+
+## 5. Bảng so sánh nhanh: Nên chọn cái nào?
+
+| Tiêu chí | Chọn ALB nếu... | Chọn NLB nếu... |
+| --- | --- | --- |
+| **Giao thức** | Chỉ dùng HTTP/HTTPS. | Dùng TCP, UDP, TLS, hoặc MQTT. |
+| **Tính linh hoạt** | Cần chia traffic theo `/v1` hay `/v2`. | Chỉ cần đẩy vào một nhóm server cố định. |
+| **IP tĩnh** | Không quan trọng. | Bắt buộc phải có để đối tác Whitelist. |
+| **Tốc độ** | Độ trễ tiêu chuẩn là ổn. | Cần độ trễ "gần như bằng 0" (Real-time). |
+| **Chi phí** | Traffic trung bình, logic phức tạp. | Traffic cực lớn, tối ưu lợi nhuận. |
+
+---
+
+## Lời kết
+
+Đừng chọn Load Balancer chỉ vì nó "thông minh". Hãy chọn dựa trên đặc thù traffic và yêu cầu bảo mật của bạn. Nếu bạn cần sự linh hoạt, **ALB là vua**. Nhưng nếu bạn cần sức mạnh cơ bắp, IP tĩnh và sự tối ưu chi phí ở quy mô lớn, đừng ngần ngại chọn **NLB**.
+
+**Bạn đang sử dụng loại Load Balancer nào cho hệ thống của mình? Hãy chia sẻ bên dưới nhé!**

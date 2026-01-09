@@ -1,0 +1,92 @@
+---
+title: 'Hành trình "nhập môn" AWS: Từ hạ tầng toàn cầu đến tư duy bảo mật với IAM'
+date: '2026-01-10'
+tags: ['devops', 'aws', 'SAA']
+enableComment: true
+---
+
+# Hành trình "nhập môn" AWS: Từ hạ tầng toàn cầu đến tư duy bảo mật với IAM
+
+Chào mọi người, mình đang trong quá trình "cày cuốc" AWS và nhận ra rằng, trước khi chạm tay vào những dịch vụ phức tạp, việc hiểu rõ **Hạ tầng (Infrastructure)** và **Quản lý định danh (IAM)** là bước đệm quan trọng nhất.
+
+Hôm nay, mình xin chia sẻ lại những "note" tâm đắc mà mình đã đúc kết được. Hy vọng nó sẽ giúp ích cho các bạn cũng đang bắt đầu như mình!
+
+---
+
+## 1. AWS "phủ sóng" thế giới như thế nào?
+
+Để hiểu về AWS, trước hết phải hiểu cách họ xây dựng "đế chế" phần cứng của mình.
+
+### Region & Availability Zones (AZ)
+
+Mỗi **Region** (vùng địa lý) của AWS thường có tối thiểu **3 AZ** (và tối đa là 6).
+
+* **AZ là gì?** Mỗi AZ gồm một hoặc nhiều trung tâm dữ liệu (Data Center) riêng biệt.
+* **Tại sao cần nhiều AZ?** Mục tiêu cốt lõi là **High Availability (Tính sẵn sàng cao)**. Các AZ hoạt động độc lập, cách nhau một khoảng cách vật lý đủ để nếu một AZ gặp sự cố (thiên tai, mất điện), các AZ còn lại vẫn đứng vững.
+* **Kết nối:** Dù tách biệt, nhưng các AZ trong cùng 1 Region được nối với nhau bằng mạng lưới băng thông cực cao và độ trễ siêu thấp.
+
+### Point of Presence (Edge Location)
+
+Nếu bạn từng nghe về CDN (Content Delivery Network), thì đây chính là nó. Với hơn 400 điểm tại 90 thành phố, Edge Location giúp đưa nội dung đến gần người dùng nhất có thể, giảm thiểu độ trễ (latency).
+
+> **Lưu ý nhỏ:** Không phải dịch vụ nào cũng có mặt ở mọi Region. Và hãy nhớ kiểm tra Region trên Console, vì EC2 bạn tạo ở Mỹ sẽ không thấy xuất hiện khi bạn đang chọn vùng Singapore đâu nhé!
+
+---
+
+## 2. IAM - "Người gác cổng" tận tụy
+
+IAM (Identity and Access Management) là nơi bạn quản lý ai có thể làm gì trên hệ thống của mình.
+
+### Root Account: "Quyền năng tối thượng"
+
+Khi vừa tạo tài khoản, bạn có **Root Account**. Lời khuyên xương máu là: **Đừng bao giờ dùng Root Account cho công việc hằng ngày.** Hãy dùng nó để tạo một User admin riêng cho mình, thiết lập MFA (Multi-Factor Authentication) và cất "chiếc chìa khóa" Root này vào tủ kính.
+
+### User, Group và Policies
+
+* **User:** Đại diện cho một người hoặc một ứng dụng.
+* **Group:** Tập hợp các User. Một User có thể thuộc nhiều Group, nhưng Group thì không thể chứa Group khác.
+* **Policies:** Các tài liệu JSON định nghĩa quyền hạn.
+* **Nguyên tắc Least Privilege:** Đây là "kim chỉ nam" trong bảo mật. Chỉ cấp vừa đủ quyền để một người làm việc, không thừa, không thiếu. Đừng biến tài khoản của nhân viên thực tập thành Admin — đó là một thảm họa tiềm ẩn!
+
+---
+
+## 3. Thay đổi tư duy: Từ "Long-term" sang "Temporary" Credentials
+
+Đây là phần mình thấy hay nhất khi tìm hiểu sâu về IAM.
+
+### Cách tiếp cận truyền thống (Cũ)
+
+Chúng ta thường tạo IAM User, lấy **Access Key & Secret Key** rồi dán vào file `.env`.
+
+* **Nguy cơ:** Nếu bạn lỡ tay push file này lên GitHub, coi như bạn tặng ví tiền của mình cho hacker. Những key này có thời hạn vĩnh viễn cho đến khi bạn xóa chúng.
+
+### Cách tiếp cận hiện đại: IAM Identity Center (SSO)
+
+AWS khuyến nghị dùng **IAM Identity Center**. Thay vì giữ một chiếc chìa khóa vĩnh viễn, bạn đăng nhập qua một Portal, nhận một **Temporary Credential** (chỉ có tác dụng trong 1-12 tiếng).
+
+* **Với Developer:** Thay vì lưu Key cố định, hãy dùng lệnh `aws sso login`. SDK sẽ tự động hiểu và lấy quyền truy cập mà không cần lưu trữ thông tin nhạy cảm trong code.
+
+### IAM Role: Chìa khóa cho các dịch vụ
+
+Đừng đưa Access Key cho một con EC2 để nó truy cập S3. Hãy gán cho nó một **IAM Role**. Role giống như một chiếc "mặt nạ" mà dịch vụ có thể đeo vào để thực hiện tác vụ một cách an toàn.
+
+---
+
+## 4. Làm sao để biết hệ thống của mình đang an toàn?
+
+AWS cung cấp cho chúng ta hai công cụ "soi" lỗi cực kỳ hữu hiệu:
+
+1. **IAM Credentials Report:** Một bản báo cáo tổng thể cấp độ tài khoản, cho biết ai đang dùng gì, key nào đã quá hạn chưa đổi.
+2. **IAM Access Advisor:** Xem một User thực tế đã dùng những quyền nào trong bao lâu. Nếu một quyền được cấp nhưng 6 tháng rồi không dùng tới? Hãy thu hồi nó ngay (Least Privilege mà lị!).
+
+---
+
+## Tổng kết: Checklist "Sống còn" cho người mới
+
+- Không dùng Root Account.
+- Bật MFA cho mọi tài khoản.
+- Ưu tiên dùng IAM Role và IAM Identity Center.
+- Áp dụng triệt để nguyên tắc Least Privilege.
+- Kiểm tra quyền hạn định kỳ bằng Access Advisor.
+
+Học AWS không chỉ là học về công nghệ, mà là học về **tư duy hệ thống và bảo mật**. Hy vọng những ghi chép này giúp các bạn có cái nhìn tổng quan hơn về những viên gạch đầu tiên của đám mây AWS!

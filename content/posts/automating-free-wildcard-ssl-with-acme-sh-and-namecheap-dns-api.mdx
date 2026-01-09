@@ -1,0 +1,126 @@
+---
+title: 'Tự động hóa SSL Wildcard miễn phí với acme.sh và Namecheap DNS API'
+date: '2025-05-02'
+tags: ['devops']
+enableComment: true
+---
+
+# Tự động hóa SSL Wildcard miễn phí với acme.sh và Namecheap DNS API
+
+Vì công ty mình đang sử dụng Namecheap làm nhà cung cấp DNS nên mình muốn chia sẻ quy trình cụ thể này. Tuy nhiên, các bạn dùng nhà cung cấp khác cũng đừng lo, vì `acme.sh` hỗ trợ hơn 100 nhà cung cấp DNS khác nhau như Cloudflare, Google Cloud hay Azure.
+
+Việc quản lý SSL thủ công luôn là "nỗi đau" âm ỉ đối với các kỹ sư devops, đặc biệt là khi chứng chỉ Let's Encrypt cứ 90 ngày lại hết hạn một lần. Hôm nay, mình sẽ hướng dẫn các bạn cách tự động hóa hoàn toàn vòng đời của SSL: **Cấp mới -> Cài đặt -> Tự động gia hạn** cho Wildcard SSL (SSL cho tên miền đại diện) bằng công cụ `acme.sh`.
+
+---
+
+## 1. Tại sao lại chọn acme.sh?
+
+So với công cụ Certbot phổ biến, `acme.sh` có những ưu điểm vượt trội mà mình rất thích:
+
+* **Cực kỳ nhẹ:** Nó hoàn toàn là script shell thuần túy, không phụ thuộc vào Python hay bất kỳ thư viện cồng kềnh nào.
+* **Hỗ trợ cực rộng:** Tích hợp với hơn 100 nhà cung cấp DNS qua API.
+* **Xử lý Wildcard siêu dễ:** Đơn giản hóa quá trình tạo chứng chỉ cho cả tên miền gốc và tất cả các subdomains (ví dụ: `*.domain.com`).
+
+---
+
+## 2. Điều kiện cần chuẩn bị
+
+Để sử dụng phương thức **DNS-01 Challenge** (bắt buộc đối với Wildcard SSL), bạn cần:
+
+1. **Tài khoản Namecheap:** Phải được bật quyền truy cập API.
+> *Lưu ý:* Namecheap yêu cầu số dư tài khoản tối thiểu $50 hoặc có lịch sử chi tiêu nhất định để mở tính năng này.
+
+
+2. **API Credentials:** Bao gồm API Key và Username của bạn.
+3. **Whitelist IP:** Bạn phải thêm địa chỉ IP Public của server chạy `acme.sh` vào danh sách trắng trong bảng điều khiển API của Namecheap.
+
+---
+
+## 3. Các bước triển khai chi tiết
+
+### Bước 1: Cấu hình biến môi trường
+
+Đầu tiên, bạn cần khai báo thông tin API để `acme.sh` có thể tự động tạo các bản ghi TXT phục vụ việc xác thực DNS.
+
+```bash
+export NAMECHEAP_USERNAME="your_username"
+export NAMECHEAP_API_KEY="your_api_key"
+# Cực kỳ quan trọng: Namecheap yêu cầu Source IP để bảo mật API
+export NAMECHEAP_SOURCEIP="your_server_ip"
+
+```
+
+> **Kinh nghiệm xương máu:** Nếu bạn quên `NAMECHEAP_SOURCEIP`, quá trình sẽ thất bại ngay lập tức vì API của Namecheap sẽ từ chối các yêu cầu từ nguồn chưa được xác thực.
+
+### Bước 2: Cấp chứng chỉ SSL Wildcard
+
+Chạy câu lệnh sau để bắt đầu quá trình xác thực và cấp bằng. Ở đây mình dùng Let's Encrypt làm CA (Certificate Authority).
+
+```bash
+acme.sh --issue \
+  --dns dns_namecheap \
+  -d aidenthenotorious.com -d *.aidenthenotorious.com \
+  --server letsencrypt
+
+```
+
+**Giải thích câu lệnh:**
+
+* `--dns dns_namecheap`: Sử dụng script riêng cho Namecheap để tự động tạo bản ghi TXT.
+* `-d aidenthenotorious.com -d *.aidenthenotorious.com`: Đăng ký cho cả domain gốc và tất cả subdomain.
+* `--server letsencrypt`: Chỉ định dùng Let's Encrypt (vì mặc định hiện tại `acme.sh` dùng ZeroSSL).
+
+### Bước 3: Xác thực DNS
+
+Sau khi chạy lệnh, `acme.sh` sẽ thêm các bản ghi TXT vào DNS của bạn. Hệ thống thường đợi khoảng 20 giây để DNS được cập nhật trên toàn cầu. Khi thấy thông báo `Success`, chứng chỉ của bạn đã được lưu tại: `~/.acme.sh/aidenthenotorious.com_ecc/`.
+
+---
+
+## 4. Tự động gia hạn (Auto-Renew)
+
+Sức mạnh thực sự của `acme.sh` nằm ở khả năng tự quản lý Cronjob để kiểm tra và gia hạn chứng chỉ trước khi chúng hết hạn.
+
+### Thiết lập Cronjob và Tự động Load lại Nginx
+
+Để tránh việc phải khởi động lại Web Server thủ công mỗi khi chứng chỉ cập nhật, bạn hãy dùng lệnh sau:
+
+```bash
+acme.sh --install-cronjob --reloadcmd "sudo systemctl reload nginx"
+
+```
+
+**Lệnh này có tác dụng gì?**
+
+1. **Lập lịch:** Tạo một Cronjob chạy hàng ngày.
+2. **Kiểm tra:** Nếu chứng chỉ sắp hết hạn, nó sẽ tự động chạy lại lệnh cấp mới.
+3. **Hot Reload:** Sau khi gia hạn thành công, nó sẽ kích hoạt `reload nginx` để áp dụng chứng chỉ mới mà không làm ngắt kết nối của người dùng.
+
+---
+
+## 5. Kết quả đạt được
+
+Sau khi hoàn tất, bạn sẽ có các file quan trọng trong thư mục:
+
+* **Cert:** `aidenthenotorious.com.cer`
+* **Key:** `aidenthenotorious.com.key`
+* **Fullchain:** `fullchain.cer` (**Lưu ý:** Luôn dùng file này cho cấu hình Nginx của bạn).
+
+### Cấu hình Nginx tham khảo:
+
+```nginx
+ssl_certificate /home/username/.acme.sh/aidenthenotorious.com_ecc/fullchain.cer;
+ssl_certificate_key /home/username/.acme.sh/aidenthenotorious.com_ecc/aidenthenotorious.com.key;
+
+```
+
+---
+
+## Lời kết
+
+Với bộ đôi `acme.sh` và Namecheap API, việc quản lý SSL giờ đây chỉ còn là nhiệm vụ "thiết lập một lần và quên nó đi". Hệ thống sẽ tự vận hành bền bỉ mà bạn không cần phải lo lắng về việc trang web bị cảnh báo "không an toàn" nữa.
+
+**Cảnh báo bảo mật cuối cùng:** Hãy luôn bảo vệ các file môi trường chứa API Key của bạn. Nếu để lộ những thông tin này, kẻ tấn công có thể chiếm quyền điều khiển toàn bộ bản ghi DNS của bạn đấy!
+
+---
+
+*Bạn có đang sử dụng công cụ nào khác để quản lý SSL không? Hãy chia sẻ với mình ở phần bình luận nhé!*

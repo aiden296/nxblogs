@@ -1,0 +1,93 @@
+---
+title: 'Đơn giản hóa việc đăng nhập SSH với file cấu hình tiện lợi'
+date: '2026-01-05'
+tags: ['protips']
+enableComment: true
+---
+
+Nếu bạn thường xuyên phải làm việc với các server từ xa, việc gõ đi gõ lại những dòng lệnh SSH dài loằng ngoằng kèm theo địa chỉ IP và đường dẫn file Key mỗi lần đăng nhập quả thực là một cực hình.
+
+Hôm nay, mình sẽ chia sẻ một mẹo nhỏ nhưng cực kỳ "có võ": Sử dụng SSH Configuration File để biến những câu lệnh phức tạp thành một cái tên ngắn gọn, dễ nhớ!
+
+## 1. File Config SSH là gì?
+
+Thay vì phải nhớ IP, Username và Port của từng server, bạn có thể lưu tất cả chúng vào một file cấu hình duy nhất. Cách này hoạt động hoàn hảo trên **MacOS** và **Linux**. Với **Windows**, bạn có thể áp dụng tương tự nếu đang dùng OpenSSH (có sẵn trên PowerShell hoặc Command Prompt đời mới).
+
+---
+
+## 2. Cách thiết lập cực kỳ đơn giản
+
+### Bước 1: Mở (hoặc tạo) file config
+
+Mở terminal của bạn và gõ lệnh sau để chỉnh sửa file cấu hình SSH (file này nằm trong thư mục ẩn `.ssh` tại thư mục Home của bạn):
+
+```bash
+nano ~/.ssh/config
+
+```
+
+*(Bạn cũng có thể dùng `vim`, `code` hoặc bất kỳ trình soạn thảo nào bạn thích).*
+
+### Bước 2: Thêm thông tin Server
+
+Dán đoạn cấu hình dưới đây vào file:
+
+```plaintext
+Host email-server
+    HostName 123.456.78.90
+    User ec2-user
+    IdentityFile ~/.ssh/my-key-pair.pem
+
+```
+
+**Trong đó:**
+
+* **`Host`**: Biệt danh bạn tự đặt (ví dụ: `email-server`, `web-prod`, `db`). Đây là tên bạn sẽ dùng để đăng nhập.
+* **`HostName`**: Địa chỉ IP Public hoặc tên miền của server.
+* **`User`**: Tên người dùng để đăng nhập (ví dụ: `root`, `ubuntu`, `ec2-user`).
+* **`IdentityFile`**: Đường dẫn dẫn đến file Private Key (`.pem` hoặc `.pub`) của bạn.
+
+### Bước 3: Lưu và thoát
+
+Nếu dùng `nano`, hãy nhấn `Ctrl + O` rồi `Enter` để lưu, và `Ctrl + X` để thoát.
+
+---
+
+## 3. Điều chỉnh quyền truy cập (Quan trọng)
+
+Để đảm bảo tính bảo mật và tránh các lỗi "Permission denied" từ SSH, bạn cần thiết lập quyền chỉ cho phép tài khoản của bạn được đọc file này:
+
+```bash
+chmod 600 ~/.ssh/config
+
+```
+
+---
+
+## 4. Kết quả: Đăng nhập trong 1 giây!
+
+Bây giờ, thay vì phải gõ một dòng lệnh "khổ sai" như thế này:
+
+```bash
+ssh -i ~/.ssh/my-key-pair.pem ec2-user@123.456.78.90
+
+```
+
+Bạn chỉ cần gõ duy nhất:
+
+```bash
+ssh email-server
+
+```
+
+**Thế là xong!** Bạn đã có mặt trong server của mình chỉ sau một cái chớp mắt. 🎉
+
+---
+
+## Tại sao bạn nên làm việc này ngay lập tức?
+
+* **Tiết kiệm thời gian ⏳**: Không còn phải đi copy-paste IP hay tìm đường dẫn file Key.
+* **Tránh sai sót 🚀**: Không lo gõ nhầm IP hay sai Username.
+* **Quản lý chuyên nghiệp 🔥**: Khi danh sách server lên tới 5-10 cái, file config này sẽ là "cứu cánh" giúp bạn quản lý mọi thứ cực kỳ ngăn nắp.
+
+Hãy thử ngay và nâng cấp quy trình làm việc của bạn nhé!
