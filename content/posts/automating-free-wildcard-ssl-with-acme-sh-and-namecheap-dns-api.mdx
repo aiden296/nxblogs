@@ -1,7 +1,7 @@
 ---
 title: 'Tự động hóa SSL Wildcard miễn phí với acme.sh và Namecheap DNS API'
 date: '2025-05-02'
-tags: ['devops']
+tags: ['Devops']
 enableComment: true
 ---
 
@@ -9,7 +9,7 @@ enableComment: true
 
 Vì công ty mình đang sử dụng Namecheap làm nhà cung cấp DNS nên mình muốn chia sẻ quy trình cụ thể này. Tuy nhiên, các bạn dùng nhà cung cấp khác cũng đừng lo, vì `acme.sh` hỗ trợ hơn 100 nhà cung cấp DNS khác nhau như Cloudflare, Google Cloud hay Azure.
 
-Việc quản lý SSL thủ công luôn là "nỗi đau" âm ỉ đối với các kỹ sư devops, đặc biệt là khi chứng chỉ Let's Encrypt cứ 90 ngày lại hết hạn một lần. Hôm nay, mình sẽ hướng dẫn các bạn cách tự động hóa hoàn toàn vòng đời của SSL: **Cấp mới -> Cài đặt -> Tự động gia hạn** cho Wildcard SSL (SSL cho tên miền đại diện) bằng công cụ `acme.sh`.
+Việc quản lý SSL thủ công luôn là "nỗi đau" âm ỉ đối với các kỹ sư Devops, đặc biệt là khi chứng chỉ Let's Encrypt cứ 90 ngày lại hết hạn một lần. Hôm nay, mình sẽ hướng dẫn các bạn cách tự động hóa hoàn toàn vòng đời của SSL: **Cấp mới -> Cài đặt -> Tự động gia hạn** cho Wildcard SSL (SSL cho tên miền đại diện) bằng công cụ `acme.sh`.
 
 ---
 

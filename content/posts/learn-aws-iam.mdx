@@ -1,7 +1,7 @@
 ---
 title: 'Hành trình "nhập môn" AWS: Từ hạ tầng toàn cầu đến tư duy bảo mật với IAM'
 date: '2026-01-10'
-tags: ['devops', 'aws', 'SAA']
+tags: ['Devops', 'AWS', 'SAA', 'SAP']
 enableComment: true
 ---
 
@@ -62,9 +62,10 @@ Chúng ta thường tạo IAM User, lấy **Access Key & Secret Key** rồi dán
 
 ### Cách tiếp cận hiện đại: IAM Identity Center (SSO)
 
-AWS khuyến nghị dùng **IAM Identity Center**. Thay vì giữ một chiếc chìa khóa vĩnh viễn, bạn đăng nhập qua một Portal, nhận một **Temporary Credential** (chỉ có tác dụng trong 1-12 tiếng).
+Theo AWS Well-Architected, AWS khuyến nghị dùng **IAM Identity Center**. Thay vì giữ một chiếc chìa khóa vĩnh viễn, bạn đăng nhập qua một Portal, nhận một **Temporary Credential** (chỉ có tác dụng trong 1-12 tiếng).
 
-* **Với Developer:** Thay vì lưu Key cố định, hãy dùng lệnh `aws sso login`. SDK sẽ tự động hiểu và lấy quyền truy cập mà không cần lưu trữ thông tin nhạy cảm trong code.
+* **Với Developer:** Thay vì lưu Key cố định, hãy dùng lệnh `aws sso login` mỗi ngày một lần trước khi code (nhớ tăng thời gian hết hạn của **Temporary Credential** lên 12 tiếng để tránh việc gián đoạn trong quá trình deep work, mặc định là 1 tiếng). SDK sẽ tự động hiểu và lấy quyền truy cập mà không cần lưu trữ thông tin nhạy cảm trong code.
+* **Với Production-ready app:** Hãy gán IAM Role với least permissions trực tiếp cho service đang triển khai ứng dụng đó. Hoặc thông qua các IAC như cloudformation.
 
 ### IAM Role: Chìa khóa cho các dịch vụ
 
