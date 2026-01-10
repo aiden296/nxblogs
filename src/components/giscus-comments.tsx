@@ -7,17 +7,16 @@ const GiscusComments = () => {
   return (
     <Giscus
       id="comments"
-      repo="phucbm/nextra-blog-starter"
-      repoId="R_kgDONxvZHA"
+      repo="aiden296/nxblogs"
+      repoId="R_kgDOQ26JqQ"
       category="Announcements"
-      categoryId="DIC_kwDONxvZHM4Cmh3a"
+      categoryId="DIC_kwDOQ26Jqc4C0yiy"
       mapping="pathname"
-      term="Welcome to @giscus/react component!"
       reactionsEnabled="1"
       emitMetadata="0"
       inputPosition="top"
       theme="preferred_color_scheme"
-      lang="en"
+      lang="vi"
       loading="lazy"
     />
   )
