@@ -1,0 +1,269 @@
+---
+title: 'AWS EC2 Instance Purchasing Options: Nghệ thuật trả giá'
+date: '2026-01-12'
+tags: ['Devops', 'AWS', 'SAA', 'SAP', 'Cost Optimization']
+enableComment: true
+---
+
+# AWS EC2 Instance Purchasing Options: Nghệ thuật trả giá
+
+Khi bắt đầu với EC2, nhiều người thường chỉ biết đến On-Demand Instances - cách đơn giản nhất là "bật máy lên và trả tiền". Nhưng thực tế, AWS cung cấp đến **6 loại hình thức mua Instance** khác nhau, mỗi loại đều có ưu nhược điểm riêng và phù hợp với từng tình huống cụ thể.
+
+Hiểu rõ các lựa chọn này không chỉ giúp bạn tiết kiệm chi phí đáng kể (có thể lên đến 90%) mà còn là kiến thức bắt buộc để vượt qua kỳ thi **AWS Certified Solutions Architect Associate (SAA)**.
+
+Hãy cùng mình khám phá "nghệ thuật trả giá" trong thế giới EC2!
+
+---
+
+## 1. On-Demand Instances (Theo yêu cầu)
+
+Đây là cách sử dụng cơ bản nhất, giống như việc bạn vào một khách sạn và thuê phòng đúng giá niêm yết.
+
+### Cơ chế hoạt động
+
+* **Thanh toán:** Trả tiền theo giây (với Linux/Windows) hoặc theo giờ (các OS khác) cho những gì bạn thực tế sử dụng.
+* **Billing chi tiết:**
+  * Đối với hệ điều hành Linux hoặc Windows: Billing per second, sau phút đầu tiên (first minute).
+  * Đối với các OS khác: Billing per hour.
+
+### Ưu điểm
+
+* Không cần cam kết dài hạn, không cần trả trước.
+* Linh hoạt tối đa - bật/tắt bất cứ lúc nào.
+* Không có rủi ro bị gián đoạn đột ngột.
+
+### Nhược điểm
+
+* Chi phí cao nhất trong các loại Instance purchasing options.
+
+### Phù hợp nhất
+
+* Các công việc ngắn hạn, không được phép gián đoạn.
+* Các ứng dụng mới triển khai, chưa dự đoán được mức độ tải.
+* Môi trường development và testing.
+* Ứng dụng có traffic không ổn định, khó dự đoán.
+
+---
+
+## 2. Reserved Instances - RI (Instance đặt trước)
+
+Giống như việc bạn ký hợp đồng thuê phòng khách sạn trong 1 hoặc 3 năm để nhận chiết khấu lớn.
+
+### Cơ chế hoạt động
+
+* **Cam kết:** Bạn cam kết sử dụng một loại Instance cụ thể trong thời hạn **1 năm** hoặc **3 năm**.
+* **Mức giảm giá:** Lên tới **72%** so với On-Demand.
+
+### Các tùy chọn thanh toán
+
+AWS cung cấp 3 phương thức thanh toán, và càng trả trước nhiều, mức giảm giá càng sâu:
+
+1. **All Upfront (Trả trước toàn bộ):** Giảm giá cao nhất.
+2. **Partial Upfront (Trả trước một phần):** Cân bằng giữa giảm giá và dòng tiền.
+3. **No Upfront (Không trả trước):** Linh hoạt nhất nhưng giảm giá thấp nhất.
+
+### Phân loại Reserved Instances
+
+#### Standard RI
+
+* **Đặc điểm:** Giảm giá nhiều nhất (lên tới 72%).
+* **Hạn chế:** Ít linh hoạt - không thể thay đổi loại Instance, hệ điều hành, hoặc tenancy sau khi mua.
+* **Phù hợp:** Ứng dụng có yêu cầu cố định, không thay đổi trong thời gian dài.
+
+#### Convertible RI
+
+* **Đặc điểm:** Cho phép thay đổi loại Instance, hệ điều hành, tenancy trong suốt thời hạn cam kết.
+* **Mức giảm giá:** Thấp hơn Standard RI (khoảng **66%**).
+* **Phù hợp:** Ứng dụng có thể cần thay đổi cấu hình trong tương lai nhưng vẫn muốn tiết kiệm chi phí.
+
+### Phù hợp nhất
+
+* Các ứng dụng chạy ổn định, liên tục (Steady-state workloads).
+* Database servers.
+* Web servers có traffic ổn định.
+* Bất kỳ ứng dụng nào bạn chắc chắn sẽ chạy ít nhất 1-3 năm.
+
+---
+
+## 3. Savings Plans
+
+Đây là mô hình hiện đại hơn RI, tập trung vào số tiền chi tiêu thay vì loại máy chủ cụ thể.
+
+### Cơ chế hoạt động
+
+* **Cam kết:** Bạn cam kết chi tiêu một số tiền nhất định (ví dụ: $10/giờ) trong **1 năm** hoặc **3 năm**.
+* **Phạm vi áp dụng:** Áp dụng cho bất kỳ Instance nào trong cùng Region, miễn là nằm trong mức chi tiêu đã cam kết.
+
+### Ưu điểm vượt trội
+
+* **Linh hoạt cực cao:** Bạn có thể:
+  * Thay đổi kích thước máy chủ (ví dụ: từ m5.xlarge sang m5.2xlarge).
+  * Thay đổi hệ điều hành (ví dụ: từ Linux sang Windows).
+  * Thay đổi Instance family (ví dụ: từ General Purpose sang Compute Optimized).
+  * Thay đổi Region (với một số điều kiện).
+* **Mức giảm giá:** Tương đương RI (khoảng **72%**).
+* **Tự động áp dụng:** AWS tự động áp dụng Savings Plan cho các Instance phù hợp, bạn không cần quản lý thủ công.
+
+### Phân loại Savings Plans
+
+#### EC2 Instance Savings Plans
+
+* Áp dụng cho EC2 Instances.
+* Linh hoạt về Instance family, size, OS, tenancy, và Region.
+
+#### Compute Savings Plans
+
+* Áp dụng rộng hơn: EC2, Lambda, Fargate.
+* Linh hoạt nhất - có thể chuyển đổi giữa các dịch vụ.
+
+### Phù hợp nhất
+
+* Các hệ thống cần sự linh hoạt về hạ tầng nhưng có mức chi tiêu ổn định dài hạn.
+* Tổ chức có nhiều team sử dụng EC2 với các yêu cầu khác nhau.
+* Khi bạn muốn tiết kiệm chi phí nhưng không chắc chắn về cấu hình Instance cụ thể trong tương lai.
+
+---
+
+## 4. Spot Instances (Instance đấu giá)
+
+Đây là việc tận dụng hạ tầng dư thừa của AWS với giá "thanh lý" - một trong những cách tiết kiệm chi phí hiệu quả nhất.
+
+### Cơ chế hoạt động
+
+* **Đấu giá:** Giá được xác định dựa trên cung và cầu của tài nguyên trống trong AWS.
+* **Giá động:** Giá có thể thay đổi theo thời gian thực, nhưng bạn chỉ trả theo giá tại thời điểm Instance chạy.
+* **Mức giảm giá:** Lên tới **90%** so với On-Demand (Rẻ nhất trong tất cả các loại).
+* **Max Price:** Bạn đặt một giá tối đa sẵn sàng trả. Nếu giá Spot vượt quá max price, Instance sẽ bị terminate.
+
+### Rủi ro quan trọng
+
+* **Spot Instance Interruption:** AWS có thể thu hồi Instance bất cứ lúc nào nếu:
+  * Có khách hàng On-Demand hoặc Reserved Instance cần dùng tài nguyên đó.
+  * Giá Spot vượt quá mức tối đa bạn đặt (max price).
+* **Thông báo trước:** AWS sẽ cảnh báo bạn **2 phút** trước khi thu hồi Instance (Spot Instance Interruption Notice).
+
+### Spot Fleet
+
+* **Định nghĩa:** Spot Fleet là một tập hợp (set) các Spot Instances, có thể kết hợp với On-Demand Instances (optional).
+* **Ưu điểm:** Tự động phân phối workload trên nhiều Instance types và Availability Zones để tối ưu chi phí và giảm rủi ro gián đoạn.
+* **Allocation Strategies:** LowestPrice (tối ưu chi phí), Diversified (giảm rủi ro), CapacityOptimized (tối ưu capacity).
+
+### Lưu ý quan trọng
+
+> **Spot Block đã không còn được AWS hỗ trợ:** Chiến lược Spot Block (cho phép user khóa Spot Instance trong vòng 1-6 tiếng mà không bị gián đoạn) không còn được AWS support nữa. Bạn cần lưu ý điều này khi thiết kế kiến trúc.
+
+> **Không phù hợp cho Stateful Applications:** Spot Instances không phù hợp cho các ứng dụng stateful như database primary nodes, vì interruption có thể gây mất dữ liệu.
+
+### Phù hợp nhất
+
+* Các công việc chịu lỗi tốt (Fault-tolerant workloads).
+* Xử lý theo lô (Batch processing jobs).
+* Phân tích dữ liệu lớn (Big data analytics).
+* Môi trường thử nghiệm và development.
+* Containerized workloads.
+* CI/CD pipelines.
+* Bất kỳ workload nào có thể khôi phục từ checkpoint.
+
+> 💡 **Tìm hiểu sâu hơn:** Nếu bạn muốn tìm hiểu chi tiết về Spot Instances và Spot Fleet, bao gồm cơ chế đấu giá, cách xử lý interruption, allocation strategies, integration với Auto Scaling Groups, và best practices, hãy đọc bài viết chi tiết: **[AWS EC2 Spot Instances và Spot Fleet: Nghệ thuật tận dụng tài nguyên dư thừa](/posts/aws-ec2-spot-instances-and-spot-fleet)**.
+
+* Các công việc chịu lỗi tốt (Fault-tolerant workloads).
+* Xử lý theo lô (Batch processing jobs).
+* Phân tích dữ liệu lớn (Big data analytics).
+* Môi trường thử nghiệm và development.
+* Containerized workloads.
+* CI/CD pipelines.
+* Machine Learning training và inference.
+* Web crawling và data scraping.
+* Bất kỳ workload nào có thể khôi phục từ checkpoint.
+
+---
+
+## 5. Dedicated Hosts & Dedicated Instances
+
+Dành cho các yêu cầu đặc biệt về phần cứng và bảo mật.
+
+### Dedicated Host
+
+* **Định nghĩa:** Bạn thuê nguyên một server vật lý từ AWS.
+* **Quyền kiểm soát:**
+  * Kiểm soát vị trí đặt Instance (Placement control).
+  * Quyền kiểm soát sâu vào server vật lý.
+* **Đặc điểm quan trọng nhất:** Hỗ trợ các loại giấy phép phần mềm (License) tính theo core hoặc socket - **Bring Your Own License (BYOL)**.
+* **Chi phí:** Đắt nhất trong các loại Instance purchasing options.
+
+### Dedicated Instance
+
+* **Định nghĩa:** Instance chạy trên phần cứng dành riêng cho bạn.
+* **Khác biệt với Dedicated Host:**
+  * Bạn không có quyền kiểm soát sâu vào server vật lý như Dedicated Host.
+  * AWS quản lý placement cho bạn.
+* **Đảm bảo:** Tính cách ly (isolation) với các khách hàng khác trên cùng phần cứng.
+
+### Phù hợp nhất
+
+* **Dedicated Host:**
+  * Ứng dụng yêu cầu license phần mềm theo socket/core (ví dụ: SQL Server, Windows Server với Software Assurance).
+  * Yêu cầu compliance nghiêm ngặt.
+  * Cần kiểm soát hoàn toàn về placement.
+
+* **Dedicated Instance:**
+  * Yêu cầu cách ly với các khách hàng khác.
+  * Compliance requirements mà không cần kiểm soát placement.
+  * Ứng dụng không cần BYOL nhưng cần dedicated hardware.
+
+---
+
+## 6. Capacity Reservations (Dự trữ dung lượng)
+
+Không phải là một hình thức giảm giá, mà là hình thức giữ chỗ.
+
+### Cơ chế hoạt động
+
+* **Mục đích:** Bạn đặt trước một lượng Instance tại một **Availability Zone (AZ) cụ thể** để đảm bảo khi cần là có máy chạy ngay.
+* **Chi phí:** Trả theo giá **On-Demand** kể cả khi có dùng máy hay không.
+* **Không giảm giá:** Đây không phải là công cụ để tiết kiệm chi phí, mà là công cụ để đảm bảo capacity.
+
+### Lưu ý quan trọng
+
+* **Kết hợp sử dụng:** Thường dùng kết hợp với **RI** hoặc **Savings Plans** để vừa được giữ chỗ, vừa được giảm giá.
+* **Regional vs Zonal:** 
+  * **Zonal Capacity Reservation:** Dành riêng cho một AZ cụ thể.
+  * **Regional Capacity Reservation:** Linh hoạt hơn, có thể sử dụng trong bất kỳ AZ nào trong Region.
+
+### Phù hợp nhất
+
+* Ứng dụng mission-critical cần đảm bảo capacity tại một thời điểm cụ thể.
+* Compliance requirements yêu cầu đảm bảo capacity.
+* Kết hợp với RI/Savings Plans để tối ưu cả cost và capacity.
+
+---
+
+## Bảng tóm tắt so sánh nhanh
+
+| Tùy chọn | Mức giảm giá | Thời hạn | Tính chất chính | Phù hợp nhất |
+| --- | --- | --- | --- | --- |
+| **On-Demand** | 0% | Không | Linh hoạt nhất, dùng lúc nào trả lúc đó | Ứng dụng mới, không dự đoán được tải |
+| **Reserved Instances** | Lên tới 72% | 1 hoặc 3 năm | Phù hợp cho ứng dụng chạy ổn định (Steady-state) | Database, Web servers ổn định |
+| **Savings Plans** | Lên tới 72% | 1 hoặc 3 năm | Linh hoạt về cấu hình, cam kết theo số tiền ($) | Hệ thống cần linh hoạt nhưng có chi tiêu ổn định |
+| **Spot Instances** | Lên tới 90% | Không | Rẻ nhất, nhưng có thể bị ngắt quãng đột ngột | Fault-tolerant, Batch jobs, Testing |
+| **Dedicated Host** | Thấp (thậm chí đắt hơn) | Tùy chọn | Thuê nguyên server vật lý, dùng cho giấy phép đặc thù | BYOL requirements, Compliance nghiêm ngặt |
+| **Dedicated Instance** | Thấp | Tùy chọn | Instance trên phần cứng dành riêng | Cần isolation, không cần BYOL |
+| **Capacity Reservations** | 0% | Tùy chọn | Chỉ dùng để giữ chỗ, đảm bảo có máy khi cần | Mission-critical, kết hợp với RI/SP |
+
+---
+
+## Chiến lược kết hợp (Hybrid Approach)
+
+Trong thực tế, bạn không cần chọn một loại duy nhất. AWS khuyến khích sử dụng **chiến lược kết hợp** để tối ưu cả chi phí và hiệu suất:
+
+### Ví dụ chiến lược điển hình
+
+1. **Base workload (60-70%):** Reserved Instances hoặc Savings Plans đối với các ứng dụng chạy ổn định, dự đoán được.
+2. **Variable workload (20-30%):** On-Demand Instances cho mục đích traffic spikes, ứng dụng mới triển khai.
+3. **Fault-tolerant workload (10-20%):** Spot Instances dành cho batch jobs, data processing, testing.
+
+### Lợi ích
+
+* Tối ưu chi phí tổng thể.
+* Đảm bảo availability cho critical workloads.
+* Linh hoạt với các workload không dự đoán được.
