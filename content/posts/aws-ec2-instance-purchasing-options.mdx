@@ -1,7 +1,7 @@
 ---
 title: 'AWS EC2 Instance Purchasing Options: Nghệ thuật trả giá'
 date: '2026-01-12'
-tags: ['Devops', 'AWS', 'SAA', 'SAP', 'Cost Optimization']
+tags: ['Devops', 'AWS', 'SAA', 'SAP']
 enableComment: true
 ---
 
@@ -155,16 +155,6 @@ AWS cung cấp 3 phương thức thanh toán, và càng trả trước nhiều, 
 > **Không phù hợp cho Stateful Applications:** Spot Instances không phù hợp cho các ứng dụng stateful như database primary nodes, vì interruption có thể gây mất dữ liệu.
 
 ### Phù hợp nhất
-
-* Các công việc chịu lỗi tốt (Fault-tolerant workloads).
-* Xử lý theo lô (Batch processing jobs).
-* Phân tích dữ liệu lớn (Big data analytics).
-* Môi trường thử nghiệm và development.
-* Containerized workloads.
-* CI/CD pipelines.
-* Bất kỳ workload nào có thể khôi phục từ checkpoint.
-
-> 💡 **Tìm hiểu sâu hơn:** Nếu bạn muốn tìm hiểu chi tiết về Spot Instances và Spot Fleet, bao gồm cơ chế đấu giá, cách xử lý interruption, allocation strategies, integration với Auto Scaling Groups, và best practices, hãy đọc bài viết chi tiết: **[AWS EC2 Spot Instances và Spot Fleet: Nghệ thuật tận dụng tài nguyên dư thừa](/posts/aws-ec2-spot-instances-and-spot-fleet)**.
 
 * Các công việc chịu lỗi tốt (Fault-tolerant workloads).
 * Xử lý theo lô (Batch processing jobs).
