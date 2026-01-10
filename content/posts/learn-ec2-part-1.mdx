@@ -1,0 +1,102 @@
+---
+title: 'AWS EC2 là gì và cách lựa chọn EC2 Instance Type hợp lý'
+date: '2026-01-11'
+tags: ['Devops', 'AWS', 'SAA', 'SAP']
+enableComment: true
+---
+
+# AWS EC2 là gì và cách lựa chọn EC2 Instance Type hợp lý
+
+## 1. Bản chất của EC2: Không chỉ là một "máy ảo"
+
+Nhiều người biết EC2 là máy ảo, nhưng cơ chế vận hành của nó thì không phải ai cũng nắm rõ:
+
+* **Chia sẻ tài nguyên:** Một EC2 instance thực chất được chạy trên một **máy chủ vật lý** cực lớn của AWS. Máy chủ này có thể chạy đồng thời nhiều máy ảo khác nhau, miễn là nó có đủ tài nguyên (Resource).
+* **Cơ chế cấp phát:** Khi bạn khởi tạo EC2, AWS sẽ "cắt" một phần RAM, CPU và **Instance Store** từ máy chủ vật lý đó để cấp cho bạn.
+* **Tính tạm thời (Ephemeral):** * Vì tài nguyên gắn liền với máy chủ vật lý, nên khi bạn **Stop** máy ảo, máy chủ vật lý sẽ thu hồi tài nguyên đó để dành cho người dùng khác.
+* Khi bạn **Start/Reboot** lại, AWS có thể tìm một vùng trống trên một máy chủ vật lý khác hoàn toàn để cấp phát cho bạn. Đó là lý do tại sao dữ liệu trên Instance Store sẽ bị mất khi máy bị terminate.
+
+## 2. Các thành phần tạo nên một EC2 Instance hoàn chỉnh
+
+Để một "máy ảo" có thể hoạt động và kết nối được, AWS kết hợp các thành phần sau:
+
+- AMI (Amazon Machine Image): "Khuôn mẫu" chứa hệ điều hành (Linux, Windows) và các phần mềm cài sẵn.
+- Instance Types: Cấu hình tài nguyên (CPU, RAM, Storage, Network).
+- Key Pairs: Chìa khóa bảo mật để đăng nhập. AWS giữ Public Key, bạn giữ Private Key. Đừng làm mất nó, vì bạn sẽ không thể SSH vào máy được đâu!
+- Security Groups: Tường lửa ảo (Virtual Firewall) kiểm soát lưu lượng vào/ra (Inbound/Outbound) dựa trên giao thức và cổng (Port).
+- Storage: Nơi lưu trữ dữ liệu (EBS hoặc Instance Store).
+
+Điều khá thực tế vì nó giống như cách mà bạn đi mua máy tính ở cửa hàng vậy, bạn sẽ cần xác định muốn muốn:
+- Máy Window hay máy Mac
+- Bao nhiêu RAM là đủ để học tập, giải trí thoải mái
+- Có cài sẵn các dịch vụ Microsoft không
+- Chọn ổ cứng HDD hay SSD để các tác vụ nhanh hơn, có thể xài ổ cứng rời không
+- Có bảo mật nhận diện khuông mặt hay không
+
+## 3. Lưu trữ: Instance Store vs EBS
+
+Để hiểu về lưu trữ trên EC2, hãy phân biệt rõ hai loại này:
+
+- **Instance Store**: Đây chính là phần ổ cứng vật lý của máy chủ chia sẽ cho máy ảo của bạn.
+  - Ưu điểm: Tốc độ cực nhanh (vì gắn trực tiếp).
+  - Nhược điểm: Dữ liệu sẽ biến mất nếu máy chủ vật lý thu hồi tài nguyên (khi stop/terminate).
+
+
+- **EBS (Elastic Block Store)**: Hãy nghĩ về nó như một cái **Google Drive** hay một cái USB cắm qua mạng (Network Drive).
+  - Ưu điểm: Lưu trữ an toàn, bền vững. Dù bạn tắt máy ảo, dữ liệu vẫn còn đó. Bạn có thể tháo "ổ cứng" này từ máy này cắm sang máy khác.
+  - Nhược điểm: Vì kết nối qua mạng nên tốc độ sẽ không thể nhanh bằng RAM hay Instance Store.
+
+Tuỳ thuộc vào instance type mà các bộ lưu trữ sẽ khác nhau, hãy tham khảo trang **[https://instances.vantage.sh/](https://instances.vantage.sh/)**, bạn sẽ thấy rất nhiều instance type được đánh dấu là "EBS only", 1 số khác có hỗ trợ thêm instance storage.
+Điều này là tuỳ thuộc vào nhu cầu sử dụng để đưa ra lựa chọn tốt nhất, giữa "khả năng phục hồi" và "tốc độ là tất cả"
+
+> Mặc dù EBS là kiểu lưu trữ an toàn và bền vững, nhưng mặc định vẫn sẽ bị xoá đi khi EC2 instance của bạn bị terminated. Hãy tắt "Delete on Termination" để tránh rước hoạ vào thân.
+
+
+
+## 4. Phân loại EC2 Instance Types: Chọn đúng "vũ khí"
+
+Tùy vào nhu cầu công việc mà bạn sẽ chọn "dòng" máy phù hợp. AWS chia thành các nhóm chính:
+
+### 🚀 General Purpose (Đa dụng)
+
+- **Đặc điểm:** Sự cân bằng hoàn hảo giữa Compute (tính toán), Memory (bộ nhớ) và Networking.
+- **Sử dụng:** Phù hợp cho đa số các ứng dụng web, môi trường test hoặc các kho lưu trữ code.
+
+### 🔥 Compute Optimized (Tối ưu tính toán)
+
+- **Đặc điểm:** Sử dụng các bộ vi xử lý (CPU) cao cấp nhất. Thường bắt đầu bằng chữ **C** (như c5, c6g).
+- **Sử dụng:** Xử lý dữ liệu lô (Batch processing).
+  - Chuyển mã video (Media transcoding).
+  - Máy chủ chơi game chuyên dụng (Dedicated game servers).
+  - Machine Learning và High-performance web servers.
+
+
+
+### 🧠 Memory Optimized (Tối ưu bộ nhớ)
+
+- **Đặc điểm:** Dành cho các tác vụ cần xử lý lượng dữ liệu khổng lồ ngay trong bộ nhớ RAM. Thường bắt đầu bằng chữ **R** (viết tắt của RAM - như r5, r6).
+- **Sử dụng:**
+  - Các hệ quản trị cơ sở dữ liệu (Database) lớn.
+  - Bộ nhớ đệm (Cache) như Memcached, Redis.
+  - Xử lý thời gian thực cho dữ liệu lớn không cấu trúc (Real-time big data processing).
+
+
+
+### 💾 Storage Optimized (Tối ưu lưu trữ)
+
+- **Đặc điểm:** Tối ưu cho việc đọc/ghi (I/O) cực cao trên các ổ đĩa cục bộ.
+- **Sử dụng:**
+  - Hệ thống OLTP (Online Transaction Processing).
+  - Hệ thống file phân tán (Distributed file systems).
+  - Kho dữ liệu (Data Warehouse).
+
+
+
+## 5. Mẹo nhỏ cho các bạn Learner
+
+Khi làm việc với EC2, việc nhớ hết các thông số là rất khó. Hãy tham khảo trang: **[https://instances.vantage.sh/](https://instances.vantage.sh/)**. Đây là một công cụ cực kỳ chi tiết giúp bạn so sánh giá cả, cấu hình và tính năng của từng loại instance một cách trực quan nhất.
+
+**Lời kết:**
+EC2 là một dịch vụ cực kỳ linh hoạt. Việc hiểu rõ bản chất "thu hồi tài nguyên" của máy chủ vật lý và chọn đúng loại Instance Type không chỉ giúp ứng dụng của bạn chạy mượt mà hơn mà còn giúp bạn tiết kiệm được rất nhiều chi phí (Cost Optimization) trên AWS.
+
+Cảm ơn các bạn đã đọc bài chia sẻ từ một người đang tự học như mình! Hy vọng nó hữu ích cho lộ trình Cloud của bạn.
