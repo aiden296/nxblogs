@@ -1,0 +1,128 @@
+---
+title: 'Deep Dive: Table Bloat trong PostgreSQL và Chiến lược Tối ưu Storage'
+date: '2026-01-25'
+tags: ['Database']
+enableComment: true
+---
+
+# Deep Dive: Table Bloat trong PostgreSQL và Chiến lược Tối ưu Storage
+
+Gần đây tôi có nghiên cứu sâu về cách PostgreSQL quản lý lưu trữ và bắt gặp một chủ đề cực kỳ thú vị: **Table Bloat**. Với những ai làm việc với dữ liệu lớn, việc "scale up" dung lượng ổ cứng chỉ là giải pháp bề nổi. Để tối ưu hóa thực sự về chi phí hạ tầng (đặc biệt là trên Cloud với mô hình provisioned IOPS/storage) và cải thiện hiệu năng I/O, chúng ta buộc phải hiểu tường tận cách Postgres ghi và xóa dữ liệu ở mức vật lý.
+
+Dưới đây là tổng hợp những ghi chép (notes) của tôi dựa trên bài viết gốc từ Tiger Data về cơ chế lưu trữ và cách xử lý Bloat.
+
+## 1. Tại sao phải quan tâm đến Storage Optimization?
+
+Ngoài bài toán chi phí (Cost) hiển nhiên, vấn đề cốt lõi của việc phình to dữ liệu nằm ở **Hiệu năng (Performance)**.
+Khi database chứa quá nhiều dữ liệu "rác" (bloat), các thao tác quét bảng (sequential scans) và chỉ mục (index scans) sẽ tốn nhiều I/O hơn mức cần thiết. Truy vấn chậm đi không phải vì dữ liệu nhiều lên, mà vì database phải đọc qua quá nhiều vùng không gian chết.
+
+## 2. Giải phẫu Storage trong PostgreSQL (Essential Concepts)
+
+Để hiểu tại sao database chậm đi khi bị phình, chúng ta cần gạt bỏ tư duy về các dòng dữ liệu logic (Excel style) và nhìn vào cách PostgreSQL tổ chức vật lý.
+
+Hãy hình dung Database của bạn giống như một Cuốn sổ tay ghi chép khổng lồ.
+
+- Tuple (Dòng dữ liệu) - Là "Nội dung": Tuple chính là một dòng (row) dữ liệu cụ thể. Ví dụ: `{ID: 1, Name: "An"}`. Nó giống như một dòng chữ bạn viết vào cuốn sổ.
+- Page (Trang dữ liệu) - Là "Vật chứa": Ổ cứng máy tính không đọc từng dòng chữ lẻ tẻ, nó đọc từng khối (block). PostgreSQL quy định mỗi khối này là một Page (mặc định 8KB). Nó chính là một trang giấy trong cuốn sổ tay. Bạn bắt buộc phải viết các dòng chữ (Tuple) lên trang giấy (Page) này.
+
+### Cơ chế I/O: "Bê cả container"
+Đây là điểm mấu chốt. Khi bạn chạy `SELECT * FROM Users WHERE ID = 5`, database không nhảy vào nhặt đúng dòng đó ra.
+
+Nó xác định `ID=5` nằm ở Page số 100.
+
+Nó load toàn bộ Page số 100 (8KB) từ ổ cứng lên RAM.
+
+Sau đó CPU mới lọc trong Page đó để lấy ra Tuple bạn cần.
+
+Quy tắc: Database thao tác trên Page. Muốn lấy 1 món hàng (Tuple), phải cẩu cả cái container (Page) xuống.
+
+### Cơ chế MVCC và sự hình thành "Dead Tuples"
+
+Đây là phần thú vị nhất. Khi chúng ta thực hiện các lệnh SQL, Postgres hành xử khác với suy nghĩ thông thường:
+
+* **INSERT:** Tuple mới được ghi vào một Page còn trống.
+* **DELETE:** Postgres **không xóa ngay lập tức** dữ liệu khỏi ổ cứng. Nó chỉ đánh dấu tuple đó là "đã chết" (**Dead Tuple** - unavailable).
+* **UPDATE:** Thực chất là một tổ hợp của `DELETE` (dòng cũ) + `INSERT` (dòng mới). Dòng cũ trở thành Dead Tuple, dòng mới được ghi vào vị trí khác.
+
+**Tại sao lại thiết kế như vậy?**
+Đây là cơ chế của hệ thống **MVCC (Multi-Version Concurrency Control)**. Việc giữ lại các "xác" dữ liệu cũ cho phép Postgres quản lý transaction, hỗ trợ rollback và đảm bảo tính nhất quán khi có nhiều kết nối cùng đọc/ghi một lúc (read consistency) mà không cần khóa (lock) quá chặt.
+
+**Hệ quả:** Dead Tuples tích tụ dần theo thời gian.
+
+### Table Bloat là gì?
+
+**Table Bloat** là hiện tượng xảy ra khi một bảng chứa quá nhiều Dead Tuples (dữ liệu rác) hoặc các Pages rỗng nhưng chưa được thu hồi. Mặc dù dữ liệu logic đã bị xóa, nhưng không gian vật lý vẫn bị chiếm dụng.
+
+**Cơ chế dọn dẹp:**
+
+* **VACUUM:** Quét và đánh dấu không gian của Dead Tuples là "có thể tái sử dụng" cho các dữ liệu mới. Tuy nhiên, nó **không** trả lại dung lượng cho hệ điều hành (OS). Kích thước file vật lý của bảng không giảm đi.
+* **Autovacuum:** Daemon chạy ngầm để tự động kích hoạt VACUUM.
+* **VACUUM FULL:** Viết lại toàn bộ bảng sang một file mới, loại bỏ hoàn toàn bloat và trả lại dung lượng cho OS. **Nhược điểm:** Nó yêu cầu khóa bảng (Exclusive Lock), gây downtime cho ứng dụng.
+
+---
+
+## 3. Các chiến lược giảm dung lượng Database (Technical Solutions)
+
+Dựa trên cơ chế trên, đây là các phương pháp kỹ thuật để xử lý:
+
+### Phương pháp 1: Monitoring Dead Tuples (Quan sát)
+
+Không thể tối ưu thứ mình không đo lường. Extension `pgstattuple` cho phép "nhìn xuyên thấu" vào cấu trúc vật lý của bảng.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pgstattuple;
+-- Kiểm tra tỷ lệ bloat
+SELECT (dead_tuple_len * 100.0 / table_len) as dead_tuple_ratio,
+       (free_space * 100.0 / table_len) as free_space_ratio
+FROM pgstattuple('ten_bang_can_check');
+
+```
+
+Query này giúp xác định chính xác bảng nào đang lãng phí tài nguyên nhất.
+
+### Phương pháp 2: Tuning Autovacuum (Tinh chỉnh)
+
+Cấu hình mặc định của Autovacuum thường quá "hiền" (conservative) đối với các bảng có write throughput cao. Chiến lược là điều chỉnh settings **cho từng bảng** (per-table basis) để quá trình dọn dẹp diễn ra thường xuyên hơn, ngăn chặn bloat tích tụ.
+
+```sql
+-- Ví dụ: Kích hoạt vacuum khi có 200 dòng thay đổi thay vì chờ theo tỷ lệ %
+ALTER TABLE my_table SET (autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_threshold = 200);
+
+```
+
+### Phương pháp 3: Reclaim Unused Pages (Tái cấu trúc không downtime)
+
+Khi `VACUUM` thường là không đủ và `VACUUM FULL` gây downtime, giới kỹ thuật thường dùng **pg_repack**.
+Extension này hoạt động bằng cách:
+
+1. Tạo một bảng mới.
+2. Copy dữ liệu từ bảng cũ sang bảng mới (loại bỏ bloat).
+3. Swap bảng mới thay thế bảng cũ.
+Tất cả diễn ra với minimal locking, an toàn cho môi trường Production.
+
+### Phương pháp 4: Index Hygiene (Vệ sinh chỉ mục)
+
+Indexes cũng bị bloat và chiếm dụng không gian rất lớn. Sử dụng `pg_stat_user_indexes` để truy tìm các index "vô dụng" (ít hoặc không bao giờ được scan) để loại bỏ.
+
+```sql
+-- Query tìm các index có lượt scan dưới 50
+SELECT relname AS table_name, indexrelname AS index_name,
+       pg_size_pretty(pg_relation_size(indexrelid)) AS index_size, idx_scan
+FROM pg_stat_user_indexes
+WHERE idx_scan < 50
+ORDER BY pg_relation_size(indexrelid) DESC;
+
+```
+
+### Phương pháp 5: Column Alignment (Sắp xếp bộ nhớ)
+
+Một chi tiết rất "low-level" nhưng thú vị: Thứ tự cột ảnh hưởng đến dung lượng lưu trữ do cơ chế **Data Alignment Padding** của CPU/OS.
+**Nguyên tắc:** Sắp xếp các cột theo kích thước data type từ lớn đến nhỏ (ví dụ: `int8` -> `int4` -> `bool`). Việc này giảm thiểu các khoảng trắng (padding) được chèn vào giữa các trường để căn chỉnh bộ nhớ, giúp row gọn hơn đáng kể.
+
+### Phương pháp 6: Data Retention Policy
+
+Cuối cùng, giải pháp đơn giản nhất là xóa dữ liệu cũ. Đối với dữ liệu time-series (chuỗi thời gian), việc sử dụng Partitioning (hoặc Hypertables trong TimescaleDB) cho phép `DROP PARTITION` - một thao tác xóa dữ liệu tức thì ở mức file hệ thống, nhanh và sạch sẽ hơn `DELETE` rất nhiều (vì không sinh ra Dead Tuples).
+
+## Tổng kết
+
+Table Bloat là một đặc tính kỹ thuật đi kèm với sự mạnh mẽ của MVCC trong PostgreSQL. Hiểu rõ vòng đời của một Tuple (Insert -> Update/Delete -> Dead Tuple -> Vacuum -> Reuse) giúp chúng ta có những chiến lược bảo trì chủ động, thay vì bị động nâng cấp phần cứng.
