@@ -1,0 +1,103 @@
+---
+title: 'AWS ENI là gì? Tại sao nó là "Vũ khí bí mật" cho High Availability?'
+date: '2026-01-26'
+tags: ['Devops', 'AWS', 'SAA', 'SAP']
+enableComment: true
+---
+
+# AWS ENI là gì? Tại sao nó là "Vũ khí bí mật" cho High Availability?
+
+![Elastic network interface](/elastic-network-interfaces-ec2-diagram.jpg)
+
+Nếu coi EC2 Instance là một chiếc máy tính, thì **Elastic Network Interface (ENI)** chính là chiếc card mạng (Network Interface Card) giúp máy tính đó "nói chuyện" được với thế giới bên ngoài.
+
+Tuy nhiên, trong môi trường đám mây AWS, ENI không chỉ là một cái cổng cắm dây mạng đơn thuần. Nó là một thành phần **"Elastic" (Đàn hồi)** với khả năng tháo lắp linh hoạt, đóng vai trò cốt lõi trong việc thiết kế các hệ thống chịu lỗi cao (High Availability).
+
+Trong bài viết này, hãy cùng tìm hiểu bản chất của ENI và cách sử dụng nó để cứu sống hệ thống của bạn khi máy chủ gặp sự cố.
+
+---
+
+## 1. ENI chứa đựng những gì?
+
+Một ENI không rỗng tuếch, nó mang theo "hồ sơ lý lịch" mạng đi kèm, bao gồm:
+
+* **IP Address:** Một địa chỉ Private IPv4 chính (Primary) và các địa chỉ phụ (Secondary).
+* **MAC Address:** Địa chỉ vật lý định danh card mạng.
+* **Security Groups:** Các quy tắc tường lửa quy định ai được vào/ra cổng này.
+* **Public IP/Elastic IP:** Địa chỉ IP công cộng (nếu có).
+
+Khi bạn di chuyển một ENI từ máy chủ này sang máy chủ khác, toàn bộ "hồ sơ" trên sẽ đi theo nó. Đây chính là điểm mấu chốt tạo nên sức mạnh của ENI.
+
+## 2. Phân loại: Primary vs. Secondary ENI
+
+Khi làm việc với EC2, bạn sẽ gặp hai loại ENI:
+
+* **Primary ENI (eth0):** Đây là card mạng "xương sống", được sinh ra cùng lúc với EC2.
+* *Đặc điểm:* Gắn chết với vòng đời của EC2. Bạn **không thể tháo rời** nó. Nếu xóa EC2, card mạng này cũng biến mất.
+
+
+* **Secondary ENI (eth1, eth2...):** Đây là các card mạng phụ bạn tạo thêm.
+* *Đặc điểm:* Hoạt động độc lập. Bạn có thể tạo nó riêng lẻ, tháo ra từ máy A và gắn vào máy B bất cứ lúc nào (Hot attach/detach).
+
+
+
+---
+
+## 3. Khi nào bạn cần dùng thêm ENI? (Use Cases)
+
+Đa số các web server cơ bản chỉ cần một Primary ENI là đủ. Tuy nhiên, các kiến trúc sư hệ thống (Solutions Architect) thường dùng Secondary ENI cho 3 kịch bản sau:
+
+### Kịch bản 1: Mạng quản lý riêng biệt (Management Network)
+
+Bạn muốn tách luồng truy cập của khách hàng và luồng quản trị của Admin:
+
+* **ENI 1 (Public):** Mở port 80/443 cho khách hàng truy cập Web.
+* **ENI 2 (Private):** Chỉ mở port 22 (SSH) cho Admin, và chỉ cho phép truy cập từ mạng nội bộ công ty (VPN).
+-> Điều này giúp tăng cường bảo mật tối đa.
+
+### Kịch bản 2: Giữ bản quyền phần mềm (Licensing)
+
+Một số phần mềm doanh nghiệp (như Oracle, SAP...) quản lý license dựa trên địa chỉ **MAC Address**.
+Nếu máy chủ cũ hỏng, việc tạo máy mới sẽ sinh ra MAC Address mới -> License bị vô hiệu hóa.
+**Giải pháp:** Dùng ENI riêng cho phần mềm đó. Khi đổi máy chủ, bạn mang ENI (cùng MAC Address cũ) sang máy mới, phần mềm vẫn hoạt động bình thường.
+
+### Kịch bản 3: Failover giá rẻ (Dự phòng lỗi)
+
+Đây là ứng dụng hay nhất. Thay vì dùng Load Balancer đắt tiền cho các hệ thống nhỏ, bạn có thể dùng ENI để chuyển hướng lưu lượng truy cập khi máy chủ chính bị sập.
+
+---
+
+## 4. Hướng dẫn thực chiến: Kỹ thuật Failover bằng ENI
+
+Hãy tưởng tượng bạn có **Server A (Main)** đang chạy web nội bộ và **Server B (Standby)** đang chờ sẵn. Cả hai nằm cùng một Availability Zone (ví dụ: `ap-southeast-1a`).
+
+**Mục tiêu:** Khi Server A chết, chuyển ngay IP truy cập sang Server B.
+
+### Cách thực hiện:
+
+1. **Bước 1:** Tạo một Secondary ENI độc lập. Giả sử nó có IP Private là `10.0.1.50`.
+2. **Bước 2:** Gắn (Attach) ENI này vào **Server A**. Lúc này, người dùng truy cập vào `10.0.1.50` sẽ vào Server A.
+3. **Bước 3 (Sự cố):** Server A đột ngột gặp lỗi (Crash OS, hỏng phần cứng).
+4. **Bước 4 (Cứu hộ):**
+* Vào AWS Console, chọn ENI `10.0.1.50`.
+* Bấm **Detach** (tháo khỏi Server A).
+* Bấm **Attach** và chọn **Server B**.
+
+
+5. **Kết quả:** Chỉ trong vài giây, IP `10.0.1.50` đã trỏ sang Server B. Người dùng không cần đổi IP cấu hình, hệ thống tiếp tục hoạt động.
+
+> **Mẹo chuyên nghiệp:** Trong thực tế, các kỹ sư DevOps thường viết một đoạn Script (sử dụng AWS Lambda hoặc CLI) để tự động hóa quy trình Tháo/Lắp này ngay khi hệ thống giám sát phát hiện Server A bị lỗi (Health check failed).
+
+---
+
+## 5. Một giới hạn "chí mạng" cần nhớ
+
+Dù ENI rất linh hoạt, nhưng nó có một giới hạn vật lý bạn không được quên:
+
+> **ENI bị ràng buộc bởi Availability Zone (AZ).**
+
+Bạn **không thể** tháo ENI ở máy chủ thuộc `Zone A` để gắn sang máy chủ thuộc `Zone B`. Vì vậy, khi thiết kế giải pháp Failover dùng ENI, máy chủ chính và máy chủ dự phòng bắt buộc phải nằm chung một tòa nhà (cùng AZ).
+
+## Tổng kết
+
+Trong quá trình làm việc, mình cũng rất hiếm gặp ENI, vì đối với phần lớn người dùng AWS thông thường, eth0 là đã quá đủ, nó được tạo tự động và hoạt động ngầm, và bạn không cần chạm đến nó.
