@@ -39,7 +39,25 @@ Khi làm việc với EC2, bạn sẽ gặp hai loại ENI:
 * **Secondary ENI (eth1, eth2...):** Đây là các card mạng phụ bạn tạo thêm.
 * *Đặc điểm:* Hoạt động độc lập. Bạn có thể tạo nó riêng lẻ, tháo ra từ máy A và gắn vào máy B bất cứ lúc nào (Hot attach/detach).
 
+Bản thân 1 EC2 instance chỉ là tài nguyên tính toán thuần túy (bao gồm CPU, RAM và Disk). Nó không hề có khái niệm về IP hay mạng.
+Vậy nên khi khởi tạo EC2 instance, nó được khởi tạo kèm với 1 ENI, đây mới là nơi chứa các thông tin mạng như Private IP, Public IP (hoặc Elastic IP), MAC Address và Security Groups.
 
+Hãy hình dung thế này cho dễ hiểu:
+Giống như chiếc máy tính để bàn (PC) ở nhà bạn:
+
+- Thùng máy (Case + CPU + RAM): Chính là EC2. Nếu không cắm dây mạng hay card Wifi, nó không có địa chỉ IP nào cả.
+- Card mạng (NIC): Chính là ENI. Địa chỉ IP và địa chỉ MAC là thông số nằm trên cái card này.
+
+Khi bạn nhìn thấy một địa chỉ IP hiển thị trên màn hình quản lý EC2 (EC2 Console), thực chất là AWS đang:
+
+1. Nhìn xem EC2 đó đang gắn ENI nào (thường là `eth0`).
+2. Đọc thông tin IP **từ cái ENI đó** và hiển thị lên cho bạn xem cho tiện.
+
+**Bằng chứng:**
+Nếu bạn có một ENI phụ (`eth1`) đang gắn vào Máy A, nó có IP là `10.0.0.5`.
+
+* Khi bạn tháo (`detach`) nó ra khỏi Máy A: Máy A mất IP `10.0.0.5`.
+* Khi bạn gắn (`attach`) nó sang Máy B: Máy B lập tức có IP `10.0.0.5`.
 
 ---
 
