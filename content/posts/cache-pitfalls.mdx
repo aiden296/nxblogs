@@ -1,0 +1,233 @@
+---
+title: "Cache Handbook: 6 \"cái bẫy\" kinh điển khi dùng Cache mà Senior cũng mắc phải"
+date: '2026-03-29'
+tags: ['Backend', 'System Design', 'Cache']
+enableComment: true
+---
+
+# Cache Handbook: 6 "cái bẫy" kinh điển khi dùng Cache mà Senior cũng mắc phải
+
+> Bài viết được tổng hợp và biên soạn lại từ cuốn **"A Cache Handbook for Software Engineers"** của **Quang Hoang** (Software Engineer tại Google). Đây là phần **3/4** trong series.
+
+Sau khi đã nắm vững [nền tảng](/posts/cache-fundamentals) và [bài toán consistency](/posts/cache-consistency), bài viết này sẽ giúp bạn nhận diện 6 "cái bẫy" thường gặp nhất khi vận hành hệ thống Cache — và cách phòng tránh chúng.
+
+---
+
+## 1. Cache Avalanche — "Tuyết lở" hàng loạt
+
+**Định nghĩa:** Cache Avalanche xảy ra khi một lượng lớn key trong Cache **hết hạn hoặc bị xóa cùng một lúc**. Hàng loạt request bị Cache Miss và ồ ạt đổ xuống Database, khiến DB bị quá tải.
+
+**Nguyên nhân:**
+
+- **TTL giống nhau:** Nhiều key được đặt cùng thời điểm hết hạn → bị xóa cùng lúc.
+- **Cache server bị sập/khởi động lại:** Toàn bộ dữ liệu bị mất.
+- **Lưu lượng tăng đột biến** ngay thời điểm key hết hạn (flash sale, sự kiện lớn).
+
+**Giải pháp:**
+
+1. **Đặt ngẫu nhiên TTL:** Thay vì TTL cố định 60 phút cho tất cả, hãy cộng thêm một khoảng ngẫu nhiên (1-5 phút). Các key sẽ hết hạn rải rác, giảm tải đột ngột cho DB.
+
+2. **Xây dựng cụm Cache có High Availability:** Đảm bảo Cache server không phải single point of failure.
+
+3. **Cache Pre-warming:** Thay vì đợi user truy cập rồi mới nạp dữ liệu, chạy script ngầm **nạp sẵn dữ liệu quan trọng vào Cache** trước khi mở cửa đón traffic. Đặc biệt hiệu quả cho Cold Start và Flash Sale.
+
+---
+
+## 2. Thundering Herd (Cache Stampede) — "Bầy thú giẫm đạp"
+
+**Định nghĩa:** Tương tự Cache Avalanche, nhưng chỉ xảy ra với **một Hot Key** (ví dụ "Kết quả xổ số lúc 18h30"). Khi Hot Key hết hạn, một lượng lớn request ồ ạt đổ xuống DB.
+
+Giải pháp phụ thuộc vào loại Cache:
+
+### 2.1. Giải pháp cho Inline Cache
+
+**Stale Data Serving:** Khi Hot Key hết hạn, Cache trả về **dữ liệu cũ** cho user. Đồng thời, một thread chạy ngầm đọc dữ liệu mới từ DB và cập nhật Cache.
+
+Giải pháp này được dùng trong Nginx (`proxy_cache_use_stale` + `proxy_cache_background_update`) và thư viện **Caffeine** (Java) qua tính năng `refreshAfterWrite`:
+
+```java
+LoadingCache<Key, Graph> cache = Caffeine.newBuilder()
+    .maximumSize(10_000)
+    .expireAfterWrite(Duration.ofMinutes(5))
+    .refreshAfterWrite(Duration.ofMinutes(1))
+    .build(key -> queryDB(key));
+```
+
+> **Nhược điểm:** User nhìn thấy dữ liệu cũ trong khoảng thời gian ngắn. Phương pháp này chỉ hiệu quả cho key hết hạn do TTL, không xử lý được trường hợp key bị chủ động evict hoặc Cold Start.
+
+**Request Coalescing:** Khi 10,000 request cùng đọc 1 Hot Key vừa hết hạn, Cache Server **gom tất cả vào hàng đợi**, gửi **1 request đại diện** xuống DB. Khi DB trả về, kết quả được phát lại cho cả 10,000 request đang chờ.
+
+Kỹ thuật này được sử dụng rộng rãi trong Nginx (`proxy_cache_lock`) và CDN. Implementation khá đơn giản: khi nhận request đọc key A, API server acquire một **local mutex lock** cho key A:
+
+- Acquire lock thành công → gửi request xuống Cache/DB, chờ phản hồi, unlock.
+- Không acquire được → đợi cho đến khi có phản hồi cho key A.
+
+> Tham khảo cách cài đặt trong thư viện **singleflight** của Golang.
+
+### 2.2. Giải pháp cho Cache-Aside
+
+**Locking (Distributed Mutex):** Khi Hot Key bị miss, mỗi request phải cố gắng acquire một **distributed mutex lock** (ví dụ: dùng `SETNX` trong Redis). Chỉ request nào lấy được lock mới được phép đi xuống DB. Các request còn lại sleep rồi thử đọc Cache lại.
+
+**Probabilistic Early Expiration (P.E.E):** Thay vì đợi key thực sự hết hạn (TTL = 0), mỗi lần đọc Cache, hệ thống chạy một **thuật toán xác suất** để quyết định: *"Có nên giả vờ key đã hết hạn và chủ động lấy dữ liệu mới từ DB không?"*
+
+Thuật toán dựa trên công thức **X-Fetch**. Key sẽ được làm mới sớm nếu:
+
+```
+T_fetch + β × gap × (−log(rand())) > T_expiry
+```
+
+Trong đó:
+- `T_fetch`: Thời điểm hiện tại.
+- `T_expiry`: Thời điểm key thực sự hết hạn.
+- `gap`: Thời gian trung bình để query DB.
+- `β`: Hệ số điều chỉnh (mặc định = 1). `β > 1` → hết hạn sớm thường xuyên hơn.
+- `rand()`: Số ngẫu nhiên từ 0 đến 1.
+
+**Cách hoạt động:**
+- **Cache còn mới:** `T_expiry` còn rất xa → luôn Cache Hit.
+- **Cache sắp hết hạn:** Khoảng cách thu hẹp → xác suất "xung phong" cập nhật tăng dần.
+
+Việc sử dụng `−log(rand())` cực kỳ thông minh: đảm bảo trong hàng ngàn request, khả năng có **ít nhất một** request chủ động cập nhật là rất cao, nhưng khả năng **tất cả cùng đi** là cực thấp.
+
+```python
+def get_data_with_pee(key):
+    cached_item = cache.get(key)
+
+    # Cache Miss
+    if cached_item is None:
+        data = fetch_from_db(key)
+        cache.set(key, data, TTL)
+        return data
+
+    # Cache Hit - kiểm tra xác suất X-Fetch
+    T_fetch = current_time()
+    T_expiry = cached_item.expiry_time
+    gap = get_average_db_fetch_time()
+    beta = 1.0
+    rand_val = random_between(0.0001, 1.0)
+
+    probabilistic_offset = beta * gap * (-log(rand_val))
+
+    if (T_fetch + probabilistic_offset) > T_expiry:
+        # Hết hạn sớm được kích hoạt
+        new_data = fetch_from_db(key)
+        cache.set(key, new_data, TTL)
+        return new_data
+    else:
+        return cached_item.data
+```
+
+> **Ưu điểm:** Đơn giản, độ trễ thấp, chỉ hoạt động khi có request đến (Cold Key tự hết hạn bình thường).
+>
+> **Nhược điểm:** Khó cấu hình `gap` nếu DB lúc nhanh lúc chậm. Nếu dữ liệu ít thay đổi, việc recompute sớm là lãng phí tài nguyên.
+
+---
+
+## 3. Cache Penetration — "Xuyên thủng" Cache
+
+**Định nghĩa:** Xảy ra khi user (hoặc hacker) liên tục query dữ liệu **không có trong Cache và cũng không có trong Database**. Ví dụ: hacker gửi hàng triệu request tìm `user_id = -1` hoặc UUID ngẫu nhiên → DB bị DDoS.
+
+### 3.1. Cache Null Values
+
+Nếu dữ liệu không tồn tại trong DB, vẫn lưu vào Cache **một giá trị rỗng** với TTL ngắn:
+
+```python
+NORMAL_TTL = 3600    # TTL bình thường cho dữ liệu hợp lệ
+SHORT_TTL = 60       # TTL ngắn cho giá trị rỗng
+NULL_MARKER = "EMPTY_DATA"
+
+def get_data_with_null_caching(key):
+    cached_value = cache.get(key)
+
+    if cached_value is not None:   # Cache Hit
+        if cached_value == NULL_MARKER:
+            return None
+        return cached_value
+
+    db_data = fetch_from_db(key)
+
+    if db_data is None:            # Không tồn tại trong DB
+        cache.set(key, NULL_MARKER, SHORT_TTL)
+        return None
+
+    cache.set(key, db_data, NORMAL_TTL)
+    return db_data
+```
+
+### 3.2. Bloom Filter
+
+**Bloom Filter** là cấu trúc dữ liệu xác suất (Probabilistic Data Structure) cực kỳ hiệu quả về bộ nhớ, trả lời theo kiểu:
+
+- **"Chắc chắn không có"** (Definitely No)
+- **"Có thể có"** (Possibly Yes — False Positive)
+
+Ta sử dụng Bloom Filter để **kiểm tra nhanh** xem key có khả năng tồn tại không trước khi cho phép truy vấn Cache/DB. Nếu Bloom Filter nói "Không" → **chặn ngay lập tức**.
+
+**Nhược điểm:**
+
+- Bloom Filter thuần túy **không hỗ trợ xóa** dữ liệu. Cần dùng **Counting Bloom Filter** hoặc **Cuckoo Filter** để hỗ trợ xóa.
+- **False Positive tăng dần** khi mảng bit ngày càng đầy.
+- **Phức tạp hóa flow:** Khi thêm entry mới vào DB, phải đồng thời thêm vào Bloom Filter.
+
+---
+
+## 4. Cache Thrashing — Vòng lặp "evict rồi lại load"
+
+**Định nghĩa:** Dữ liệu liên tục được ghi vào Cache, ép dữ liệu cũ bị evict, nhưng ngay lập tức dữ liệu vừa bị đẩy ra lại được yêu cầu và phải tải lại từ DB.
+
+**Triệu chứng:** Hit Rate giảm mạnh, Eviction Rate tăng dựng đứng, CPU/Disk IO của DB tăng vọt.
+
+**Nguyên nhân:**
+
+1. **Dung lượng Cache quá nhỏ:** Kích thước hot data vượt quá dung lượng Cache.
+2. **Eviction Policy không phù hợp:** Default LRU không phải lúc nào cũng tối ưu.
+3. **Resource Contention:** Nhiều ứng dụng/threads chia sẻ bộ nhớ Cache nhỏ, liên tục evict dữ liệu lẫn nhau.
+
+**Giải pháp:**
+
+1. Tăng kích thước Cache.
+2. Thay đổi Eviction Policy (ví dụ từ LRU sang LFU).
+3. Xem xét lại application logic: có thể có luồng logic đang liên tục quét toàn bộ dữ liệu trong DB, khiến hot data bị đẩy ra khỏi Cache.
+
+---
+
+## 5. Memory Fragmentation — Phân mảnh bộ nhớ
+
+**Định nghĩa:** Bộ nhớ RAM bị chia nhỏ thành nhiều vùng trống rời rạc trong quá trình cấp phát và giải phóng dữ liệu liên tục. Mặc dù **tổng dung lượng trống vẫn còn nhiều**, hệ thống không tìm được vùng nhớ liên tục đủ lớn → lãng phí tài nguyên hoặc OOM.
+
+**Hai loại phân mảnh:**
+
+**External Fragmentation:** Dữ liệu liên tục được tạo, cập nhật, xóa ngẫu nhiên. Các vùng nhớ trống bị băm nhỏ xen kẽ. Ví dụ trong Redis: `jemalloc` không thể trả lại hoàn toàn các memory page nhỏ lẻ cho OS → OS thấy Redis "ngốn" nhiều RAM nhưng thực tế chỉ dùng một phần.
+
+**Internal Fragmentation:** OS cấp phát theo block kích thước cố định. Ví dụ: Memcached chia bộ nhớ thành Slab Class (96 bytes, 120 bytes...). Lưu value 97 bytes → vào Class 120 bytes → **lãng phí 23 bytes (≈20%)**.
+
+**Giải pháp cho Redis:**
+
+- **Bật Active Defragmentation** (Redis 4.0+): `CONFIG SET activedefrag yes`
+- **Restart:** Save dữ liệu xuống disk (RDB/AOF) rồi restart.
+- **Tách server:** Nếu dữ liệu có kích thước khác biệt lớn (session vài chục bytes vs. cached HTML pages vài MB), tách ra 2 server Cache riêng biệt.
+
+---
+
+## 6. Connection Churn — "Xoay vòng" kết nối
+
+**Định nghĩa:** Client liên tục mở kết nối TCP mới tới Cache server, gửi vài request, rồi đóng kết nối, lặp lại với tần suất cao.
+
+**Tác hại:**
+
+- **CPU/RAM Overhead:** TCP cần 3-way handshake để mở và 4-way teardown để đóng. Mỗi connection chiếm file descriptor. CPU dành phần lớn thời gian cho system calls thay vì GET/SET.
+- **Port Exhaustion:** Khi kết nối bị đóng, OS đưa port vào trạng thái `TIME_WAIT` kéo dài 60s. Mở/đóng hàng ngàn kết nối mỗi giây → cạn kiệt port.
+
+**Giải pháp:**
+
+1. **Connection Pooling** ở App Server để duy trì số lượng kết nối ổn định.
+2. **Proxy:** Đặt proxy giữa App Server và Cache Server (Twemproxy, Envoy). Proxy chịu trách nhiệm duy trì kết nối TCP ổn định.
+
+---
+
+## Series: Cache Handbook
+
+1. [Nền tảng cốt lõi của Caching](/posts/cache-fundamentals)
+2. [Giải mã bài toán Cache Consistency](/posts/cache-consistency)
+3. **6 "cái bẫy" kinh điển khi dùng Cache** ← Bạn đang ở đây
+4. [Từ Monitoring đến Scaling](/posts/cache-monitoring-and-scaling)

@@ -1,0 +1,259 @@
+---
+title: 'Cache Handbook: Khi Cache và Database "nói dối" nhau - Giải mã bài toán Cache Consistency'
+date: '2026-03-28'
+tags: ['Backend', 'System Design', 'Cache']
+enableComment: true
+---
+
+# Cache Handbook: Khi Cache và Database "nói dối" nhau - Giải mã bài toán Cache Consistency
+
+> Bài viết được tổng hợp và biên soạn lại từ cuốn **"A Cache Handbook for Software Engineers"** của **Quang Hoang** (Software Engineer tại Google). Đây là phần **2/4** trong series.
+
+Trong một hệ thống phân tán, Cache và Database là hai thực thể độc lập nằm trên các máy chủ khác nhau. Việc đảm bảo tính nhất quán (Consistency) giữa chúng là một thách thức không nhỏ.
+
+Hãy tưởng tượng bạn đang ghi chép vào **hai cuốn sổ đặt ở hai đầu thành phố**. Khi bạn vừa viết xong một dòng vào cuốn sổ A (Database), không có "phép màu" nào lập tức làm dòng chữ đó xuất hiện ở cuốn sổ B (Cache). Mọi thao tác đều phải truyền qua một phương tiện kém tin cậy: **Network**.
+
+Trên lý thuyết, chúng ta có thể dùng **Distributed Transaction** (như giao thức 2PC, 3PC) để đảm bảo tính Atomicity. Tuy nhiên, việc "trói" cả Cache và Database vào chung một transaction sẽ gây ra độ trễ lớn. Do đó, mục tiêu khả thi hơn là đạt được **Eventual Consistency**: Dữ liệu có thể sai lệch trong vài mili giây, nhưng cuối cùng chúng sẽ đồng bộ.
+
+---
+
+## 1. Chiến lược cập nhật Cache: Xóa hay Ghi đè?
+
+Khi dữ liệu trong DB thay đổi, chúng ta có hai lựa chọn:
+
+1. **Update Cache:** `cache.set(key, new_value)` — ghi đè giá trị mới.
+2. **Delete (Invalidate) Cache:** `cache.del(key)` — xóa key, buộc lần đọc sau phải lấy từ DB.
+
+> **Lời khuyên:** Hãy chọn **Delete Cache**. Đây là Pattern "Cache-Aside" chuẩn mực.
+
+### Tại sao không nên "Update Cache"? (Bài toán Double Write)
+
+Giả sử có 2 thread A và B cùng cập nhật giá trị key `price`:
+
+- Thread A: Muốn sửa `price = 100`.
+- Thread B: Muốn sửa `price = 200`.
+
+**Kịch bản lỗi:**
+
+1. Thread A cập nhật DB → `price_db = 100`
+2. Thread B cập nhật DB → `price_db = 200`
+3. Thread B cập nhật Cache → `price_cache = 200`
+4. Thread A cập nhật Cache → `price_cache = 100`
+
+**Kết quả:** DB lưu **200** nhưng Cache lại lưu **100**. Sự sai lệch này sẽ tồn tại cho đến khi key hết hạn (TTL).
+
+Nếu chọn chiến lược **Delete**, cả hai thread đều thực hiện lệnh xóa, và kết quả cuối cùng luôn là Cache trống (`null`), buộc request tiếp theo phải load lại giá trị đúng từ DB.
+
+---
+
+## 2. Thứ tự thực hiện: Xóa Cache trước hay Cập nhật DB trước?
+
+Ngay cả khi dùng chiến lược Delete, **thứ tự thực hiện** vẫn quyết định tính đúng đắn của dữ liệu.
+
+### Nếu Xóa Cache trước khi Cập nhật DB
+
+Giả sử `price_db = price_cache = 100`. Thread A muốn cập nhật `price = 200`:
+
+1. Thread A xóa Cache → `price_cache = null`
+2. Thread B truy vấn, Cache Miss, đọc DB → `price_db = 100` (chưa cập nhật)
+3. Thread B ghi dữ liệu cũ vào Cache → `price_cache = 100`
+4. Thread A cập nhật DB → `price_db = 200`
+
+**Kết quả:** Cache lưu **100** (cũ), DB lưu **200** (mới). Sai lệch!
+
+### Nếu Cập nhật DB trước khi Xóa Cache (Cache-Aside Pattern)
+
+1. Thread A cập nhật DB → `price_db = 200`
+2. Thread A xóa Cache → `price_cache = null`
+
+Đây là **pattern phổ biến nhất**. Mọi request đọc sau bước 2 sẽ Cache Miss và tải lại dữ liệu mới từ DB.
+
+---
+
+## 3. Các Edge Cases gây sai lệch dữ liệu
+
+Dù áp dụng Cache-Aside chuẩn, hệ thống phân tán vẫn có những kẽ hở do độ trễ mạng và đặc thù kiến trúc.
+
+### 3.1. Zombie Reader (Stale Set)
+
+Hiện tượng xảy ra khi một Request Read bị "lag" đúng lúc:
+
+1. **Thread A (Read)** bị Cache Miss, truy vấn DB → `price_db = 100`. Thread A bỗng bị lag (GC hoặc context switching).
+2. **Thread B (Write)** cập nhật DB → `price_db = 200` và xóa Cache → `price_cache = null`.
+3. **Thread A (Read)** tỉnh lại, ghi giá trị **100** (đã cũ) vào Cache → `price_cache = 100`.
+
+**Kết quả:** `price_cache = 100`, `price_db = 200`.
+
+> Điều kiện xảy ra: Quá trình Ghi DB + Xóa Cache của Thread B phải diễn ra nhanh hơn thời gian Thread A nhận kết quả từ DB và ghi vào Cache. Thực tế xác suất này rất thấp, nhưng hoàn toàn có thể xảy ra.
+
+### 3.2. Master-Slave Replication Lag
+
+Trong kiến trúc **Master-Slave** (Leader-Follower):
+
+- Mọi thao tác ghi (`INSERT`, `UPDATE`, `DELETE`) → **Master Database**
+- Master ghi log thay đổi (MySQL: `binlog`, PostgreSQL: `WAL`)
+- Các **Slaves** copy log về replay lại
+- Các thao tác đọc (`SELECT`) → **Slaves**
+
+**Kịch bản lỗi:** Giả sử `price = 100` trên cả Master, Slave và Cache.
+
+1. Thread A cập nhật Master → `price_master = 200`
+2. Thread A xóa Cache → `price_cache = null`
+3. Thread B đọc, Cache Miss → truy vấn **Slave**
+4. Do **Replication Lag**, Slave chưa nhận giá trị mới → trả về `price_slave = 100`
+5. Thread B ghi vào Cache → `price_cache = 100`
+6. Replication hoàn thành → `price_slave = price_master = 200`
+
+**Kết quả:** `price_master = price_slave = 200`, nhưng `price_cache = 100`.
+
+### 3.3. Partial Failure
+
+Khi App Server giao tiếp với Database và Cache, chúng ta đối mặt với bài toán **Dual Write** (Ghi vào 2 nơi):
+
+1. App gửi lệnh `UPDATE` vào Database → **Thành công**.
+2. App chuẩn bị gửi lệnh `DELETE` vào Cache.
+3. **SỰ CỐ:** App Server bị crash (OOM, mất điện), Cache Server bị timeout, hoặc mạng bị đứt.
+4. Lệnh xóa Cache **không bao giờ được thực thi**.
+
+**Kết quả:** Database đã lưu giá trị mới, nhưng Cache vẫn giữ giá trị cũ.
+
+---
+
+## 4. Giải pháp
+
+### 4.1. Delayed Double Delete
+
+Phương pháp này xóa Cache **hai lần** để đảm bảo dọn sạch "tàn dư" do Replication Lag:
+
+1. Cập nhật DB → `price_db = 200`
+2. Xóa Cache → `price_cache = null`
+3. **Sleep** một khoảng thời gian `T`
+4. Xóa Cache lần thứ hai → `price_cache = null`
+
+Khoảng `T` phải lớn hơn thời gian Replication Lag + thời gian thực thi luồng đọc. Bước 3 và 4 thường được đẩy vào **Background Worker** (Message Queue hoặc goroutine chạy nền).
+
+**Nhược điểm:** Rất khó chọn chính xác giá trị `T`:
+
+- `T` quá nhỏ → không bắt được Race Condition
+- `T` quá lớn (ví dụ 10 phút) → nuôi dưỡng dữ liệu sai lâu hơn
+
+> **Kinh nghiệm thực tế:** Nên chọn `T` trong khoảng: `P99 Replication Lag + P99 Read Time < T < TTL`
+
+### 4.2. Change Data Capture (CDC)
+
+Đây là giải pháp triệt để hơn, thường được các công ty công nghệ lớn sử dụng (Shopee cũng dùng cách này) để **tách rời logic Cache khỏi Application Code**.
+
+**Luồng xử lý:**
+
+1. Ứng dụng **chỉ thực hiện lệnh Update DB**.
+2. DB ghi thay đổi vào log (Binlog/WAL). Công cụ CDC (như **Debezium**, **Canal**) lắng nghe log và gửi message vào **Message Queue** (Kafka/RabbitMQ).
+3. Một **Consumer Service** độc lập đọc message từ Queue và thực thi lệnh **Delete Cache**.
+
+**Ưu điểm:**
+
+- Chỉ khi DB update thành công thì mới xóa Cache. Không lo App crash giữa chừng.
+- **Retry:** Nếu lệnh xóa thất bại, Message Queue retry cho đến khi thành công → đảm bảo Eventual Consistency.
+- **Decoupling:** Code ứng dụng sạch hơn.
+
+**Nhược điểm:** Không giải quyết triệt để Replication Lag. Có thể cải tiến bằng **Update Mode** (ghi thẳng giá trị mới vào Cache thay vì xóa), nhưng không phải lúc nào cũng áp dụng được vì Database log thường chỉ chứa dữ liệu thô, trong khi Cache lưu Object phức tạp (Aggregated Data).
+
+> Chúng ta hoàn toàn có thể **kết hợp CDC và Delayed Double Delete** để tăng độ tin cậy.
+
+### 4.3. Lease & Remote Marker
+
+Giải pháp này được **Facebook** công bố trong paper năm 2013, kết hợp hai công cụ:
+
+- **Lease:** Cấp quyền ghi vào Cache.
+- **Remote Marker:** Cảnh báo rằng dữ liệu trong Master DB vừa thay đổi, Slave có thể chưa kịp đồng bộ.
+
+**Giai đoạn 1 — Writer cập nhật dữ liệu (phía Master DB):**
+
+1. Ghi dữ liệu mới vào Master DB.
+2. Đặt **Remote Marker** vào Cache (ví dụ key `marker:product:123`) với TTL ngắn (1-2 giây). Ý nghĩa: *"Cảnh báo! Dữ liệu gốc vừa thay đổi. Mọi dữ liệu đọc từ Slave lúc này đều không đáng tin."*
+3. Xóa dữ liệu cũ trong Cache (đồng thời xóa luôn Lease Token nếu đang tồn tại).
+
+**Giai đoạn 2 — Reader đọc dữ liệu (phía Slave DB):**
+
+1. **Check Marker:** Có `marker:product:123` không?
+   - **CÓ:** Trả về lỗi "Dirty Data". User buộc phải thử lại hoặc đọc trực tiếp từ Master → **ngăn chặn Replication Lag**.
+   - **KHÔNG:** Tiếp tục bước 2.
+2. **Lease Get:** Cache cấp cho User A một Token T1.
+3. **Read DB:** User A đọc dữ liệu từ Slave DB.
+4. **Lease Set:** User A quay lại Cache để ghi dữ liệu kèm Token T1. Cache kiểm tra Token còn hợp lệ không. Nếu trong lúc A đi vắng, có Writer khác chạy Giai đoạn 1 (hủy Token), Token T1 sẽ bị từ chối → **ngăn chặn Zombie Reader**.
+
+**Pseudo Code:**
+
+```python
+MARKER_TTL = 2  # seconds
+MARKER_PREFIX = "marker:"
+
+def update_data_with_lease(key, new_data):
+    db_master.update(key, new_data)
+    marker_key = f"{MARKER_PREFIX}{key}"
+    cache.set(marker_key, "DIRTY", MARKER_TTL)
+    cache.delete(key)
+
+LEASE_TOKEN = "WORKING..."
+LEASE_TTL = 5  # seconds
+
+def read_data_with_cas_lease(key):
+    current_val = cache.get(key)
+
+    # Cache Hit
+    if current_val is not None and current_val != LEASE_TOKEN:
+        return current_val
+
+    # Cache Miss
+    if cache.setnx(key, LEASE_TOKEN, LEASE_TTL) == True:
+        db_data = db_slave.read(key)
+        # Check-and-Set (CAS): đổi LEASE_TOKEN thành db_data
+        # chỉ khi giá trị hiện tại vẫn là LEASE_TOKEN
+        success = cache.check_and_set(key, LEASE_TOKEN, db_data)
+        if not success:
+            # CAS thất bại! Chống Zombie Reader thành công!
+            log("Stale Set prevented by CAS!")
+        return db_data
+    else:
+        # Một request khác đang giữ LEASE
+        sleep(50)
+        return read_data_with_cas_lease(key)
+```
+
+**Nhược điểm:**
+
+- **Độ phức tạp cao:** Logic phía Client trở nên phức tạp hơn.
+- **Latency tăng:** Trong khoảng thời gian Marker tồn tại, request đọc phải retry hoặc đọc Master.
+- **Marker Eviction:** Khi Cache đầy bộ nhớ, key marker có thể bị evict, mất tác dụng.
+
+---
+
+## 5. Ma trận so sánh: Edge Cases vs. Solutions
+
+| | Zombie Reader | Replication Lag | Partial Failure | Complexity |
+|---|---|---|---|---|
+| **Cache-Aside** | ❌ | ❌ | ❌ | Thấp |
+| **Delayed Double Delete** | ⚠️ (Ổn nếu lag < T) | ⚠️ (Ổn nếu lag < T) | ❌ | Trung bình |
+| **CDC** | ❌ | ⚠️ (nếu dùng Update Mode) | ✅ | Cao |
+| **Lease** | ✅ | ❌ | ❌ | Rất cao |
+| **Lease + Remote Marker** | ✅ | ✅ | ❌ | Rất cao |
+
+> ✅ Solved — ⚠️ Mitigated — ❌ Failed
+
+---
+
+## 6. Lời khuyên thực tế
+
+Trong System Design, sự hoàn hảo thường đi kèm với chi phí lớn. Với đa số ứng dụng (mạng xã hội, tin tức, e-commerce, blog...), việc user nhìn thấy dữ liệu cũ trong vài giây là hoàn toàn chấp nhận được.
+
+1. **Hãy bắt đầu với Cache-Aside.** Nó là tiêu chuẩn ngành cho sự đơn giản và hiệu quả.
+2. **Nếu cần độ tin cậy cao hơn, hãy cân nhắc CDC.** Đây là điểm cân bằng giữa Complexity và Consistency.
+3. **Chỉ nên cân nhắc Lease & Remote Marker** khi bạn đang vận hành ở quy mô "Hyperscale" như Facebook, nơi mà 0.01% sai lệch cũng ảnh hưởng đến hàng triệu người dùng.
+
+---
+
+## Series: Cache Handbook
+
+1. [Nền tảng cốt lõi của Caching](/posts/cache-fundamentals)
+2. **Giải mã bài toán Cache Consistency** ← Bạn đang ở đây
+3. [6 "cái bẫy" kinh điển khi dùng Cache](/posts/cache-pitfalls)
+4. [Từ Monitoring đến Scaling](/posts/cache-monitoring-and-scaling)

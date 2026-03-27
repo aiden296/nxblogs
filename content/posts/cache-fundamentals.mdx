@@ -1,0 +1,131 @@
+---
+title: 'Cache Handbook: "Nhanh hơn, rẻ hơn, nhưng không đơn giản hơn" - Nền tảng cốt lõi của Caching'
+date: '2026-03-27'
+tags: ['Backend', 'System Design', 'Cache']
+enableComment: true
+---
+
+# Cache Handbook: "Nhanh hơn, rẻ hơn, nhưng không đơn giản hơn" - Nền tảng cốt lõi của Caching
+
+> Bài viết được tổng hợp và biên soạn lại từ cuốn **"A Cache Handbook for Software Engineers"** của **Quang Hoang** (Software Engineer tại Google). Đây là phần **1/4** trong series.
+
+Có một ảo tưởng phổ biến trong thiết kế phần mềm: *"Hệ thống chậm ư? Cứ gắn thêm Redis vào là xong."* Sự thật là, thêm một lớp Cache không bao giờ làm hệ thống của bạn đơn giản hơn. Nó chỉ chuyển độ phức tạp từ nơi này sang nơi khác.
+
+Trong bài viết đầu tiên của series này, chúng ta sẽ xây dựng nền tảng vững chắc về Caching — từ khái niệm cơ bản đến các chỉ số đo lường hiệu quả.
+
+---
+
+## 1. Caching là gì?
+
+**Caching** là kỹ thuật lưu trữ tạm thời một bản sao dữ liệu ở nơi có tốc độ đọc/ghi cực nhanh. Trong hệ thống phần mềm, nơi này thường là bộ nhớ **RAM**, giúp ứng dụng lấy dữ liệu gần như ngay lập tức thay vì phải tốn thời gian truy vấn từ nguồn (như Database).
+
+Hãy tưởng tượng Database của bạn là một **thư viện khổng lồ nằm ở ngoại ô** (Disk/SSD). Mỗi lần muốn đọc sách, bạn mất 1 tiếng đi xe. Cache chính là **cái bàn làm việc ngay trước mặt bạn** (RAM). Bạn copy những cuốn sách hay đọc nhất để lên bàn. Lần sau muốn đọc, bạn chỉ mất 1 giây để với tay lấy.
+
+---
+
+## 2. Nguyên lý Pareto và tính cục bộ của dữ liệu
+
+Việc lưu trữ toàn bộ Database vào RAM là bất khả thi về mặt chi phí đối với hầu hết hệ thống. Tuy nhiên, hành vi truy cập dữ liệu của người dùng thường tuân theo **Nguyên lý Pareto** (Zipfian Distribution) và **tính cục bộ của dữ liệu** (Temporal Locality):
+
+- **Temporal Locality:** Dữ liệu vừa được truy cập sẽ có xu hướng được truy cập lại trong tương lai gần.
+- **Zipfian Distribution:** Khoảng **80% traffic** của hệ thống thường chỉ tập trung vào **20% dữ liệu "nóng"** (Hot Keys).
+
+Hai nguyên lý này cho phép chúng ta tập trung Cache một phần nhỏ dữ liệu (20%-30%) để giải quyết phần lớn tải của hệ thống.
+
+---
+
+## 3. Chiến lược sử dụng: Khi nào NÊN và KHÔNG NÊN dùng Cache?
+
+Caching không phải là giải pháp vạn năng cho mọi bài toán hiệu năng. Việc áp dụng sai ngữ cảnh sẽ dẫn đến sự phức tạp không cần thiết và các lỗi về tính nhất quán dữ liệu (Data Inconsistency).
+
+### Khi nào NÊN dùng Cache?
+
+- **Read-Heavy Workloads:** Các hệ thống có tỷ lệ Đọc/Ghi cao (thường là ≥ 90/10) như mạng xã hội, catalog sản phẩm.
+- **Chi phí tính toán cao:** Kết quả của những câu query phức tạp, tốn nhiều CPU (Aggregation, Report).
+- **Dữ liệu ít thay đổi:** Dữ liệu tĩnh hoặc tần suất cập nhật thấp (Static assets, Config, Profile user).
+
+### Khi nào KHÔNG NÊN dùng Cache?
+
+- **Write-Heavy:** Dữ liệu thay đổi liên tục. Chi phí để đồng bộ Cache (Invalidation) sẽ triệt tiêu lợi ích của việc đọc nhanh.
+- **Yêu cầu Consistency cao:** Ví dụ các hệ thống tài chính, giao dịch chứng khoán realtime, nơi việc hiển thị dữ liệu cũ (dù chỉ vài ms) là không thể chấp nhận.
+- **Query đơn giản & nhanh:** Nếu query vào DB chỉ mất 50ms và DB chưa quá tải, việc thêm Cache chỉ làm tăng độ phức tạp kiến trúc (Over-engineering).
+
+---
+
+## 4. Phân loại Cache
+
+### 4.1. Theo vị trí (Topology)
+
+**Local Cache**
+
+Lưu dữ liệu ngay trong bộ nhớ RAM của chính process đang chạy ứng dụng (In-process memory). Đặc điểm là tốc độ truy xuất cực nhanh (**sub-microsecond**) do loại bỏ được Network I/O.
+
+**Remote Cache**
+
+Dữ liệu được lưu trữ tập trung tại một cụm server riêng biệt (ví dụ: **Redis**, **Memcached**). Nhược điểm là tốn thêm network latency khi app server giao tiếp với cache server, nhưng Remote Cache có **hit rate cao hơn** Local Cache.
+
+> **Hit Rate** là phần trăm số lần hệ thống tìm thấy dữ liệu yêu cầu nằm sẵn trong Cache trên tổng số yêu cầu truy xuất dữ liệu.
+
+### 4.2. Theo mô hình tương tác
+
+**Look-Aside (Lazy Loading)**
+
+Đây là mô hình phổ biến nhất. App Server đóng vai trò trung gian điều phối:
+
+1. App Server đọc dữ liệu từ Cache.
+2. Nếu **Cache Miss** → App Server đọc dữ liệu từ DB.
+3. App Server cập nhật dữ liệu từ DB vào Cache.
+
+**Inline Cache (Read-Through / Write-Through)**
+
+App Server coi Cache là "nguồn dữ liệu gốc" và **không bao giờ tương tác trực tiếp với DB**. Cache Server sẽ đảm nhận việc đọc/ghi dữ liệu từ DB.
+
+---
+
+## 5. AMAT — Chỉ số đo lường hiệu quả Cache
+
+### 5.1. Công thức AMAT
+
+Hiệu quả của Cache được đo bằng chỉ số **AMAT** (Average Memory Access Time). Đây là công thức nền tảng để đánh giá độ trễ trung bình của hệ thống:
+
+```
+AMAT = Hit Time + (Miss Rate × Miss Penalty)
+```
+
+Trong đó:
+- **Hit Time:** Thời gian đọc từ Cache.
+- **Miss Penalty:** Thời gian đọc từ Database.
+- **Miss Rate:** % request phải xuống DB. `Miss Rate = 1 - Hit Rate`.
+
+**Ví dụ:** Giả sử Hit Time = 1ms (Redis), Miss Penalty = 100ms (MySQL).
+
+- **Không có Cache** (Miss Rate = 100%): `AMAT = 100ms`
+- **Cache với Miss Rate 5%**: `AMAT = 1 + (5% × 100) = 6ms`
+- **Cache với Miss Rate 1%**: `AMAT = 1 + (1% × 100) = 2ms`
+
+> Chỉ bằng việc giảm Miss Rate đi **4%**, ta đã có thể giảm latency tới tận **3 lần**.
+
+### 5.2. Hit Rate và Tail Latency
+
+Chỉ số **Tail Latency p99** đại diện cho 1% những request chậm nhất trong hệ thống. Trong một hệ thống có dùng Cache, p99 bị chi phối trực tiếp bởi **Hit Rate**.
+
+Hãy xem xét hai trường hợp:
+
+1. **Hit Rate = 99.5%** (Miss Rate = 0.5%): Vì chỉ có 0.5% yêu cầu bị "miss", ngưỡng 1% chậm nhất vẫn thuộc nhóm request chạm được vào Cache. Kết quả: **p99 ≈ 1ms**.
+
+2. **Hit Rate = 98.5%** (Miss Rate = 1.5%): Vì 1.5% lớn hơn ngưỡng 1%, toàn bộ nhóm "1% request chậm nhất" giờ đều phải truy vấn DB. **p99 nhảy vọt lên 100ms+**.
+
+Chỉ cần tỷ lệ Hit Cache giảm nhẹ (từ 99.5% xuống 98.5%), tốc độ p99 đã **tệ đi 100 lần**.
+
+**Hiệu ứng dây chuyền:** Khi p99 bị đẩy về phía DB, DB phải xử lý nhiều yêu cầu hơn, dẫn đến chính các truy vấn DB cũng chậm đi, làm cho cái "đuôi" p99 càng dài và tệ hơn nữa.
+
+> **Bài học:** Để giữ Tail Latency thấp, mục tiêu của bạn không chỉ là tối ưu tốc độ Cache mà còn là giữ cho **Miss Rate thấp hơn ngưỡng percentile** mà bạn đang theo dõi.
+
+---
+
+## Series: Cache Handbook
+
+1. **Nền tảng cốt lõi của Caching** ← Bạn đang ở đây
+2. [Giải mã bài toán Cache Consistency](/posts/cache-consistency)
+3. [6 "cái bẫy" kinh điển khi dùng Cache](/posts/cache-pitfalls)
+4. [Từ Monitoring đến Scaling](/posts/cache-monitoring-and-scaling)
