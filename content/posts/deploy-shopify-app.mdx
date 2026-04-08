@@ -1,0 +1,249 @@
+---
+title: 'Deploy Shopify App: "Shopify không host app cho bạn" - Hành trình đưa ứng dụng lên kệ'
+date: '2026-04-08'
+tags: ['Shopify', 'Backend', 'Devops']
+enableComment: true
+---
+
+# Deploy Shopify App: "Shopify không host app cho bạn" - Hành trình đưa ứng dụng lên kệ
+
+Bạn vừa hoàn thành code một Shopify App, chạy `shopify app dev` mượt mà trên local, mọi thứ đều hoạt động. Và rồi bạn tự hỏi: *"Giờ làm sao để deploy lên Shopify?"*
+
+Đây là lúc mà nhiều developer mới bắt đầu bối rối. Bởi vì sự thật là: **Shopify không host ứng dụng của bạn**. Shopify không phải là một nền tảng PaaS như Heroku hay Vercel nơi bạn push code lên và nó tự chạy. Shopify chỉ quản lý app ở **mức logic** — scopes, permissions, app info, OAuth flow, billing, ... — còn phần "chạy thực sự" là việc của bạn.
+
+Hãy hình dung Shopify như **ban quản lý một trung tâm thương mại**. Họ quản lý biển hiệu cửa hàng, hợp đồng thuê, thẻ ra vào, quy định an ninh. Nhưng họ **không xây cửa hàng cho bạn**. Bạn phải tự xây dựng cửa hàng vật lý (deploy app lên cloud), sau đó đến ban quản lý để đăng ký (tạo logical app trên Shopify) và trỏ về địa chỉ cửa hàng của mình.
+
+Vậy nên, "deploy một Shopify App" thực chất là **hai việc riêng biệt**:
+
+1. **Deploy physical app** lên cloud provider của bạn.
+2. **Tạo logical app** trên Shopify và trỏ về physical app đó.
+
+Bài viết này sẽ hướng dẫn bạn từng bước một, kèm theo những lỗi mà mình đã gặp trong quá trình thực hiện.
+
+---
+
+## 0. Điều kiện tiên quyết
+
+Trước khi bắt đầu, hãy đảm bảo bạn đã có:
+
+- **App code hoạt động trên local** — đã test được bằng `shopify app dev`
+- **Tài khoản Shopify Partners** — đăng ký tại [partners.shopify.com](https://partners.shopify.com)
+- **Cloud provider sẵn sàng** — AWS (App Runner, ECS, EC2), Railway, Fly.io, Render, hoặc bất kỳ nền tảng nào bạn quen thuộc
+- **Development Store** — để test app sau khi deploy
+- **Shopify CLI** — đã cài đặt `@shopify/cli`
+- **File `shopify.app.toml`** — file cấu hình app của bạn (có thể có nhiều file cho nhiều environment, ví dụ: `shopify.app.staging.toml`, `shopify.app.production.toml`)
+
+---
+
+## 1. Deploy ứng dụng lên Cloud
+
+Đây là bước đầu tiên và cũng là bước quan trọng nhất: **đưa ứng dụng của bạn lên cloud và đảm bảo nó chạy được**.
+
+Shopify sẽ giao tiếp với app của bạn thông qua HTTP/HTTPS. Nên ứng dụng cần phải:
+
+- Có một **URL public** có thể truy cập được từ internet
+- **Serve được HTTPS** (bắt buộc)
+- **Health check thành công** — ít nhất endpoint gốc phải trả về `200 OK`
+
+Bạn có thể deploy lên bất kỳ cloud provider nào. Một số lựa chọn phổ biến:
+
+- **AWS App Runner / ECS** — phù hợp nếu bạn đã quen với hệ sinh thái AWS
+- **Railway / Render** — đơn giản, phù hợp cho prototype và side projects
+- **Fly.io** — tốt cho các app cần low latency ở nhiều region
+
+Sau khi deploy, hãy verify bằng cách gọi thử:
+
+```bash
+# Kiểm tra health check
+curl -I https://your-app.your-cloud.com/
+
+# Kết quả mong đợi
+# HTTP/2 200
+```
+
+> **Lưu ý:** Nếu endpoint gốc của bạn trả về redirect (301/302), Shopify có thể không nhận diện được app. Hãy đảm bảo có ít nhất một endpoint trả về `200 OK` trực tiếp.
+
+Hãy nghĩ bước này là **"xây xong cửa hàng và bật đèn lên"** — chưa cần biết khách hàng là ai, nhưng cửa hàng phải mở cửa được đã.
+
+---
+
+## 2. Tạo Logical App trên Shopify
+
+Bây giờ cửa hàng vật lý đã sẵn sàng, bạn cần đến "ban quản lý" để đăng ký.
+
+Truy cập:
+
+```
+https://dev.shopify.com/dashboard/<org-id>/apps
+```
+
+Tại đây, nhấn **"Create app"** và điền các thông tin cơ bản cho app của bạn (tên app, mô tả, ...).
+
+Lúc này, Shopify đã biết app của bạn tồn tại — giống như việc bạn đã có **giấy phép kinh doanh**. Tuy nhiên, Shopify chưa biết cửa hàng của bạn nằm ở đâu. Việc trỏ URL sẽ được thực hiện thông qua file config ở bước 5.
+
+### dev.shopify.com vs partners.shopify.com
+
+Đây là một điểm gây nhầm lẫn cho nhiều người:
+
+- **dev.shopify.com** — dashboard mới, nơi bạn tạo và quản lý apps, xem API credentials
+- **partners.shopify.com** — dashboard cũ hơn, nhưng vẫn cần thiết cho một số tính năng như **App Distribution** và **quản lý restricted scopes**
+
+Bạn sẽ cần dùng **cả hai** trong quá trình deploy.
+
+---
+
+## 3. Cấu hình Restricted Scopes và App Distribution
+
+Bước này **không phải lúc nào cũng cần thiết**, nhưng nếu app của bạn rơi vào một trong các trường hợp sau thì **bắt buộc phải làm**:
+
+- App sử dụng **restricted scopes** như `write_orders`, `read_all_orders`, `write_customers`, ...
+- App có **extensions sử dụng network access** (ví dụ: Checkout UI Extension gọi API bên ngoài)
+
+### Restricted Scopes là gì?
+
+Shopify phân loại API scopes thành hai nhóm:
+
+- **Standard scopes** — các quyền cơ bản như `read_products`, `write_products`, `read_orders`. Bạn có thể sử dụng ngay mà không cần phê duyệt.
+- **Restricted scopes** — các quyền liên quan đến dữ liệu nhạy cảm hoặc hành động ảnh hưởng lớn (tạo đơn hàng, truy cập toàn bộ customer data, ...). Shopify yêu cầu bạn phải **giải thích lý do** và được **phê duyệt** trước khi sử dụng.
+
+### Cách enable
+
+1. Truy cập [partners.shopify.com](https://partners.shopify.com)
+2. Chọn app của bạn → **Distribution**
+3. Enable distribution và submit request cho các restricted scopes
+
+> **Lưu ý:** Quá trình review từ Shopify có thể mất thời gian. Nếu bạn bỏ qua bước này mà app cần restricted scopes, lệnh `shopify app deploy` ở bước 5 sẽ **fail với lỗi thiếu permission** — và error message có thể không rõ ràng lắm.
+
+---
+
+## 4. Lấy API Credentials và cập nhật Cloud App
+
+Quay lại **dev.shopify.com**, vào phần **Settings** của app vừa tạo, bạn sẽ tìm thấy:
+
+- **Client ID** (hay còn gọi là API Key)
+- **Client Secret** (hay còn gọi là API Secret Key)
+
+Đây là "chìa khóa" để app của bạn có thể xác thực và giao tiếp với Shopify. Hãy cập nhật các giá trị này vào biến môi trường của ứng dụng trên cloud:
+
+```bash
+# Các biến môi trường cần thiết cho Shopify App
+SHOPIFY_API_KEY=your_client_id_here
+SHOPIFY_API_SECRET=your_client_secret_here
+SCOPES=write_products,read_orders
+HOST=https://your-app.your-cloud.com
+```
+
+Sau đó **redeploy** ứng dụng để các biến mới có hiệu lực.
+
+> **Tip bảo mật:** Không nên lưu API Secret dưới dạng plain text trong environment variables của cloud console. Hãy sử dụng một secrets manager để quản lý. Nếu bạn dùng AWS, có thể tham khảo bài viết [Hướng dẫn quản lý biến môi trường với AWS Secrets Manager cho App Runner](/posts/using-secrets-manager-from-app-runner).
+
+Sau khi redeploy, nhớ kiểm tra lại health check để đảm bảo app vẫn hoạt động bình thường:
+
+```bash
+curl -I https://your-app.your-cloud.com/
+# HTTP/2 200 ← vẫn OK
+```
+
+---
+
+## 5. Đồng bộ cấu hình với Shopify CLI
+
+Đây là bước **kết nối mọi thứ lại với nhau**. Lệnh `shopify app deploy` sẽ đọc file config trên local của bạn và đồng bộ lên Shopify — bao gồm URL của app, redirect URLs, scopes, và các cấu hình extensions.
+
+```bash
+# Deploy cấu hình cho môi trường production
+shopify app deploy --config production
+
+# Lệnh này sẽ đọc file shopify.app.production.toml
+```
+
+### File shopify.app.toml chứa những gì?
+
+Đây là file cấu hình trung tâm của Shopify App, định nghĩa mọi thông tin mà Shopify cần biết:
+
+```toml
+# shopify.app.production.toml
+name = "My Awesome App"
+client_id = "your_client_id"
+application_url = "https://your-app.your-cloud.com"
+
+[auth]
+redirect_urls = [
+  "https://your-app.your-cloud.com/auth/callback"
+]
+
+[access_scopes]
+scopes = "write_products,read_orders"
+
+# Cấu hình cho các extensions (nếu có)
+# [extensions.pos_ui]
+# ...
+```
+
+Sau khi chạy `shopify app deploy`, Shopify sẽ biết chính xác app của bạn đang chạy ở đâu, cần những quyền gì, và redirect về đâu sau khi OAuth.
+
+> **Quan trọng:** Bước 3 (restricted scopes approval) phải hoàn tất **trước** khi chạy lệnh này. Nếu chưa được approve, deploy sẽ fail.
+
+---
+
+## 6. Cài đặt App vào Dev Store để kiểm thử
+
+Mọi thứ đã sẵn sàng. Bây giờ hãy install app vào Development Store để kiểm tra toàn bộ flow hoạt động:
+
+1. Vào app trong dashboard Shopify → lấy **install link**
+2. Mở link trên Dev Store → hoàn tất **OAuth flow**
+3. App sẽ xuất hiện trong admin của Dev Store
+
+### Checklist kiểm thử
+
+Sau khi install, hãy verify các điểm sau:
+
+- **OAuth flow** hoàn tất không lỗi — app được install thành công
+- **App loads** đúng trong Shopify Admin — không bị blank page hay lỗi CORS
+- **API calls** hoạt động — thử các operation cơ bản (read products, create draft order, ...)
+- **Webhooks** được nhận (nếu app có đăng ký) — kiểm tra logs trên cloud
+- **App Extensions** render đúng (nếu có) — kiểm tra trên storefront hoặc checkout
+
+> Nếu OAuth flow bị lỗi redirect, hãy kiểm tra lại `redirect_urls` trong file toml có khớp chính xác với URL trên cloud hay không (bao gồm cả protocol `https://` và trailing path).
+
+---
+
+## Tóm tắt quy trình
+
+| Bước | Hành động | Nơi thực hiện |
+|------|-----------|---------------|
+| 0 | Chuẩn bị Prerequisites | Local |
+| 1 | Deploy app lên cloud, verify health check | Cloud Provider |
+| 2 | Tạo logical app | dev.shopify.com |
+| 3 | Enable restricted scopes (nếu cần) | partners.shopify.com |
+| 4 | Lấy API credentials, cập nhật env, redeploy | dev.shopify.com + Cloud |
+| 5 | `shopify app deploy --config <env>` | Terminal (Shopify CLI) |
+| 6 | Install app vào Dev Store, kiểm thử | Shopify Admin |
+
+Luôn nhớ mental model: **Shopify quản lý danh tính, bạn quản lý hạ tầng**. "Deploy Shopify App" không phải là push code lên Shopify, mà là đăng ký app của bạn với Shopify và trỏ về nơi app đang thực sự chạy.
+
+---
+
+## Những lỗi thường gặp
+
+Dưới đây là một số lỗi mà bạn có thể gặp phải trong quá trình deploy:
+
+**Health check fail**
+- App trả về redirect (301/302) thay vì 200 ở root URL
+- SSL certificate chưa được cấu hình đúng (Shopify yêu cầu HTTPS)
+- App chưa start xong khi Shopify thực hiện health check (cold start quá lâu)
+
+**Permission errors khi chạy `shopify app deploy`**
+- Restricted scopes chưa được approve trên partners.shopify.com
+- App distribution chưa được enable
+- Network access cho extensions chưa được bật
+
+**OAuth redirect lỗi**
+- `redirect_urls` trong file toml không khớp với URL thực tế trên cloud
+- Thiếu hoặc sai protocol (`http` vs `https`)
+- Sai `client_id` trong file config — đặc biệt hay xảy ra khi bạn có nhiều environment
+
+**App hiển thị blank page sau khi install**
+- `SHOPIFY_API_KEY` hoặc `SHOPIFY_API_SECRET` chưa được cập nhật trên cloud
+- Frontend app không được cấu hình đúng `HOST` — dẫn đến iframe không load được
+- CORS policy chặn request từ Shopify Admin domain
