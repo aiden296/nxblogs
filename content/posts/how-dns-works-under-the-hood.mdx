@@ -1,0 +1,329 @@
+---
+title: 'DNS hoạt động như thế nào dưới lớp vỏ: Cuốn danh bạ của Internet'
+date: '2026-04-25'
+tags: ['Networking', 'DNS']
+enableComment: true
+---
+
+# DNS hoạt động như thế nào dưới lớp vỏ: Cuốn danh bạ của Internet
+
+Bạn gõ `google.com` và nhấn Enter. Vài chục mili-giây sau, trang chủ Google hiện ra. Có vẻ chẳng có gì đáng nói — nhưng giữa khoảnh khắc nhấn Enter và lúc trình duyệt biết phải gọi đến server nào, một chuỗi sự kiện đã chạy qua nhiều tầng máy chủ rải rác khắp thế giới. Đó là công việc của **DNS**.
+
+Hãy hình dung Internet là một thành phố khổng lồ với hàng tỷ ngôi nhà. Mỗi ngôi nhà có một địa chỉ số dài lằng nhằng kiểu `142.250.66.78` (IPv4) hay `2607:f8b0:4006:80c::200e` (IPv6). Không ai nhớ nổi từng đó địa chỉ. Vì vậy chúng ta cần một **cuốn danh bạ**: gõ tên ("google.com"), trả về địa chỉ. Cuốn danh bạ ấy chính là DNS — Domain Name System.
+
+![DNS hoạt động dưới lớp vỏ](/how-dns-work-under-the-hood.svg)
+
+Bài viết này sẽ bóc tách lớp vỏ ấy: ai giữ cuốn danh bạ, ai đi tra giùm bạn, vì sao tra một cái tên lại đi qua tới bốn loại server khác nhau, và vì sao toàn bộ quá trình đó vẫn chỉ tốn vài mili-giây.
+
+> Bài viết được tham khảo và mở rộng từ bài *"How DNS Actually Works"* của **AlgoMaster**, có bổ sung phần giải thích chi tiết khái niệm cho từng component.
+
+---
+
+## 1. DNS là gì và vì sao chúng ta cần nó?
+
+**DNS** (Domain Name System) là hệ thống phân tán có nhiệm vụ **dịch tên miền sang địa chỉ IP** mà máy tính có thể hiểu. Nó hoạt động như một cuốn danh bạ điện thoại của Internet: tên miền là "tên người", IP là "số điện thoại".
+
+Tại sao không gõ thẳng IP cho nhanh?
+
+- **Con người không nhớ nổi IP.** `youtube.com` thì dễ; `142.250.190.46` thì không.
+- **IP có thể đổi.** Server di chuyển sang data center khác, đổi nhà cung cấp cloud, hoặc đơn giản là scale ra nhiều IP cho load balancing — nếu user phải nhớ IP thì mỗi lần đổi là một lần khủng hoảng.
+- **Một domain trỏ tới nhiều IP.** Các site lớn như Facebook hay Netflix có hàng trăm edge server. DNS cho phép trả về IP gần nhất với người dùng.
+
+Nói cách khác, DNS là một **lớp gián tiếp** (indirection layer) đặt giữa con người và hạ tầng. Đổi backend, đổi cloud, đổi region — DNS che hết phía sau, người dùng chỉ thấy đúng một cái tên không đổi.
+
+---
+
+## 2. Hành trình của một DNS query — 7 bước
+
+Khi bạn gõ `example.com`, query của bạn không bay thẳng đến một "server tổng" nào cả. Nó đi qua một chuỗi tầng cache và server phân cấp, mỗi tầng được tối ưu cho một mục đích khác nhau.
+
+### 2.1. Browser Cache
+
+Trình duyệt là tầng đầu tiên kiểm tra. Mỗi browser duy trì một bảng cache nhỏ trong RAM, lưu các tên miền vừa được phân giải gần đây (vài phút đến vài giờ tuỳ TTL).
+
+Trên Chrome bạn có thể nhìn thấy bảng này tại `chrome://net-internals/#dns`. Nếu domain đã có sẵn trong cache, browser dùng luôn IP đó — toàn bộ hành trình bên dưới được bỏ qua.
+
+### 2.2. OS Cache (stub resolver)
+
+Nếu browser cache miss, query đi xuống tầng hệ điều hành. Mỗi OS có một **stub resolver** — một thành phần nhỏ chịu trách nhiệm hỏi DNS giúp tất cả ứng dụng:
+
+- macOS: `mDNSResponder`
+- Linux: `systemd-resolved` hoặc `dnsmasq`
+- Windows: `DNS Client Service`
+
+Stub resolver có cache riêng, và quan trọng hơn, nó đọc file `hosts` (`/etc/hosts` trên Unix, `C:\Windows\System32\drivers\etc\hosts` trên Windows) **trước khi truy vấn ra mạng**. Đây là cơ chế cho phép developer override DNS cục bộ — ví dụ ép `myapp.local` trỏ về `127.0.0.1`.
+
+### 2.3. Recursive Resolver
+
+OS cache miss, stub resolver gửi query ra ngoài tới một **recursive resolver** — đây là nhân vật trung tâm của hệ thống DNS.
+
+Recursive resolver giống như một **người trung gian** mà bạn nhờ đi tra danh bạ giùm. Bạn không trực tiếp đi gõ cửa từng tầng server, bạn chỉ hỏi resolver một câu duy nhất: *"IP của example.com là gì?"* — và resolver tự lo liệu mọi thứ phía sau.
+
+Resolver thường được vận hành bởi:
+
+- **ISP** (FPT, Viettel, VNPT...) — mặc định khi bạn cắm cáp Internet ở nhà.
+- **Public resolver** — `8.8.8.8` (Google), `1.1.1.1` (Cloudflare), `9.9.9.9` (Quad9). Người dùng có thể tự đổi sang các resolver này để nhanh hơn hoặc bảo mật hơn.
+- **Doanh nghiệp tự host** — các công ty lớn thường chạy resolver nội bộ để kiểm soát và tăng tốc.
+
+Quan trọng nhất: **resolver có cache lớn nhất trong toàn hệ thống**. Một resolver công cộng phục vụ hàng triệu user — nếu một trong số họ vừa truy vấn `youtube.com`, kết quả nằm sẵn trong cache cho tất cả những người tới sau, ít nhất cho đến khi TTL hết hạn.
+
+### 2.4. Root Servers
+
+Nếu resolver cũng cache miss, nó bắt đầu đi từ trên xuống — và đỉnh kim tự tháp là **root servers**.
+
+Có **13 cụm root server** được đặt tên từ A đến M (`a.root-servers.net` đến `m.root-servers.net`), được vận hành bởi 12 tổ chức khác nhau (gồm Verisign, ICANN, NASA, các trường đại học, các tổ chức nghiên cứu...). Đừng nghĩ "13 cụm" có nghĩa là "13 máy" — nhờ **anycast** (xem mục 5), thực tế có hàng nghìn máy chủ vật lý mang chung 13 địa chỉ IP này, rải khắp mọi châu lục.
+
+Root server **không trực tiếp trả lời** IP của `example.com`. Chúng chỉ làm một việc: nhìn vào phần đuôi của tên miền (`.com`, `.org`, `.vn`...) và chỉ resolver đi tới TLD server tương ứng. Giống như nhân viên tổng đài chỉ bạn xem số trong cuốn danh bạ vùng nào.
+
+### 2.5. TLD Servers
+
+**TLD** (Top-Level Domain) là phần đuôi của domain. TLD server quản lý danh sách tất cả các domain dưới một đuôi cụ thể — và đặc biệt là biết **authoritative server của từng domain** đó nằm ở đâu.
+
+Một số ví dụ về tổ chức quản lý TLD:
+
+- **Verisign** — quản lý `.com` và `.net` (lớn nhất thế giới, gần 200 triệu domain).
+- **PIR** (Public Interest Registry) — quản lý `.org`.
+- **VNNIC** — quản lý `.vn`.
+- **Afilias / Identity Digital** — quản lý nhiều gTLD mới như `.io`, `.info`...
+
+Các tổ chức này được gọi chung là **registry**, các registry này được tổ chức ICANN uỷ quyền để quản lý các **top level domain** (có thể 1 hoặc nhiều TLD, nhưng mỗi TLD chỉ được quản lý bởi 1 registry).
+
+Còn **TLD server** chính là cơ sở hạ tầng hệ thống được vận hành bởi registry.
+
+TLD server cũng không trả lời destination IP. Nó tiếp tục chỉ đường: *"Authoritative của example.com là `ns1.example-host.com` và `ns2.example-host.com`, hãy hỏi mấy ông đó."*
+
+### 2.6. Authoritative Name Server
+
+Đây là **nguồn sự thật** cuối cùng cho một domain cụ thể. Authoritative server lưu trữ **zone file** thực sự — file chứa tất cả records của domain (A, AAAA, CNAME, MX...). Nó là server duy nhất có quyền nói: *"IP của example.com là 93.184.216.34."*
+
+Khi bạn mua một domain ở Namecheap, GoDaddy, hay Cloudflare, và bạn vào dashboard chỉnh sửa DNS records — thực chất bạn đang chỉnh sửa zone file trên authoritative server của họ.
+
+Các nhà cung cấp như Namecheap, GoDaddy, Cloudflare được gọi chung là **registrar**, họ giống như các nhà bán lẻ, được uỷ quyền để mua bán domain.
+
+Họ cung câp cho người dùng 1 trang quản trị để mua, bán, quản lý, thao tác với domain.
+
+**Ví dụ**: Khi người dùng A mua domain `myshop.com`, registrar sẽ thông báo với TLD server `.com` rằng `myshop.com` domain được mua bởi ông A, và cho TLD server biết về Authoritative Name Server của mình, để khi dns resolver hỏi đến, TLD server sẽ biết nơi để hướng dẫn resolver tìm kết quả.
+
+Để chống single point of failure, một domain hầu như luôn khai báo **ít nhất 2 authoritative server**:
+
+- **Primary (master)** — server gốc, nơi zone file được chỉnh sửa.
+- **Secondary (slave)** — server đồng bộ định kỳ từ primary qua cơ chế **zone transfer** (AXFR/IXFR). Nếu primary chết, secondary vẫn trả lời được.
+
+### 2.7. Đường về
+
+Sau khi authoritative trả IP, hành trình đảo ngược:
+
+1. **Resolver** nhận IP, **cache** nó với TTL được authoritative khai báo.
+2. **OS** nhận IP từ resolver, cache trong stub resolver.
+3. **Browser** nhận IP từ OS, cache trong bảng nội bộ.
+4. **Browser mở TCP/TLS** tới IP đó và bắt đầu HTTP request.
+
+Lần truy vấn tiếp theo trong vài giây tới? Browser cache hit, không tới một bước nào ở trên cả.
+
+> **Recursive vs Iterative query.** Có hai kiểu truy vấn dễ nhầm:
+>
+> - **Recursive query**: client (stub resolver) nói với recursive resolver: *"Hãy trả lời tôi IP cuối cùng, dù phải đi qua bao nhiêu tầng cũng được."* Đây là cách stub resolver hỏi public resolver.
+> - **Iterative query**: recursive resolver nói với root/TLD/authoritative: *"Bạn không cần trả lời hết, chỉ cần chỉ tôi đi tới đâu tiếp theo."* Đây là cách resolver leo qua từng tầng.
+>
+> Cùng một resolver đóng cả hai vai trò: nhận recursive từ client, gửi iterative ra Internet.
+
+---
+
+## 3. Các loại DNS Records
+
+Zone file của một domain không chỉ chứa "tên → IP". Có nhiều loại record cho nhiều mục đích khác nhau. Đây là những loại bạn sẽ gặp thường xuyên nhất.
+
+### A — IPv4 address
+
+Loại record cơ bản nhất: ánh xạ tên miền sang địa chỉ IPv4.
+
+```
+example.com.    A    93.184.216.34
+```
+
+### AAAA — IPv6 address
+
+Tương đương A nhưng cho IPv6. Tên gọi "AAAA" (đọc là "quad-A") đến từ việc IPv6 dài gấp 4 lần IPv4 (128 bit so với 32 bit).
+
+```
+example.com.    AAAA    2606:2800:220:1:248:1893:25c8:1946
+```
+
+### CNAME — Canonical Name
+
+Alias chỉ tới một tên khác. Hữu ích khi bạn muốn nhiều subdomain cùng trỏ tới một host:
+
+```
+www.example.com.    CNAME    example.com.
+api.example.com.    CNAME    my-loadbalancer.aws.com.
+```
+
+Có một quy tắc quan trọng: **không được đặt CNAME ở apex** (tức là ở chính `example.com`, không có subdomain). Nguyên do là apex bắt buộc phải có các record metadata khác (NS, SOA), mà CNAME thì không cho phép cùng tồn tại với record khác. Để giải quyết, các nhà cung cấp như Cloudflare, Route 53 phát minh ra **ALIAS / ANAME / CNAME flattening** — về mặt cấu hình giống CNAME nhưng được "phẳng hoá" thành A record khi trả về.
+
+### MX — Mail Exchange
+
+Khai báo server nhận email cho domain. Có **priority** để failover:
+
+```
+example.com.    MX    10 mx1.mail-provider.com.
+example.com.    MX    20 mx2.mail-provider.com.
+```
+
+Khi gửi mail tới `you@example.com`, mail server bên gửi đọc MX records và thử gửi tới priority thấp nhất trước (10), nếu fail mới sang 20.
+
+### NS — Name Server
+
+Khai báo authoritative name server cho domain hoặc subdomain. Đây là cơ sở của **delegation** — cơ chế "uỷ quyền" một subdomain cho một bộ NS riêng:
+
+```
+example.com.        NS    ns1.example-host.com.
+example.com.        NS    ns2.example-host.com.
+sub.example.com.    NS    ns1.other-host.com.
+```
+
+Dòng cuối nghĩa là: ai hỏi về `sub.example.com` thì đi hỏi `ns1.other-host.com`, không phải authoritative của `example.com` nữa.
+
+### TXT — Text Record
+
+Một chuỗi văn bản tự do. Trông có vẻ vu vơ, nhưng TXT là nơi diễn ra hầu hết các tác vụ "verify" và bảo mật email:
+
+- **SPF** — danh sách IP được phép gửi mail thay mặt domain.
+- **DKIM** — public key để xác thực chữ ký email.
+- **DMARC** — chính sách xử lý mail không vượt qua SPF/DKIM.
+- **Domain ownership verification** — Google, AWS, Cloudflare yêu cầu thêm một TXT record để chứng minh bạn sở hữu domain.
+
+### PTR — Reverse DNS
+
+Ánh xạ ngược: IP → tên. Dùng chủ yếu cho **mail server reputation** — mail server bên nhận sẽ check rằng IP gửi mail có PTR khớp với hostname không. Không có PTR hợp lệ thì email rất dễ bị đánh dấu spam.
+
+### SOA — Start of Authority
+
+Record metadata bắt buộc của mọi zone, chứa các thông tin về việc đồng bộ giữa primary và secondary:
+
+- **Serial number** — version của zone, tăng mỗi lần edit.
+- **Refresh / Retry** — secondary kiểm tra primary mỗi bao lâu.
+- **Expire** — secondary giữ data cũ trong bao lâu nếu không liên lạc được primary.
+- **Minimum TTL** — TTL mặc định cho negative cache.
+
+### CAA — Certification Authority Authorization
+
+Khai báo CA (Certificate Authority) nào được phép cấp SSL cert cho domain. Đây là một lớp bảo vệ chống việc CA "cẩu thả" cấp cert cho người không phải chủ domain:
+
+```
+example.com.    CAA    0 issue "letsencrypt.org"
+```
+
+Nghĩa là: chỉ Let's Encrypt được phép cấp cert cho `example.com`.
+
+### Các record hiện đại
+
+- **SRV** — chỉ định host và port cho một dịch vụ cụ thể (ví dụ XMPP, SIP).
+- **SVCB / HTTPS** (RFC 9460) — record mới sinh ra để gói gọn nhiều thông tin connection (HTTP/3, ECH, port) trong một lookup duy nhất, giảm số round-trip.
+
+---
+
+## 4. Caching và TTL — vì sao DNS không sập
+
+Toàn bộ hệ thống DNS xử lý hàng **nghìn tỷ truy vấn mỗi ngày**. Nếu mỗi truy vấn đều phải đi từ root xuống authoritative, root server đã sập từ lâu. Bí mật để DNS scale được nằm ở **caching nhiều tầng** — và linh hồn của caching là **TTL**.
+
+**TTL** (Time-To-Live) là số giây mà một resolver được phép giữ kết quả trong cache trước khi phải đi hỏi lại. TTL được khai báo bởi authoritative server, đi kèm mỗi record.
+
+Lựa chọn TTL là một bài toán đánh đổi:
+
+- **TTL ngắn** (vài chục giây đến vài phút): khi đổi IP, người dùng được cập nhật gần như tức thì. Phù hợp với hệ thống cần failover nhanh, A/B testing, blue-green deployment. Đánh đổi: tải lên authoritative server tăng vọt.
+- **TTL dài** (vài giờ đến một ngày): tải nhẹ, phản hồi nhanh từ cache. Đánh đổi: đổi IP phải chờ resolver hết TTL mới propagate. Đây chính là lý do người ta thường nói "đổi DNS phải chờ 24-48h" — không phải DNS chậm, mà là **cache cũ ở các resolver trên đường vẫn còn hiệu lực**.
+
+Một mẹo phổ biến trước khi migration: **giảm TTL xuống vài phút** trước vài ngày, đợi cache cũ hết hạn, rồi mới đổi IP. Sau khi ổn định lại tăng TTL lên cho nhẹ tải.
+
+Một khái niệm nữa cần biết: **Negative caching** (RFC 2308). Khi authoritative trả về NXDOMAIN ("không tồn tại"), resolver cũng cache cái "không tồn tại" đó trong một khoảng thời gian. Nếu không, mỗi lần ai đó gõ nhầm tên miền, query sẽ leo lên tận root — không scale nổi.
+
+---
+
+## 5. Hạ tầng tốc độ và chống chịu — vì sao DNS chỉ mất vài ms
+
+Caching là chuyện ở phía resolver. Phía authoritative server, có nhiều kỹ thuật khác giúp DNS phản hồi nhanh và không bao giờ "sập":
+
+### Anycast routing
+
+Đây là kỹ thuật quan trọng nhất. **Anycast** là việc nhiều máy chủ vật lý ở các vị trí địa lý khác nhau cùng announce **chung một địa chỉ IP** ra Internet thông qua BGP. Router sẽ tự động định tuyến gói tin tới máy chủ "gần nhất" theo metric BGP.
+
+Ví dụ: `1.1.1.1` của Cloudflare không phải một máy chủ — đó là hàng trăm máy chủ ở hơn 300 thành phố cùng dùng chung IP đó. Bạn ở Hà Nội query `1.1.1.1`, gói tin của bạn được route tới data center Cloudflare ở Singapore hoặc HCM (tuỳ ISP). Người ở New York query cùng IP, gói tin của họ tới data center New York.
+
+Root server cũng dùng anycast — đó là lý do "13 cụm root" thực chất là hàng nghìn máy chủ vật lý.
+
+### Server dự phòng
+
+Một domain không bao giờ được phép có 1 NS duy nhất. Best practice là khai báo **ít nhất 2 NS, đặt ở các Autonomous System (AS) khác nhau, ở các vùng địa lý khác nhau**. Nếu một data center cháy, NS còn lại vẫn phục vụ.
+
+### GeoDNS
+
+Authoritative server **trả về IP khác nhau dựa trên vị trí của resolver hỏi**. Đây là cơ sở của:
+
+- **CDN routing** — Cloudflare/Akamai trả IP edge gần user nhất.
+- **Compliance** — user ở EU được trả về server ở EU để dữ liệu không rời khu vực.
+- **Latency optimization** — game server trả về region gần nhất.
+
+Cơ chế: authoritative đọc IP nguồn của resolver (hoặc EDNS Client Subnet) → tra database GeoIP → chọn IP phù hợp.
+
+### Load balancing qua DNS
+
+Cách đơn giản nhất: trả về **nhiều A record cùng lúc** với thứ tự xoay vòng (round-robin DNS):
+
+```
+api.example.com.    A    10.0.0.1
+api.example.com.    A    10.0.0.2
+api.example.com.    A    10.0.0.3
+```
+
+Mỗi resolver hỏi sẽ nhận thứ tự khác nhau, phân phối tải. Nâng cao hơn có **weighted records** — gán trọng số để gửi 80% traffic về region chính, 20% về region dự phòng.
+
+### Tích hợp CDN
+
+Khi bạn đặt một domain sau Cloudflare, Akamai, hay AWS CloudFront, authoritative DNS thực ra là DNS của CDN. Mỗi truy vấn đều kết hợp anycast + GeoDNS + health check để trả về IP của edge server **gần nhất, khoẻ mạnh, ít tải nhất**. Người dùng cuối không biết — họ chỉ thấy site load nhanh.
+
+---
+
+## 6. Bảo mật DNS
+
+DNS được thiết kế từ thập niên 1980, khi Internet còn nhỏ và mọi người tin nhau. Hậu quả là về mặc định, DNS có hai vấn đề lớn:
+
+**1. Không mã hoá.** Truy vấn DNS đi qua UDP port 53, plain text. ISP, người ngồi cùng Wi-Fi quán cà phê, hay ai đó nắm được hop trên đường — đều có thể nhìn thấy bạn đang truy vấn domain nào. Đây là vấn đề về **privacy**.
+
+**2. Không xác thực.** Resolver không có cách cryptographic nào để biết câu trả lời nó nhận về có thực sự đến từ authoritative thật, hay từ kẻ tấn công đã chen vào giữa. Đây là cơ sở của tấn công **cache poisoning** và **DNS spoofing**.
+
+Ba công nghệ chính giải quyết hai vấn đề trên:
+
+### DoH — DNS over HTTPS
+
+Truy vấn DNS được đóng gói trong HTTPS request thông thường tới resolver. Bên ngoài nhìn vào chỉ thấy traffic HTTPS, không phân biệt được đó là DNS hay duyệt web. Hỗ trợ rộng rãi: Firefox, Chrome, iOS, Android đều có thể bật DoH.
+
+### DoT — DNS over TLS
+
+Truy vấn DNS đi qua một kết nối TLS chuyên dụng (port 853). Tách biệt port khiến DoT dễ filter ở cấp doanh nghiệp hơn DoH (đó là lý do enterprise thường thích DoT, còn end-user thường thích DoH).
+
+Cả DoH và DoT chỉ giải quyết **privacy giữa client và resolver**. Từ resolver ra Internet vẫn là DNS plain (đến lúc nào đó tương lai có thể thay đổi).
+
+### DNSSEC — Domain Name System Security Extensions
+
+Đây là giải pháp cho vấn đề **xác thực**. DNSSEC thêm **chữ ký số** vào mỗi record. Resolver có thể verify rằng câu trả lời thực sự đến từ authoritative server bằng chuỗi tin cậy:
+
+- Root server có **public key** được phân phối sẵn (trust anchor).
+- Root ký NS record của TLD bằng private key của root.
+- TLD ký NS record của domain bằng private key của TLD.
+- Authoritative ký các record của domain bằng private key của domain.
+
+Nếu bất kỳ chữ ký nào không khớp, resolver biết có kẻ giả mạo và từ chối kết quả.
+
+DNSSEC chống được cache poisoning, nhưng deploy phức tạp và không bảo vệ privacy — nên trong thực tế nhiều domain vẫn chưa bật. Xu hướng hiện tại là kết hợp **DoH/DoT + DNSSEC** để giải quyết cả hai vấn đề.
+
+---
+
+## 7. Tóm lại
+
+DNS không phải "một server tổng giữ tất cả tên miền". Nó là một **hệ thống phân tán, phân cấp, và cache nhiều lớp**:
+
+- **Phân tán** — không một bên nào nắm hết. Quyền lực được chia cho ICANN ở root, các registry ở TLD, và các registrar/chủ domain ở authoritative.
+- **Phân cấp** — mỗi tầng chỉ biết tầng tiếp theo. Root chỉ biết TLD, TLD chỉ biết authoritative, authoritative biết zone của mình. Cấu trúc cây rõ ràng giúp hệ thống scale tới hàng tỷ domain mà không nghẽn ở đâu.
+- **Cache nhiều lớp** — browser, OS, resolver, mỗi tầng đều giữ kết quả trong TTL. Nhờ đó hơn 95% truy vấn không bao giờ chạm đến authoritative.
+
+Và quan trọng nhất, DNS là **lớp gián tiếp** che giấu mọi sự thay đổi của hạ tầng phía sau. Bạn đổi cloud từ AWS sang GCP, đổi region từ Singapore sang Tokyo, scale từ 1 server lên 1000 edge node — người dùng vẫn chỉ gõ đúng cái tên cũ và mọi thứ vẫn chạy. Đó là lý do DNS, dù được thiết kế từ năm 1983, vẫn là một trong những nền móng quan trọng nhất của Internet hiện đại.
