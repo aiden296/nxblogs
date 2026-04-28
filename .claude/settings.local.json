@@ -3,7 +3,16 @@
     "allow": [
       "Bash(npm run:*)",
       "Bash(pnpm build *)",
-      "Bash(yarn build *)"
+      "Bash(yarn build *)",
+      "WebSearch",
+      "WebFetch(domain:arpit.substack.com)",
+      "WebFetch(domain:systemdr.substack.com)",
+      "WebFetch(domain:dimakorolev.substack.com)",
+      "WebFetch(domain:thearchitectsnotebook.substack.com)",
+      "WebFetch(domain:emmanuelvalverderamos.substack.com)",
+      "WebFetch(domain:learnicious.substack.com)",
+      "WebFetch(domain:theexcitedengineer.substack.com)",
+      "WebFetch(domain:corecraft.substack.com)"
     ]
   }
 }

@@ -15,28 +15,11 @@ Nửa tiếng sau, bạn nhận được **3 email xác nhận** và tài khoả
 
 ---
 
-## 1. Nguồn gốc: Từ đại số đến hệ phân tán
+## 1. Nguồn gốc và bối cảnh
 
-### 1.1. Năm 1870 — Benjamin Peirce và phép nhân "tự thân"
+### 1.1. Định nghĩa: một thao tác idempotent là gì?
 
-Thuật ngữ **idempotent** được nhà toán học người Mỹ **Benjamin Peirce** đặt ra trong tác phẩm _"Linear Associative Algebra"_ (1870). Ông gọi một phần tử `x` là idempotent nếu:
-
-```
-x · x = x
-```
-
-Tức là nhân nó với chính nó vẫn ra chính nó. Từ "idempotent" có gốc Latin: _idem_ (cùng) + _potent_ (lực, khả năng) — nghĩa đen là "vẫn cùng một sức mạnh" dù áp dụng bao nhiêu lần.
-
-Vài ví dụ quen thuộc:
-
-- `1 · 1 = 1`, `0 · 0 = 0`
-- `abs(abs(x)) = abs(x)` — lấy giá trị tuyệt đối hai lần vẫn ra cùng kết quả
-- `A ∪ A = A` — hợp của một tập với chính nó vẫn là chính nó
-- `max(max(x, y), max(x, y)) = max(x, y)`
-
-### 1.2. Computer Science: từ phép toán đến thao tác
-
-Khi khái niệm này du nhập vào CS, nó được tổng quát hóa: một **thao tác** (operation, function, API call) được gọi là idempotent nếu:
+Trong Computer Science, một **thao tác** (operation, function, API call) được gọi là idempotent nếu:
 
 ```
 f(f(x)) = f(x)
@@ -49,7 +32,7 @@ Hay nói cách khác: **chạy thao tác đó 1 lần hay N lần đều cho cù
 - `DELETE FROM users WHERE id = 7` → idempotent (lần đầu xoá, các lần sau no-op).
 - `INSERT INTO users(name) VALUES('Quang')` → **không** idempotent (mỗi lần insert thêm một row mới).
 
-### 1.3. HTTP — RFC 2616 (1999) → RFC 9110 (2022)
+### 1.2. HTTP — RFC 2616 (1999) → RFC 9110 (2022)
 
 Khi web nổi lên, IETF chuẩn hoá khái niệm này vào **HTTP semantics**. Theo RFC 9110:
 
@@ -67,7 +50,7 @@ Khi web nổi lên, IETF chuẩn hoá khái niệm này vào **HTTP semantics**.
 
 > Đây là **semantic contract**, không phải implementation guarantee. RFC chỉ nói rằng _nếu bạn implement đúng tinh thần_, các method này phải idempotent. Còn việc bug làm sai thì... vẫn sai.
 
-### 1.4. Distributed systems era: Stripe và Idempotency-Key
+### 1.3. Distributed systems era: Stripe và Idempotency-Key
 
 Đến giữa thập niên 2010, microservices và mobile bùng nổ. Mạng trở thành công dân hạng hai: timeout, retry, mobile chuyển vùng, proxy retry... đã trở thành chuyện thường ngày. **Vấn đề là `POST` thì không idempotent**, nhưng business lại có vô vàn `POST` quan trọng: tạo đơn, thanh toán, gửi tiền...
 
@@ -273,25 +256,7 @@ Hai dòng quan trọng nhất trong toàn bộ handler:
 
 ---
 
-## 5. Edge cases & Common Pitfalls
-
-Dưới đây là các pitfall điển hình tôi đã thấy trong code review và post-mortem:
-
-| Pitfall                        | Hậu quả                                                                              | Cách tránh                                                    |
-| ------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| Không validate request hash    | Client lỡ tay reuse key cho request khác → trả nhầm response của payment cũ          | Hash body, so sánh mỗi lần (như `requestHash` ở trên)         |
-| Cache cả `5xx` response        | Lỗi tạm thời (DB blip, network) thành "vĩnh viễn"; mọi retry đều trả lại cùng lỗi đó | Chỉ cache 2xx và 4xx deterministic; với 5xx phải `del` lock   |
-| Quên release lock khi fail     | Sau lỗi, client retry sẽ bị `409` cho đến khi TTL hết                                | Luôn `redis.del(redisKey)` trong `catch`                      |
-| TTL quá ngắn (vd. 5 phút)      | Mobile offline 2 tiếng rồi retry → key đã expire → charge lần 2                      | Dùng TTL ≥ 24h theo chuẩn Stripe                              |
-| Dùng timestamp/counter làm key | Trùng key giữa 2 user khác nhau → cross-user response leak                           | Bắt client sinh **UUID v4**; reject key không hợp format      |
-| Không scope key theo endpoint  | Cùng key dùng cho `/payments` và `/refunds` đụng nhau                                | Prefix key trong Redis: `idem:<endpoint>:<key>`               |
-| Redis fail-open                | Redis down → bypass check → double-charge khi retry                                  | Treat Redis lỗi = `503 Service Unavailable`; **không** bypass |
-
-Có một edge case sâu hơn đáng lưu ý: **idempotency key vs DB transaction**. Trong code mẫu trên, ta lưu key vào Redis, còn payment thì lưu vào DB (qua `chargeCustomer`). Nếu Redis ghi xong mà DB rollback (hoặc ngược lại), trạng thái sẽ lệch. Production-grade systems thường persist idempotency key **vào cùng DB transaction** với payment record — nhưng đó là một topic riêng, có thể bàn ở post sau.
-
----
-
-## 6. Lời khuyên thực tế
+## 5. Lời khuyên thực tế
 
 1. **Áp dụng cho mọi `POST` quan trọng**: payment, order, refund, send-email, send-sms, transfer. Bất kỳ thao tác nào "làm 2 lần là sai" đều cần idempotency.
 2. **Đừng bắt đầu phức tạp.** Pattern `SET NX + TTL + request hash` ở trên đã bao phủ 90% use case. Lease, two-phase commit, outbox pattern chỉ cần khi bạn ở quy mô như Stripe hay AWS.
