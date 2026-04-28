@@ -1,0 +1,302 @@
+---
+title: 'Idempotency 101: Vì sao "bấm 2 lần" không trừ tiền 2 lần — Mổ xẻ Create Payment API'
+date: '2026-04-28'
+tags: ['Backend', 'System Design', 'API']
+enableComment: true
+---
+
+# Idempotency 101: Vì sao "bấm 2 lần" không trừ tiền 2 lần — Mổ xẻ Create Payment API
+
+Hãy tưởng tượng: bạn đang ở quầy thanh toán online, bấm nút **"Pay $100"**. Spinner xoay. 5 giây trôi qua. 10 giây. Mạng wifi của quán cafe lúc được lúc không. Bạn sốt ruột, bấm thêm lần nữa. Rồi lần nữa.
+
+Nửa tiếng sau, bạn nhận được **3 email xác nhận** và tài khoản bị trừ **$300**.
+
+Đây là cơn ác mộng kinh điển của mọi đội ngũ làm payment, và là lý do tồn tại của một khái niệm tưởng nghe rất hàn lâm: **Idempotency**. Bài này sẽ đi từ nguồn gốc toán học của nó, sang cách nó hoạt động trong API, và cuối cùng là một implementation chạy được cho **Create Payment** với Node.js + Redis.
+
+---
+
+## 1. Nguồn gốc: Từ đại số đến hệ phân tán
+
+### 1.1. Năm 1870 — Benjamin Peirce và phép nhân "tự thân"
+
+Thuật ngữ **idempotent** được nhà toán học người Mỹ **Benjamin Peirce** đặt ra trong tác phẩm _"Linear Associative Algebra"_ (1870). Ông gọi một phần tử `x` là idempotent nếu:
+
+```
+x · x = x
+```
+
+Tức là nhân nó với chính nó vẫn ra chính nó. Từ "idempotent" có gốc Latin: _idem_ (cùng) + _potent_ (lực, khả năng) — nghĩa đen là "vẫn cùng một sức mạnh" dù áp dụng bao nhiêu lần.
+
+Vài ví dụ quen thuộc:
+
+- `1 · 1 = 1`, `0 · 0 = 0`
+- `abs(abs(x)) = abs(x)` — lấy giá trị tuyệt đối hai lần vẫn ra cùng kết quả
+- `A ∪ A = A` — hợp của một tập với chính nó vẫn là chính nó
+- `max(max(x, y), max(x, y)) = max(x, y)`
+
+### 1.2. Computer Science: từ phép toán đến thao tác
+
+Khi khái niệm này du nhập vào CS, nó được tổng quát hóa: một **thao tác** (operation, function, API call) được gọi là idempotent nếu:
+
+```
+f(f(x)) = f(x)
+```
+
+Hay nói cách khác: **chạy thao tác đó 1 lần hay N lần đều cho cùng một kết quả lên hệ thống**.
+
+- `SET x = 5` → idempotent (chạy 100 lần `x` vẫn là 5).
+- `x = x + 1` → **không** idempotent (mỗi lần chạy `x` lại tăng thêm).
+- `DELETE FROM users WHERE id = 7` → idempotent (lần đầu xoá, các lần sau no-op).
+- `INSERT INTO users(name) VALUES('Quang')` → **không** idempotent (mỗi lần insert thêm một row mới).
+
+### 1.3. HTTP — RFC 2616 (1999) → RFC 9110 (2022)
+
+Khi web nổi lên, IETF chuẩn hoá khái niệm này vào **HTTP semantics**. Theo RFC 9110:
+
+| Method   | Idempotent? | Safe? |
+| -------- | ----------- | ----- |
+| GET      | ✅          | ✅    |
+| HEAD     | ✅          | ✅    |
+| OPTIONS  | ✅          | ✅    |
+| PUT      | ✅          | ❌    |
+| DELETE   | ✅          | ❌    |
+| **POST** | **❌**      | ❌    |
+| PATCH    | ❌          | ❌    |
+
+`POST` cố tình **không** idempotent vì nó được thiết kế để "tạo mới một resource" — mỗi lần POST tạo ra một entity mới.
+
+> Đây là **semantic contract**, không phải implementation guarantee. RFC chỉ nói rằng _nếu bạn implement đúng tinh thần_, các method này phải idempotent. Còn việc bug làm sai thì... vẫn sai.
+
+### 1.4. Distributed systems era: Stripe và Idempotency-Key
+
+Đến giữa thập niên 2010, microservices và mobile bùng nổ. Mạng trở thành công dân hạng hai: timeout, retry, mobile chuyển vùng, proxy retry... đã trở thành chuyện thường ngày. **Vấn đề là `POST` thì không idempotent**, nhưng business lại có vô vàn `POST` quan trọng: tạo đơn, thanh toán, gửi tiền...
+
+Năm 2015, **Stripe** publish một blog post nổi tiếng giới thiệu pattern **`Idempotency-Key`** — một HTTP header mà client gửi kèm để biến `POST` thành "an toàn khi retry". Pattern này nhanh chóng trở thành chuẩn ngầm: Square, PayPal, Shopify, AWS... đều adopt.
+
+> "Mạng không đáng tin. Mọi request đều có thể timeout, mọi response có thể bị mất. Idempotency chính là _hợp đồng_ giữa client và server: 'cứ retry đi, tôi sẽ không làm hỏng dữ liệu của anh'."
+
+---
+
+## 2. Cách hoạt động: Cốt lõi của một Idempotent Operation
+
+### 2.1. Vì sao Create Payment cần idempotency?
+
+Hãy liệt kê các kịch bản gây **double-charge** trong thực tế:
+
+1. **Network timeout giữa client và server.** Server đã xử lý xong, đã trừ tiền, nhưng response trên đường về thì bị mất do TCP reset. Client tưởng failed, retry → trừ tiền lần 2.
+2. **User refresh / double-click.** Trang loading lâu, user F5 hoặc bấm 2 lần. Browser gửi 2 request gần như đồng thời.
+3. **Mobile retry policy.** SDK của mobile (đặc biệt khi chuyển từ wifi sang 4G) tự động retry các failed request.
+4. **Proxy / Load Balancer retry.** Một số proxy được cấu hình retry khi upstream timeout. Client thậm chí không biết.
+
+Trong tất cả các kịch bản trên, **client không có cách nào biết server đã xử lý hay chưa**. Cách duy nhất an toàn là... hỏi server. Idempotency cho phép câu hỏi đó dưới dạng: _"Đây là retry của request X, đừng làm lại nha"_.
+
+### 2.2. Idempotent "tự nhiên" vs "nhân tạo"
+
+Một số endpoint idempotent **tự nhiên** vì ngữ nghĩa:
+
+- `GET /balance` — chỉ đọc, không thay đổi state.
+- `PUT /users/123 {"name": "Quang"}` — set state về một giá trị cụ thể; chạy 10 lần vẫn ra cùng state.
+- `DELETE /orders/abc` — lần đầu xoá, các lần sau no-op (hoặc trả 404 idempotent).
+
+Còn `POST /payments` thì **không** tự nhiên idempotent. Mỗi lần POST mặc định = một payment mới. Để biến nó thành idempotent, ta cần một **định danh ngoại** — đó chính là **Idempotency Key**.
+
+### 2.3. Sơ đồ luồng tổng quát
+
+1. **Client** sinh một `Idempotency-Key` duy nhất (UUID v4) cho mỗi _ý định_ tạo payment.
+2. Client gửi request `POST /payments`, gắn key vào HTTP header.
+3. **Server** check key trong storage (Redis):
+   - **Chưa tồn tại** → atomic acquire lock, đánh dấu `running`, xử lý business logic, lưu kết quả vào storage, trả response.
+   - **Tồn tại + `completed`** → đọc response cũ, trả lại nguyên văn (status code + body).
+   - **Tồn tại + `running`** → trả `409 Conflict` (request gốc đang chạy, đợi đi).
+4. Key có **TTL** (Stripe dùng 24h) để không phình storage vô tận.
+
+Điểm quan trọng: client sinh key, không phải server. Vì server không biết "ý định" của client là gì — hai request giống hệt nhau với 2 key khác nhau là 2 ý định khác nhau (user thực sự muốn trả tiền 2 lần), còn 2 request cùng key là retry của cùng 1 ý định.
+
+---
+
+## 3. Stripe's Idempotency-Key: Thiết kế tham chiếu
+
+Stripe là reference design được công nghiệp follow nhiều nhất. Các quyết định thiết kế chính của họ:
+
+- **Header name**: `Idempotency-Key: <string ≤ 255 chars>`. Bất kỳ string nào, nhưng khuyến nghị UUID v4 để tránh trùng giữa các client.
+- **TTL**: **24 giờ** kể từ request đầu tiên. Sau đó key bị "quên", retry sẽ tạo payment mới.
+- **Request fingerprint**: Stripe hash phần body của request. Nếu cùng key nhưng body khác → trả lỗi (mặc định `400 Bad Request`). Điều này chống việc client vô tình reuse key cho request hoàn toàn khác.
+- **Scope**: chỉ áp dụng cho `POST` (vì các method khác đã idempotent semantically).
+- **Response cached nguyên văn**: status code + body của lần đầu được lưu lại và replay y nguyên cho mọi retry. Client không phân biệt được response có phải replay hay không (mà cũng không cần).
+- **Lỗi server (`5xx`) không được lưu**: cho phép client retry. Lỗi client (`4xx` deterministic như validation fail) thì lưu — vì retry cũng sẽ ra cùng lỗi.
+- **In-progress state**: nếu request đang chạy mà có retry tới, Stripe trả `409 Conflict` để client biết đợi.
+
+Tham khảo chính thức: [stripe.com/docs/api/idempotent_requests](https://stripe.com/docs/api/idempotent_requests).
+
+---
+
+## 4. Code sample: Create Payment với Express + Redis
+
+Stack: **Node.js 20 + TypeScript + Express + ioredis**. Redis dùng làm storage cho idempotency record vì nó có sẵn `SET NX` (atomic) và `EX` (TTL) — đúng 2 thứ ta cần.
+
+### 4.1. Schema lưu trong Redis
+
+Ta dùng một discriminated union cho 2 trạng thái của record:
+
+```ts
+type IdempotencyRecord =
+  | {
+      status: 'running'
+      requestHash: string
+    }
+  | {
+      status: 'completed'
+      requestHash: string
+      statusCode: number
+      body: any
+    }
+```
+
+- `requestHash`: SHA-256 của request body, để phát hiện key bị reuse cho request khác.
+- `statusCode` + `body`: response gốc, để replay.
+
+### 4.2. Cấu trúc 3 file
+
+Để dễ đọc và dễ test, ta tách logic thành 3 file:
+
+- `type.ts` — định nghĩa kiểu cho idempotency record.
+- `controller.ts` — handler thật + helper hash body + giả lập gọi PSP.
+- `app.ts` — Express setup, mount route, listen port.
+
+#### `type.ts`
+
+```ts
+export type IdempotencyRecord =
+  | {
+      status: 'running'
+      requestHash: string
+    }
+  | {
+      status: 'completed'
+      requestHash: string
+      statusCode: number
+      body: any
+    }
+```
+
+#### `controller.ts`
+
+```ts
+import { Request, Response } from 'express'
+import Redis from 'ioredis'
+import { createHash, randomUUID } from 'crypto'
+import type { IdempotencyRecord } from './type'
+
+const TTL_SECONDS = 24 * 60 * 60
+const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379')
+
+function hashBody(body: any): string {
+  return createHash('sha256').update(JSON.stringify(body)).digest('hex')
+}
+
+async function chargeCustomer(body: any) {
+  return { id: randomUUID(), status: 'succeeded', amount: 100 }
+}
+
+export async function createPayment(req: Request, res: Response) {
+  const key = req.header('Idempotency-Key')
+
+  if (!key) {
+    return res.status(400).json({ error: 'Idempotency-Key header is required' })
+  }
+
+  const requestHash = hashBody(req.body)
+  const redisKey = `idem:payments:${key}`
+
+  const initialRecord: IdempotencyRecord = { status: 'running', requestHash }
+  const acquired = await redis.set(redisKey, JSON.stringify(initialRecord), 'EX', TTL_SECONDS, 'NX')
+
+  if (!acquired) {
+    const raw = await redis.get(redisKey)
+    const existing = JSON.parse(raw!) as IdempotencyRecord
+
+    if (existing.requestHash !== requestHash) {
+      return res.status(422).json({
+        error: 'Idempotency-Key was reused with a different request body',
+      })
+    }
+
+    if (existing.status === 'running') {
+      return res.status(409).json({
+        error: 'A request with the same Idempotency-Key is still being processed',
+      })
+    }
+
+    return res.status(existing.statusCode).json(existing.body)
+  }
+
+  try {
+    const payment = await chargeCustomer(req.body)
+
+    const completed: IdempotencyRecord = {
+      status: 'completed',
+      requestHash,
+      statusCode: 201,
+      body: payment,
+    }
+    await redis.set(redisKey, JSON.stringify(completed), 'EX', TTL_SECONDS)
+
+    return res.status(201).json(payment)
+  } catch (err) {
+    await redis.del(redisKey)
+    throw err
+  }
+}
+```
+
+#### `app.ts`
+
+```ts
+import express from 'express'
+import { createPayment } from './controller'
+
+const app = express()
+app.use(express.json())
+
+app.post('/payments', createPayment)
+
+app.listen(3000, () => {
+  console.log('Payment service listening on :3000')
+})
+```
+
+Hai dòng quan trọng nhất trong toàn bộ handler:
+
+> `redis.set(..., 'NX')` ở bước 2 — atomic acquire, đảm bảo chỉ một request thắng cuộc đua.
+>
+> `redis.del(redisKey)` trong `catch` ở bước 5 — release lock khi business logic fail, để client còn cơ hội retry. Bỏ qua dòng này, client sẽ kẹt ở `409` mãi cho đến khi TTL hết.
+
+---
+
+## 5. Edge cases & Common Pitfalls
+
+Dưới đây là các pitfall điển hình tôi đã thấy trong code review và post-mortem:
+
+| Pitfall                        | Hậu quả                                                                              | Cách tránh                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| Không validate request hash    | Client lỡ tay reuse key cho request khác → trả nhầm response của payment cũ          | Hash body, so sánh mỗi lần (như `requestHash` ở trên)         |
+| Cache cả `5xx` response        | Lỗi tạm thời (DB blip, network) thành "vĩnh viễn"; mọi retry đều trả lại cùng lỗi đó | Chỉ cache 2xx và 4xx deterministic; với 5xx phải `del` lock   |
+| Quên release lock khi fail     | Sau lỗi, client retry sẽ bị `409` cho đến khi TTL hết                                | Luôn `redis.del(redisKey)` trong `catch`                      |
+| TTL quá ngắn (vd. 5 phút)      | Mobile offline 2 tiếng rồi retry → key đã expire → charge lần 2                      | Dùng TTL ≥ 24h theo chuẩn Stripe                              |
+| Dùng timestamp/counter làm key | Trùng key giữa 2 user khác nhau → cross-user response leak                           | Bắt client sinh **UUID v4**; reject key không hợp format      |
+| Không scope key theo endpoint  | Cùng key dùng cho `/payments` và `/refunds` đụng nhau                                | Prefix key trong Redis: `idem:<endpoint>:<key>`               |
+| Redis fail-open                | Redis down → bypass check → double-charge khi retry                                  | Treat Redis lỗi = `503 Service Unavailable`; **không** bypass |
+
+Có một edge case sâu hơn đáng lưu ý: **idempotency key vs DB transaction**. Trong code mẫu trên, ta lưu key vào Redis, còn payment thì lưu vào DB (qua `chargeCustomer`). Nếu Redis ghi xong mà DB rollback (hoặc ngược lại), trạng thái sẽ lệch. Production-grade systems thường persist idempotency key **vào cùng DB transaction** với payment record — nhưng đó là một topic riêng, có thể bàn ở post sau.
+
+---
+
+## 6. Lời khuyên thực tế
+
+1. **Áp dụng cho mọi `POST` quan trọng**: payment, order, refund, send-email, send-sms, transfer. Bất kỳ thao tác nào "làm 2 lần là sai" đều cần idempotency.
+2. **Đừng bắt đầu phức tạp.** Pattern `SET NX + TTL + request hash` ở trên đã bao phủ 90% use case. Lease, two-phase commit, outbox pattern chỉ cần khi bạn ở quy mô như Stripe hay AWS.
+3. **Đặt vào API contract ngay từ đầu.** Thêm `Idempotency-Key` vào một API đã có 1000 client đang dùng là cực khổ — bạn phải migrate dần, hỗ trợ cả mode có và không có key. Cho nên: ngày đầu tiên thiết kế POST endpoint, hãy hỏi _"endpoint này có cần idempotency không?"_.
+4. **Document rõ behavior**: TTL bao lâu, response khi reuse key, response khi in-progress, format key cho phép. Client SDK sẽ implement retry logic dựa trên những gì bạn document.
+5. **Đo bằng metrics**: tỉ lệ retry hit cache, tỉ lệ 409, tỉ lệ 422. Spike 422 = client đang reuse key sai cách. Spike 409 = có thể có race condition phía client.
+
+Idempotency không phải là một tính năng "nice to have" — nó là **invariant** mà mọi hệ thống có giao dịch tiền bạc, đơn hàng, hoặc side-effect không reversible đều phải đảm bảo. Còn nếu bạn muốn đào sâu hơn về nhất quán dữ liệu trong hệ phân tán, có thể đọc tiếp [bài về Cache Consistency](/posts/cache-consistency) — cùng họ với idempotency, đều xoay quanh chuyện _"hai bên không tin nhau, làm sao đồng bộ"_.
