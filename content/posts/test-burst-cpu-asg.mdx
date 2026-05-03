@@ -1,0 +1,134 @@
+---
+title: 'How to Test Side Effect of Burst CPU on AWS Auto Scaling'
+date: '2026-05-03'
+tags: ['Devops', 'AWS']
+enableComment: true
+---
+
+# How to Test Side Effect of Burst CPU on AWS Auto Scaling
+
+Khi triển khai Auto Scaling Group (ASG) trên AWS, mình luôn có một câu hỏi trong đầu: **"Liệu scaling policy có thực sự hoạt động khi CPU vượt ngưỡng không?"**. Thay vì ngồi đợi đến lúc production bị quá tải rồi mới biết câu trả lời, mình quyết định tự tay "stress test" để tận mắt chứng kiến ASG tạo thêm instance.
+
+Bài viết này chia sẻ cách mình SSH vào EC2 instance, dùng công cụ `stress` để đẩy CPU lên cao, và quan sát mọi thứ diễn ra trên CloudWatch.
+
+---
+
+## Tại sao cần test?
+
+Có 2 use case chính mà mình muốn verify:
+
+**Use case 1: Verify ASG Scaling Policy**
+
+Bạn đã cấu hình ASG với scaling policy — ví dụ scale out khi CPU trung bình vượt 70%. Nhưng liệu nó có thực sự hoạt động? Đừng đợi đến khi hệ thống production chịu tải thật mới phát hiện ra policy bị sai cấu hình. Test trước, yên tâm sau.
+
+**Use case 2: Verify CloudWatch Alarm & Notification**
+
+Ngoài việc auto scaling, bạn cũng cần đảm bảo rằng **CloudWatch Alarm sẽ gửi notification đúng lúc** — qua email, SMS, hoặc Slack thông qua SNS topic. Khi hệ thống quá tải, team của bạn cần được thông báo **ngay lập tức** để can thiệp kịp thời. Stress test giúp bạn verify toàn bộ pipeline: CPU tăng → Alarm trigger → Notification gửi đến đúng người.
+
+---
+
+## Prerequisites
+
+Trước khi bắt đầu, đảm bảo bạn đã có:
+
+- **ASG** đã cấu hình scaling policy (Target Tracking hoặc Step Scaling) với CPU threshold (ví dụ 70%)
+- **CloudWatch Alarm** đã setup với SNS notification (email, SMS, Slack...)
+- **EC2 instances** đang chạy trong ASG
+- **SSH access** vào các instances
+
+---
+
+## Step 1: SSH vào EC2 instance và install stress
+
+SSH vào một trong các EC2 instance đang chạy trong ASG:
+
+```bash
+ssh -i your-key.pem ec2-user@<instance-public-ip>
+```
+
+Tiếp theo, install công cụ `stress`:
+
+**Amazon Linux 2:**
+
+```bash
+sudo amazon-linux-extras install epel -y
+sudo yum install stress -y
+```
+
+**Amazon Linux 2023+:**
+
+```bash
+sudo dnf install stress -y
+```
+
+**Ubuntu:**
+
+```bash
+sudo apt-get update
+sudo apt-get install stress -y
+```
+
+---
+
+## Step 2: Chạy stress để đẩy CPU lên cao
+
+Sau khi install xong, chạy lệnh sau để spike CPU:
+
+```bash
+stress --cpu 4 --timeout 300s
+```
+
+Giải thích:
+- `--cpu 4`: Tạo 4 worker processes, mỗi worker sẽ chạy các phép tính liên tục để đốt CPU. Nếu instance của bạn có 2 vCPU, 4 workers sẽ đẩy CPU lên gần 100%.
+- `--timeout 300s`: Chạy trong 5 phút. Đủ thời gian để CloudWatch thu thập metric và trigger alarm (CloudWatch mặc định thu thập metric mỗi 5 phút cho basic monitoring, hoặc 1 phút cho detailed monitoring).
+
+Mở một terminal khác SSH vào cùng instance và chạy `top` để xem CPU usage realtime:
+
+```bash
+top
+```
+
+Bạn sẽ thấy CPU usage nhảy lên gần **100%** ngay lập tức. Nếu muốn giao diện trực quan hơn, dùng `htop`:
+
+```bash
+sudo yum install htop -y  # Amazon Linux
+htop
+```
+
+> **Tip:** Nếu bạn muốn test trên nhiều instance cùng lúc, hãy SSH vào từng instance và chạy `stress` trên tất cả. Điều này sẽ đẩy **average CPU utilization** của cả ASG lên nhanh hơn, giúp trigger scaling policy sớm hơn.
+
+---
+
+## Step 3: Quan sát kết quả
+
+Sau khi chạy stress, hãy quay lại AWS Console và quan sát:
+
+### CloudWatch Monitoring
+
+Vào **CloudWatch → Metrics → EC2**, bạn sẽ thấy CPU Utilization của instance tăng vọt lên gần 100%. Đường graph sẽ "nhảy dựng" rất rõ ràng — đây là khoảnh khắc bạn chờ đợi.
+
+### CloudWatch Alarm
+
+Vào **CloudWatch → Alarms**, alarm mà bạn đã cấu hình sẽ chuyển sang trạng thái **"In alarm"** (màu đỏ). Lúc này:
+
+- SNS topic được trigger
+- Bạn sẽ nhận được **email hoặc SMS cảnh báo** rằng hệ thống đang quá tải
+- Nếu đã tích hợp Slack, message cảnh báo cũng sẽ xuất hiện trong channel
+
+Đây chính là lúc bạn verify được rằng: **khi hệ thống thật sự gặp sự cố, team sẽ được thông báo ngay lập tức**.
+
+### Auto Scaling Group
+
+Vào **EC2 → Auto Scaling Groups**, bạn sẽ thấy:
+
+- **Desired Capacity** tăng lên (ví dụ từ 2 lên 3)
+- Một instance mới đang được **launch** (trạng thái Pending → InService)
+- **Activity History** ghi lại sự kiện scaling với lý do rõ ràng
+
+Toàn bộ quá trình từ lúc CPU spike đến khi instance mới được tạo thường mất khoảng **3-5 phút**, tùy vào cấu hình evaluation period và cooldown period của bạn.
+
+---
+
+## Kết luận
+
+Chỉ với một công cụ đơn giản như `stress` và vài phút chờ đợi, bạn có thể verify được cả **ASG scaling policy** lẫn **CloudWatch Alarm notification** hoạt động đúng như mong đợi. Đây là việc nên làm mỗi khi setup hạ tầng mới — đừng đợi đến khi hệ thống thật sự quá tải mới phát hiện ra alarm không kêu hoặc ASG không scale.
