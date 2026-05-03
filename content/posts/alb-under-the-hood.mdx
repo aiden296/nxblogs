@@ -180,6 +180,199 @@ Tại sao? Nếu backend đóng connection trước ALB (ví dụ backend timeou
 
 ---
 
+## 6. Làm Sao Request Đến Đúng Một Node? — Phân Phối Tải Ở Lớp DNS
+
+Trước khi nói về cách ALB chọn target backend, có một câu hỏi nền tảng hơn: nếu ALB có 6 nodes (2/AZ × 3 AZs), khi client gửi request, **cái gì** quyết định request đó đến node nào trong 6 cái đó? Có một "router trung tâm" nào đứng trước phân phối không?
+
+**Câu trả lời sẽ làm bạn ngạc nhiên: Không có "router trung tâm" nào cả.** Việc chọn node hoàn toàn diễn ra ở **lớp DNS, phía client** — trước khi packet đầu tiên rời khỏi máy client.
+
+### Cơ chế hoạt động
+
+1. **Client query DNS**: Browser/app hỏi "IP của `my-alb-123.elb.amazonaws.com` là gì?"
+
+2. **Route 53 trả về danh sách IPs**:
+   - Trả về **tối đa 8 IPs** trong một response (mỗi IP là 1 node của ALB)
+   - Thứ tự được **shuffle ngẫu nhiên** trong mỗi response
+   - TTL cố định 60 giây
+   - Chỉ trả về IPs của **healthy nodes** — node đang impaired bị loại khỏi response
+
+3. **Client chọn 1 IP**:
+   - Đa số OS/library lấy IP **đầu tiên** trong response (browser, JVM, libcurl, Go net/http...)
+   - Một số advanced client thử IP kế tiếp nếu IP đầu fail
+   - Client cache IP trong khoảng = TTL (60s)
+
+4. **Client mở TCP connection thẳng đến IP đó** — node đó handle toàn bộ TCP/TLS connection trong suốt thời gian connection sống.
+
+### Vậy "thuật toán phân phối node" thực ra là gì?
+
+Đây là điều nhiều người không nhận ra: **ALB không có một load balancing algorithm giữa các node**. Sự phân phối tải giữa các node hoàn toàn dựa vào:
+
+- **Random shuffle** của Route 53 trong mỗi DNS response
+- **Luật số lớn (Law of Large Numbers)** — khi đủ nhiều client query, phân phối ngẫu nhiên sẽ "đều" về mặt thống kê
+
+Nói cách khác: phân phối tải giữa các node chỉ "đều" khi bạn có **hàng ngàn clients** mỗi giây. Với traffic thấp, có thể có node "rảnh" trong khi node khác bận — chuyện bình thường.
+
+### Tóm lại: ALB Có 2 Lớp "Quyết Định" Hoàn Toàn Tách Biệt
+
+Khi một request đi qua ALB, có **2 quyết định độc lập**:
+
+```
+Client request
+    │
+    ▼
+┌──────────────────────────────────┐
+│ Quyết định 1: Chọn ALB Node      │  ← DNS shuffle (client-side)
+│ "Node nào handle request?"       │     Không config được
+└──────────────────────────────────┘
+    │
+    ▼ (TCP connection đến node X)
+┌──────────────────────────────────┐
+│ Quyết định 2: Chọn Target        │  ← Round Robin / LOR / Weighted
+│ "Backend nào xử lý?"             │     Config ở target group
+└──────────────────────────────────┘
+    │
+    ▼
+Backend
+```
+
+Lớp 1 (chọn node) **AWS đã quyết** — bạn không config gì ngoài chọn region và AZs. Lớp 2 (chọn target) **bạn control được** qua target group settings, đây là phần section tiếp theo nói chi tiết.
+
+> **Tip thực tế:** Nếu bạn thấy traffic distribution không đều giữa các ALB node (qua CloudWatch per-node metrics), đừng vội nghĩ ALB lỗi — hãy kiểm tra DNS caching behavior của client trước.
+
+---
+
+## 7. Load Balancing Algorithms — ALB Quyết Định Gửi Request Đến Target Nào?
+
+Sau khi request đã đến một ALB node (qua cơ chế DNS ở section 6), node đó phải chọn **target backend** nào trong target group để forward. Đây mới là chỗ ALB có **3 thuật toán** với triết lý và use case riêng. Bạn config thuật toán này ở **target group level** (không phải ở ALB level).
+
+### 7.1. Round Robin — "Xoay Vòng" (Default)
+
+Đây là thuật toán **mặc định** của ALB và cũng là dễ hiểu nhất.
+
+**Cách hoạt động:**
+
+Targets được xếp thành một vòng tròn. Request đầu tiên đi đến target #1, request tiếp theo đến #2, rồi #3... Hết vòng thì quay lại #1.
+
+```
+Target group: [A, B, C]
+
+Request 1 → A
+Request 2 → B
+Request 3 → C
+Request 4 → A   (quay vòng)
+Request 5 → B
+...
+```
+
+**Ưu điểm:**
+
+- Đơn giản, dễ predict
+- Phân phối đều khi tất cả request đều "tương tự nhau" (cùng độ phức tạp, cùng response time)
+- Không cần ALB track state nhiều
+
+**Nhược điểm:**
+
+- **Không quan tâm backend đang bận hay rảnh.** Nếu target A đang xử lý 50 request "nặng" và target B đang rảnh, Round Robin vẫn cứ luân phiên gửi request mới cho A.
+- Không phù hợp khi request có **độ phức tạp không đồng đều** (ví dụ: API endpoint mix giữa nhanh và chậm)
+
+> **Dùng khi:** Request đồng đều, backend đồng đều (cùng instance type, cùng workload). Đa số use case web app thông thường.
+
+### 7.2. Least Outstanding Requests (LOR) — "Ai Rảnh Hơn Thì Làm"
+
+Thuật toán này thông minh hơn: ALB **đếm số request đang in-flight** (đã gửi đi nhưng chưa nhận response) đến từng target, và chọn target nào có **ít in-flight request nhất**.
+
+**Cách hoạt động:**
+
+```
+Trạng thái target group hiện tại:
+  Target A: đang xử lý 8 requests
+  Target B: đang xử lý 3 requests   ← chọn B
+  Target C: đang xử lý 5 requests
+
+Request mới đến → ALB chọn Target B
+```
+
+ALB maintain một counter cho mỗi target: tăng khi gửi request, giảm khi nhận response.
+
+**Ưu điểm:**
+
+- **Tự cân bằng tải động** dựa trên capacity thực tế của target. Target nào chậm → ít in-flight giảm chậm → ALB tự động gửi ít request hơn cho nó.
+- Xử lý cực tốt khi request có **độ phức tạp không đồng đều**. Ví dụ: API GraphQL có query đơn giản (10ms) lẫn query phức tạp (2 giây) — LOR sẽ tự phân bổ hợp lý.
+- Phù hợp khi **target instances không đồng đều** (mix giữa instance lớn và nhỏ trong target group)
+- Hữu ích cho **WebSocket** hoặc **long-lived connections** — nơi một số connection có thể "ngốn" target lâu
+
+**Nhược điểm:**
+
+- ALB phải track in-flight count → tốn ít resource hơn round robin (nhưng không đáng kể)
+- **Không phù hợp khi dùng sticky session** — vì sticky session sẽ override quyết định của LOR
+
+> **Dùng khi:** Request có response time biến thiên lớn (mix nhanh/chậm), API có nhiều endpoint khác nhau, microservices với workload không đồng đều.
+
+### 7.3. Weighted Random với Anomaly Mitigation — "Xác Suất Có Trọng Số + Phát Hiện Bất Thường"
+
+Đây là thuật toán **mới nhất** (AWS công bố cuối 2023). Tên dài nhưng ý tưởng có 2 phần:
+
+**Phần 1: Weighted Random**
+
+Thay vì chọn theo thứ tự (Round Robin) hay theo counter (LOR), ALB chọn target **ngẫu nhiên có trọng số**. Nếu mọi target có weight bằng nhau → giống random thuần. Nếu có weight khác nhau → target weight cao có xác suất được chọn cao hơn.
+
+**Phần 2: Anomaly Mitigation — Tự Phát Hiện Target "Lỗi Lén"**
+
+Đây là phần thực sự thú vị. ALB liên tục **giám sát các target** và phát hiện những target có hành vi "bất thường" so với phần còn lại của target group:
+
+- Target có **HTTP 5xx rate** cao bất thường (nhưng chưa fail health check)
+- Target có **connection errors** cao bất thường
+- Target có **response time** dài bất thường
+
+Khi phát hiện anomaly, ALB **tự động giảm weight** của target đó (gửi ít traffic hơn) **mà không cần wait health check fail**. Đây là một dạng **circuit breaker tự động** ở mức load balancer.
+
+```
+Trạng thái bình thường:
+  A, B, C cùng weight 1.0 → mỗi target ~33% traffic
+
+Target B đột nhiên có 5xx rate cao bất thường:
+  ALB tự giảm weight của B xuống 0.1
+  → A: 47%, B: 5%, C: 47%
+  
+Khi B "phục hồi" (5xx về bình thường):
+  ALB tự nâng weight B trở lại 1.0
+```
+
+**Ưu điểm:**
+
+- **Bảo vệ end user** khỏi các lỗi "lén lút" — target chưa hỏng hẳn (vẫn pass health check) nhưng đang trả về lỗi
+- **Tự động phục hồi** khi target trở lại bình thường
+- Đặc biệt hữu ích trong môi trường **deployment liên tục** — nếu một version mới có bug, ALB tự giảm traffic vào instance lỗi mà không cần can thiệp
+
+**Nhược điểm:**
+
+- Có thể "false positive" trong một số case (target đang xử lý request hợp pháp nhưng nặng → bị giảm traffic oan)
+- Khó debug hơn — bạn thấy traffic distribution không đều và phải hiểu rằng ALB đang "punish" một target nào đó
+
+> **Dùng khi:** Production-critical workload cần resilience cao, môi trường có deploy liên tục, API service mà bạn muốn auto-detect bad deployments.
+
+### Bảng So Sánh Nhanh
+
+| Algorithm | Logic chọn target | Khi nào dùng | Tránh khi |
+|---|---|---|---|
+| **Round Robin** | Luân phiên theo thứ tự | Request đồng đều, target đồng đều | Request có response time biến thiên lớn |
+| **Least Outstanding Requests** | Target có ít in-flight requests nhất | Workload không đồng đều, microservices | Cần sticky session bắt buộc |
+| **Weighted Random + Anomaly Mitigation** | Ngẫu nhiên có trọng số, tự giảm weight target lỗi | Production-critical, cần auto-resilience | Cần phân phối deterministic, dễ debug |
+
+### Sticky Session Đứng Ở Đâu?
+
+Sticky session (session affinity) **không phải là một algorithm** — nó là một **lớp override** đứng trên top của các algorithm trên. Cách hoạt động:
+
+1. Request đầu tiên: ALB dùng algorithm (Round Robin / LOR / Weighted Random) chọn target X
+2. ALB set cookie `AWSALB` trong response, encode target X
+3. Request tiếp theo từ cùng client: ALB đọc cookie → forward thẳng đến target X (bỏ qua algorithm)
+
+Điều này hữu ích cho stateful application (giỏ hàng, session-based auth không dùng JWT). Nhưng đánh đổi là **mất tính cân bằng tải** — nếu target X chết, client mới được route lại.
+
+> **Tip:** Nếu app của bạn stateless (dùng JWT, session lưu Redis), **đừng bật sticky session** — nó chỉ làm giảm hiệu quả load balancing.
+
+---
+
 ## Kết Luận — Checklist Cho Production
 
 ALB không phải "một cái load balancer" — nó là **một fleet các nodes** tự động scale để đáp ứng traffic. Hiểu được kiến trúc bên dưới giúp bạn tránh nhiều lỗi production phổ biến.
@@ -192,3 +385,4 @@ ALB không phải "một cái load balancer" — nó là **một fleet các node
 - Dùng **LCU Reservation** trước các planned traffic events (Flash Sale, launch)
 - Monitor **SurgeQueueLength** và **SpilloverCount** — nếu SpilloverCount > 0, backend đang quá tải
 - Cần static IP? Đặt **NLB trước ALB** thay vì tìm cách gắn IP cho ALB
+- Chọn đúng **load balancing algorithm**: workload đồng đều dùng Round Robin, không đồng đều dùng LOR, production-critical bật Weighted Random + Anomaly Mitigation
