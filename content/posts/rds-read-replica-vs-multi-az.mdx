@@ -1,0 +1,266 @@
+---
+title: 'RDS Read Replica vs Multi-AZ: Cùng là "bản sao", nhưng đừng nhầm lẫn!'
+date: '2026-05-03'
+tags: ['Devops', 'AWS', 'Database']
+enableComment: true
+---
+
+# RDS Read Replica vs Multi-AZ: Cùng là "bản sao", nhưng đừng nhầm lẫn!
+
+Khi mới làm việc với AWS RDS, có một câu hỏi mà gần như ai cũng từng "khựng" lại ít nhất một lần:
+
+> "Read Replica và Multi-AZ — chẳng phải đều là một bản sao của database hay sao? Vậy chọn cái nào cũng được à?"
+
+Câu trả lời là **KHÔNG**. Hai thứ này nhìn bề ngoài giống nhau (đều là "thêm một con DB nữa bên cạnh") nhưng sinh ra để giải quyết **hai bài toán hoàn toàn khác nhau**:
+
+- **Multi-AZ** — sinh ra cho **High Availability (HA)**: hệ thống không sập khi một AZ chết.
+- **Read Replica** — sinh ra cho **Scale Read**: chia tải đọc khỏi primary để DB không "ngộp".
+
+Hiểu nhầm hai khái niệm này là nguyên nhân của không ít sự cố production. Trong bài viết này, mình sẽ mổ xẻ cơ chế của từng cái, khi nào dùng, và quan trọng nhất — **tại sao production thật sự thường cần cả hai**.
+
+---
+
+## 1. Trước khi đi sâu: Synchronous vs Asynchronous Replication
+
+Vì toàn bộ bài viết xoay quanh hai khái niệm này, mình muốn làm rõ chúng trước. Cả hai đều mô tả **cách primary "chuyển" dữ liệu sang bản sao**, chỉ khác nhau ở **việc primary có chờ bản sao xác nhận trước khi báo "ghi xong" cho client hay không**.
+
+### Synchronous (đồng bộ) — "Chờ bạn xong tôi mới đi"
+
+Khi client gửi một câu lệnh `INSERT/UPDATE`, primary sẽ:
+
+```
+Client ──► Primary
+           1. Ghi vào local
+           2. Gửi sang Standby, ĐỢI standby ghi xong
+           3. Standby xác nhận "đã ghi"
+           4. Primary mới trả "OK" về cho Client
+```
+
+Đặc điểm:
+
+- **Không mất dữ liệu** khi primary die — vì mọi commit đều đã có mặt ở standby.
+- **Latency cao hơn** — mỗi câu write phải đi network round-trip qua AZ khác (~1–2ms cho cùng region) trước khi user thấy "thành công".
+- **Phụ thuộc vào standby** — nếu standby chậm hoặc network giữa hai AZ tệ, write trên primary cũng sẽ chậm theo.
+
+> Đây là lý do AWS chỉ làm sync replication trong **cùng một region** (qua các AZ gần nhau, latency thấp). Nếu sync qua region thì latency sẽ là cơn ác mộng.
+
+### Asynchronous (bất đồng bộ) — "Cứ đi trước, tôi tự đến sau"
+
+```
+Client ──► Primary
+           1. Ghi vào local
+           2. Trả "OK" về Client NGAY
+           3. (Sau đó) gửi log sang Replica trong nền
+                                            │
+                                            ▼
+                                    Replica nhận và apply
+                                    (sau vài ms → vài giây)
+```
+
+Đặc điểm:
+
+- **Latency thấp** — primary trả OK ngay khi nó ghi xong, không chờ ai cả.
+- **Có replication lag** — replica luôn "chậm hơn" primary một chút. Trong điều kiện bình thường là vài ms; lúc tải cao hoặc network không tốt, có thể lên vài giây hoặc hơn.
+- **Có rủi ro mất dữ liệu** nếu primary die trước khi log được gửi sang replica → vài transaction cuối cùng có thể "bốc hơi".
+- **Scale tốt** — vì primary không bị block, có thể có nhiều replica song song, thậm chí ở region khác.
+
+### So sánh nhanh
+
+| Tiêu chí                     | Synchronous            | Asynchronous              |
+| ---------------------------- | ---------------------- | ------------------------- |
+| Primary chờ bản sao?         | Có                     | Không                     |
+| Latency write                | Cao hơn                | Thấp                      |
+| Replication lag              | ~0                     | Có (ms → s)               |
+| Mất dữ liệu khi primary die? | Không                  | Có thể (transaction cuối) |
+| Phù hợp cho                  | HA / không mất dữ liệu | Scale, cross-region       |
+
+Nhớ điểm này: **Multi-AZ dùng synchronous, Read Replica dùng asynchronous**. Đây cũng chính là lý do gốc rễ vì sao chúng có hành vi khác nhau hoàn toàn ở các phần dưới.
+
+---
+
+## 2. Multi-AZ Deployment: "Người dự bị" im lặng
+
+Multi-AZ (Multi Availability Zone) là tính năng giúp database của bạn vẫn sống sót khi cả một Availability Zone của AWS gặp sự cố.
+
+### Cơ chế hoạt động
+
+Khi bạn bật Multi-AZ, AWS sẽ tạo ra:
+
+- **1 Primary instance** ở AZ-A — phục vụ toàn bộ read/write traffic.
+- **1 Standby instance** ở AZ-B — là một bản sao **đồng bộ (synchronous replication)** của primary.
+
+```
+        ┌──────────────┐
+        │   App / EC2  │
+        └──────┬───────┘
+               │ (DNS endpoint duy nhất)
+               ▼
+       ┌──────────────────┐         sync replication        ┌──────────────────┐
+       │  Primary (AZ-A)  │ ──────────────────────────────► │  Standby (AZ-B)  │
+       │   read + write   │                                 │  KHÔNG phục vụ   │
+       └──────────────────┘                                 └──────────────────┘
+```
+
+Điểm "đặc biệt" và rất hay bị hiểu nhầm:
+
+> **Standby instance KHÔNG phục vụ traffic gì cả** — kể cả read query. Nó chỉ ngồi đó, đồng bộ dữ liệu liên tục, và chờ đến lúc... primary gãy.
+
+### Khi failover xảy ra
+
+- Primary die → AWS tự động chuyển DNS endpoint sang standby (~60–120s).
+- App **không cần đổi connection string** — vẫn cùng một endpoint, chỉ là phía sau đã là instance khác.
+- Sau khi failover, AWS sẽ tự dựng lại một standby mới ở AZ còn lại.
+
+### Trade-off của multi-AZ
+
+Đây là điểm **rất hay bị bỏ qua** khi nói về Multi-AZ. Vì replication là **synchronous**, mỗi câu `INSERT/UPDATE/DELETE` đều phải đi thêm 1 round-trip qua AZ khác trước khi primary trả "OK" cho app.
+
+```
+Không Multi-AZ:  Client ──► Primary ──► OK    (1 hop)
+Có Multi-AZ:     Client ──► Primary ──► Standby ──► ack ──► OK    (3 hop)
+```
+
+Cụ thể:
+
+- **Mỗi commit cộng thêm ~1–3ms latency** (network giữa các AZ trong cùng region đã được AWS tối ưu rất tốt, nhưng vẫn không phải miễn phí).
+- **Write throughput** có thể giảm nhẹ, đặc biệt với workload **OLTP nhiều transaction nhỏ** (mỗi transaction = một lần đợi standby xác nhận).
+- **Nếu standby chậm hoặc network giữa AZ có vấn đề**, write trên primary cũng chậm theo — vì primary bị block đợi ack.
+
+Mức độ ảnh hưởng tùy workload:
+
+| Loại workload               | Bị ảnh hưởng?               |
+| --------------------------- | --------------------------- |
+| Read-heavy                  | Gần như không cảm nhận được |
+| Write batch lớn (ít commit) | Ít                          |
+| OLTP nhiều transaction nhỏ  | **Cảm nhận rõ**             |
+| Bulk insert từng row        | Cảm nhận rõ — nên batch lại |
+
+> **Đây là trade-off thật sự: bạn đánh đổi vài ms write latency để lấy High Availability.**
+
+Trong gần như mọi trường hợp production, **deal này là cực kỳ hời** — đổi 1–3ms để được uptime SLA 99.95% và không bị đánh thức lúc 3h sáng. Nếu app của bạn nhạy cảm với 2ms thì vấn đề thường nằm ở chỗ khác (N+1 query, thiếu connection pool, network app↔DB...) chứ không phải ở Multi-AZ.
+
+Chỉ cân nhắc tắt Multi-AZ khi:
+
+- Đã đo đạc cụ thể, xác định Multi-AZ là bottleneck thật sự.
+- Workload của bạn ưu tiên write throughput cực hạn (log ingestion, time-series) — và thường lúc đó nên đổi sang database khác (DynamoDB, ClickHouse, Timestream) thay vì RDS.
+- Là môi trường dev/staging không cần HA.
+
+### Dùng khi nào?
+
+> **Bất kỳ database production nào.** Multi-AZ là "bảo hiểm" cơ bản — chi phí gấp đôi cộng thêm vài ms write latency, nhưng đổi lại được uptime SLA và không phải tỉnh dậy lúc 3h sáng vì AZ-A có sự cố.
+
+### Một lưu ý: Multi-AZ Cluster (option mới)
+
+Gần đây AWS có thêm option **Multi-AZ DB Cluster** với **1 writer + 2 readable standby**. Tức là 2 standby giờ có thể phục vụ read traffic. Nghe thì giống Read Replica nhưng vẫn là synchronous, mục tiêu chính vẫn là HA, không phải scale read theo chiều ngang. Đừng nhầm với Read Replica thông thường.
+
+---
+
+## 3. Read Replica: "Bản sao" để chia tải đọc
+
+Khi primary của bạn bắt đầu "ngộp" vì lượng query đọc tăng — dashboard, báo cáo, list page... — đó là lúc Read Replica vào cuộc.
+
+### Cơ chế hoạt động
+
+```
+                     ┌──────────────────┐
+              ┌──────│   Primary (DB)   │──────┐
+              │      │   read + write   │      │
+              │      └──────────────────┘      │
+   async replication                            async replication
+              │                                 │
+              ▼                                 ▼
+   ┌──────────────────┐               ┌──────────────────┐
+   │  Read Replica 1  │               │  Read Replica 2  │
+   │   (read-only)    │               │   (read-only)    │
+   │  endpoint riêng  │               │  endpoint riêng  │
+   └──────────────────┘               └──────────────────┘
+```
+
+Khác biệt cốt lõi với Multi-AZ:
+
+- **Asynchronous replication** — primary không chờ replica xác nhận, nên ghi nhanh hơn nhưng replica luôn có **độ trễ (replication lag)**, từ vài ms đến vài giây tùy tải.
+- **Replica phục vụ read traffic** — bạn đọc query analytics, báo cáo, page list... từ replica để giải phóng primary.
+- **Endpoint riêng** cho từng replica — app phải **chủ động** route read query sang replica (qua proxy, qua config hoặc qua reader endpoint của Aurora).
+- **Có thể đặt cross-Region** — phục vụ user ở khu vực khác với độ trễ thấp, đồng thời là một dạng DR (Disaster Recovery).
+- Tối đa **5 replica** với MySQL/MariaDB/PostgreSQL/Oracle, **15 replica** với Aurora.
+
+### Cái bẫy lớn nhất: Replication Lag
+
+Vì replication là async, nếu user vừa POST một comment xong rồi GET ngay lại danh sách, request GET có thể bị route sang replica chưa nhận được dữ liệu — và user thấy "comment biến mất".
+
+Đây là bài toán **Read-Your-Writes Consistency**, mình đã viết riêng một bài chi tiết: [Giải bài toán "Vừa ghi xong, đọc không thấy"](/posts/read-your-write-consistency).
+
+### Dùng khi nào?
+
+> Khi primary đã tối ưu hết mức (index, query, instance size) mà vẫn nóng — đặc biệt với workload **read-heavy** (báo cáo, dashboard, search). Hoặc khi bạn cần phục vụ user cross-region.
+
+---
+
+## 4. Bảng so sánh nhanh
+
+| Tiêu chí             | Multi-AZ             | Read Replica                  |
+| -------------------- | ---------------------------- | ----------------------------- |
+| **Mục đích**         | High Availability            | Scale read                    |
+| **Replication**      | Synchronous                  | Asynchronous                  |
+| **Phục vụ traffic**  | Không (standby truyền thống) | Có (read-only)                |
+| **Failover tự động** | Có                           | Không (phải promote thủ công) |
+| **Endpoint**         | Cùng endpoint với primary    | Endpoint riêng                |
+| **Cross-Region**     | Không                        | Có                            |
+| **Replication lag**  | ~0 (sync)                    | Có (vài ms → vài giây)        |
+| **Chi phí**          | ~2x instance                 | +1x cho mỗi replica           |
+
+---
+
+## 5. Vậy chọn cái nào?
+
+- **Chỉ cần HA** (database không quá tải đọc): Multi-AZ là đủ.
+- **Chỉ cần scale read** (dev/staging hoặc workload đọc nặng nhưng chấp nhận downtime nếu sự cố AZ): Read Replica.
+- **Production thật sự**: dùng **cả hai**.
+
+```
+                  ┌────────────────────┐
+                  │  Primary (AZ-A)    │
+                  │  read + write      │◄────┐
+                  └─────────┬──────────┘     │
+                            │ sync           │ async
+                            ▼                │
+                  ┌────────────────────┐     │
+                  │  Standby (AZ-B)    │     │
+                  │  HA failover       │     │
+                  └────────────────────┘     │
+                                             │
+                  ┌────────────────────┐     │
+                  │  Read Replica(s)   │─────┘
+                  │  scale read        │
+                  └────────────────────┘
+```
+
+Một mẹo hay: Read Replica trong tình huống "đám cháy lớn" có thể được **promote** thành một primary độc lập — đây là phương án DR cross-region khá phổ biến khi Multi-AZ (vốn chỉ trong cùng region) không đủ.
+
+---
+
+## 6. Vài pitfall hay gặp
+
+**1. Coi Read Replica là backup.**
+Sai. Replica vẫn replicate cả thao tác xóa nhầm. `DROP TABLE` trên primary → vài giây sau replica cũng mất bảng đó. Backup thật sự vẫn phải là **Automated Backup / Snapshot / PITR**.
+
+**2. Đọc từ Replica rồi expect "vừa ghi là thấy".**
+Replication lag là điều đương nhiên với async. Hãy thiết kế UX/route query để chấp nhận lag, hoặc force read về primary cho các luồng cần consistency.
+
+**3. Coi Multi-AZ là multi-region DR.**
+Multi-AZ chỉ bảo vệ ở mức **AZ trong cùng một Region**. Nếu cả Region us-east-1 sập (đã từng xảy ra), Multi-AZ không cứu được. DR cross-region cần Read Replica cross-region hoặc Aurora Global Database.
+
+**4. Tin rằng standby Multi-AZ "lãng phí" nên tự mở read traffic vào nó.**
+Standby truyền thống không có endpoint riêng — bạn không thể đọc từ nó. Nếu muốn standby phục vụ read, hãy chuyển sang **Multi-AZ DB Cluster** (3 node) hoặc dùng Aurora.
+
+---
+
+## Kết
+
+Một câu để nhớ:
+
+> **Multi-AZ cho uptime. Read Replica cho throughput.**
+
+Hai cơ chế khác mục tiêu, khác cơ chế replication, và khác cả cách app tương tác. Ở môi trường production nghiêm túc, đừng coi chúng là "thay thế cho nhau" — thường thì bạn cần cả hai, mỗi cái cho một bài toán riêng.
+
+Lần tới khi setup RDS, hãy hỏi đúng câu: "Mình đang lo downtime, hay đang lo DB nóng?". Câu trả lời sẽ tự dẫn bạn đến đúng lựa chọn.
