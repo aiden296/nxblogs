@@ -1,0 +1,194 @@
+---
+title: 'ALB Under The Hood: Bên Dưới "Nàng Lễ Tân Thông Minh" Thật Sự Là Gì?'
+date: '2026-05-03'
+tags: ['Devops', 'AWS', 'SAA', 'SAP']
+enableComment: true
+---
+
+# ALB Under The Hood: Bên Dưới "Nàng Lễ Tân Thông Minh" Thật Sự Là Gì?
+
+Khi bạn tạo một Application Load Balancer trên AWS, bạn nhận được đúng **một thứ duy nhất**: một DNS name dài ngoằng kiểu `my-alb-123456789.ap-southeast-1.elb.amazonaws.com`. Không có IP tĩnh. Không có server nào bạn có thể SSH vào. Vậy bên dưới cái DNS name đó, **thật sự là gì?**
+
+Bài viết này sẽ "lật mặt" kiến trúc ẩn sau ALB — từ đội quân load balancer nodes âm thầm hoạt động, đến cơ chế scaling, và lý do tại sao ALB không bao giờ có static IP.
+
+---
+
+## 1. Load Balancer Nodes — "Đội Quân Ẩn Mình"
+
+Khi bạn tạo ALB và chọn 3 Availability Zones (AZ), AWS **không** tạo ra "một cái load balancer". Thay vào đó, AWS triển khai **ít nhất 1 load balancer node trong mỗi AZ** mà bạn đã chọn. Vậy với 3 AZs, bạn có tối thiểu 3 nodes.
+
+### Nodes scale như thế nào?
+
+Mỗi node bắt đầu ở kích thước `large`. Khi traffic tăng, AWS sẽ **scale vertical** (nâng cấp node) theo progression:
+
+> `large` → `xlarge` → `2xlarge` → `4xlarge`
+
+Khi một node đã đạt `4xlarge` mà vẫn chưa đủ capacity, AWS sẽ chuyển sang **scale horizontal** — thêm node `4xlarge` mới vào AZ đó. Tổng cộng, một ALB có thể scale lên tối đa **100 nodes** across tất cả AZs.
+
+### Subnet phải đủ "rộng"
+
+Mỗi node tiêu thụ **1 IP address** trong subnet. Vì vậy, AWS yêu cầu:
+
+- Subnet tối thiểu **/27** CIDR (32 IPs, trong đó ít nhất **8 IPs phải còn trống**)
+- Nếu bạn có 50 nodes (10/AZ × 5 AZs), bạn cần thêm khoảng 10 IPs/AZ để còn room cho scaling
+
+**Chuyện gì xảy ra khi subnet hết IP?** ALB sẽ rơi vào trạng thái `active_impaired` — nó vẫn hoạt động nhưng không thể scale thêm, dẫn đến **5xx errors** và timeout cho users. Đây là một lỗi "thầm lặng" mà nhiều team không nhận ra cho đến khi traffic spike xảy ra.
+
+> **Tip:** Luôn dùng subnet **/27 trở lên** cho ALB. Nếu hệ thống của bạn có traffic lớn, hãy cân nhắc **/26** hoặc **/25** để đảm bảo headroom cho scaling.
+
+---
+
+## 2. Tại Sao ALB Chỉ Có DNS Name, Không Có Static IP?
+
+Đây là câu hỏi kinh điển: NLB có thể gắn Elastic IP (static), vậy tại sao ALB thì không?
+
+Câu trả lời nằm ở chính cơ chế scaling vừa mô tả ở trên:
+
+- ALB **liên tục thêm/bớt nodes** để đáp ứng traffic. Mỗi node có IP riêng.
+- Khi một node mới được thêm → **IP mới xuất hiện**
+- Khi một node bị remove → **IP cũ biến mất**
+
+Nếu AWS cấp static IP cho ALB, bạn sẽ gắn IP vào node nào? Node đó có thể bị remove bất cứ lúc nào. Đó là lý do AWS chọn giải pháp **DNS abstraction**: một DNS name trỏ đến danh sách IPs hiện tại của các nodes.
+
+### DNS hoạt động ra sao?
+
+Khi client resolve DNS name của ALB:
+
+1. Route 53 trả về **multiple A records** — mỗi record là IP của một node đang active
+2. Alias record có **TTL cố định 60 giây** (không thể thay đổi)
+3. Khi ALB scale (thêm/bớt nodes), Route 53 **tự động cập nhật** danh sách IPs
+4. Client sẽ nhận được IPs mới sau tối đa 60 giây
+
+### Vậy NLB làm thế nào để có Static IP?
+
+NLB hoạt động ở Layer 4 — nó chỉ forward TCP/UDP packets mà không cần inspect nội dung. Kiến trúc của NLB đơn giản hơn nhiều:
+
+- NLB tạo **1 Elastic Network Interface (ENI) cố định** per AZ
+- Mỗi ENI có thể gắn **1 Elastic IP** (static)
+- Bên trong, AWS dùng **Hyperplane** technology để scale capacity mà không cần thêm ENI
+
+Nói cách khác: NLB "giấu" sự phức tạp scaling bên dưới một ENI cố định. ALB không làm được điều này vì nó cần nhiều nodes thực sự để xử lý Layer 7 traffic (inspect HTTP headers, routing rules, SSL termination...).
+
+|                   | ALB                                      | NLB                                     |
+| ----------------- | ---------------------------------------- | --------------------------------------- |
+| **IP Model**      | Dynamic (thay đổi khi scale)             | Static (Elastic IP per AZ)              |
+| **Addressing**    | DNS name only                            | DNS name + Elastic IP                   |
+| **Scaling Model** | Thêm/bớt nodes                           | Scale bên dưới ENI cố định (Hyperplane) |
+| **Lý do**         | Layer 7 processing nặng, cần nhiều nodes | Layer 4 forwarding nhẹ, 1 ENI đủ        |
+
+> **Tip thực tế:** Nếu bạn cần static IP cho ALB (ví dụ: đối tác yêu cầu whitelist IP), hãy đặt **NLB phía trước ALB**. AWS hỗ trợ đăng ký ALB như một target group type của NLB, cho phép bạn kết hợp static IP của NLB với routing thông minh của ALB.
+
+---
+
+## 3. ALB Scaling — "Tăng Tốc Như Tên Lửa, Hạ Cánh Như Lông Vũ"
+
+ALB scaling có một đặc điểm thú vị: **bất đối xứng**.
+
+- **Scale up:** Cực kỳ aggressive. ALB có thể **gấp đôi capacity trong vòng 5 phút**
+- **Scale down:** Rất conservative. AWS giảm từ từ để tránh tình huống vừa scale down xong thì traffic lại spike
+
+### LCU Reservation — "Đặt Chỗ Trước" Cho Traffic Spike
+
+Trước đây, nếu bạn biết sắp có đợt traffic lớn (Black Friday, Flash Sale), bạn phải liên hệ AWS Support để "pre-warm" ALB. Bây giờ, AWS cung cấp tính năng **LCU (Load Balancer Capacity Unit) Reservation** — cho phép bạn tự đặt trước capacity.
+
+**Cách hoạt động:**
+
+1. Xác định peak load dự kiến từ CloudWatch metrics (`PeakLCUs`) hoặc load testing
+2. Set LCU Reservation qua Console hoặc ELBV2 API
+3. ALB sẽ provision capacity tối thiểu bằng mức bạn đặt
+4. Nếu traffic vượt mức reservation → ALB vẫn auto-scale bình thường phía trên
+
+**Automation pattern cho planned events:**
+
+```
+EventBridge Scheduler (1 tiếng trước event)
+    → Lambda function
+        → Đọc ALB info từ DynamoDB
+        → Gọi ELBV2 API để set LCU Reservation
+        → Sau event, reset về mức bình thường
+```
+
+> **Lưu ý:** LCU Reservation được thiết kế cho **khoảng thời gian ngắn** (vài giờ đến vài ngày), không phải cho permanent capacity planning. Reserved LCUs sử dụng Reserved rate (rẻ hơn), phần vượt mức dùng standard on-demand rate.
+
+---
+
+## 4. Cross-Zone Load Balancing
+
+Khi ALB có nodes ở nhiều AZs, traffic được phân phối như thế nào?
+
+### Mặc định: Bật ở ALB level
+
+Với cross-zone load balancing **bật** (mặc định), mỗi ALB node phân phối traffic đến **tất cả targets across mọi AZ**, không chỉ targets trong AZ của nó.
+
+**Ví dụ:** Bạn có 10 targets ở AZ-a và 5 targets ở AZ-b. Với cross-zone bật, mỗi target nhận ~6.67% traffic (1/15), bất kể nằm ở AZ nào.
+
+### Khi nào nên tắt cross-zone?
+
+Bạn có thể tắt cross-zone ở **target group level** trong một số trường hợp:
+
+- Muốn giữ traffic trong cùng AZ để giảm latency
+- Sử dụng **zonal shift** (AZ evacuation) cho disaster recovery
+- Muốn kiểm soát chặt traffic distribution
+
+### Chi phí
+
+Một điểm quan trọng: ALB **không tính phí** cross-zone data transfer giữa ALB nodes và targets. Đây là khác biệt lớn so với NLB — nơi cross-zone data transfer bị charge phí. Điều này làm ALB trở nên cost-effective hơn cho các deployment trải đều nhiều AZs.
+
+---
+
+## 5. Connection Handling — ALB Là Một Reverse Proxy Thực Thụ
+
+Nhiều người nghĩ ALB chỉ đơn giản "forward" request đến backend. Thực tế, ALB là một **full reverse HTTP proxy** — nó **terminate** kết nối TCP từ client và **tạo kết nối TCP mới** đến backend.
+
+### HTTP Multiplexing & Connection Pooling
+
+Đây là một trong những lợi ích lớn nhất mà ít người biết:
+
+- ALB nhận requests từ **hàng ngàn clients** qua hàng ngàn TCP connections
+- Nhưng khi gửi đến backend, ALB sử dụng **một số ít persistent TCP connections**
+- Nhiều client requests được **multiplex** qua cùng một backend connection
+
+Điều này giúp backend server tiết kiệm đáng kể CPU, memory và bandwidth — thay vì phải maintain hàng ngàn connections, backend chỉ cần handle vài chục connections từ ALB.
+
+### HTTP/2: Hỗ trợ nhưng có giới hạn
+
+ALB hỗ trợ **HTTP/2 từ phía client** (multiplexing, header compression, binary framing). Tuy nhiên, khi forward đến backend, ALB **convert HTTP/2 streams thành HTTP/1.1 requests riêng lẻ**. Nghĩa là:
+
+- Client → ALB: HTTP/2 (nhiều streams trên 1 connection)
+- ALB → Backend: HTTP/1.1 (mỗi stream thành 1 request riêng)
+
+> HTTP/2 stream multiplexing và prioritization **không được preserve** khi đi qua ALB.
+
+### Timeout Configuration — Nguồn Gốc Của 502/504
+
+ALB có 2 timeout quan trọng:
+
+| Timeout                     | Mặc định          | Ý nghĩa                                               |
+| --------------------------- | ----------------- | ----------------------------------------------------- |
+| **Connection Idle Timeout** | 60 giây           | Thời gian connection được giữ idle trước khi ALB đóng |
+| **HTTP Client Keep-Alive**  | 3600 giây (1 giờ) | Thời gian tối đa một connection được giữ sống         |
+
+**Best practice quan trọng:** Backend keep-alive timeout phải **lớn hơn** ALB idle timeout.
+
+Tại sao? Nếu backend đóng connection trước ALB (ví dụ backend timeout 30s, ALB timeout 60s), sẽ xảy ra race condition:
+
+1. ALB nghĩ connection vẫn active → gửi request qua
+2. Backend đã đóng connection → trả về RST
+3. ALB trả về **502 Bad Gateway** cho client
+
+> **Fix:** Set backend keep-alive timeout = ALB idle timeout + 5-10 giây buffer. Ví dụ: ALB idle timeout 60s → backend keep-alive 70s.
+
+---
+
+## Kết Luận — Checklist Cho Production
+
+ALB không phải "một cái load balancer" — nó là **một fleet các nodes** tự động scale để đáp ứng traffic. Hiểu được kiến trúc bên dưới giúp bạn tránh nhiều lỗi production phổ biến.
+
+**Checklist khi deploy ALB:**
+
+- Subnet ALB dùng **/27 trở lên**, đảm bảo ít nhất 8 free IPs per AZ
+- **Không hardcode IP** của ALB — luôn dùng DNS name hoặc Route 53 alias
+- Set backend keep-alive **lớn hơn** ALB idle timeout (mặc định 60s) để tránh 502
+- Dùng **LCU Reservation** trước các planned traffic events (Flash Sale, launch)
+- Monitor **SurgeQueueLength** và **SpilloverCount** — nếu SpilloverCount > 0, backend đang quá tải
+- Cần static IP? Đặt **NLB trước ALB** thay vì tìm cách gắn IP cho ALB
