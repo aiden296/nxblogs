@@ -233,9 +233,9 @@ So với restore từ snapshot (mất hàng giờ + tốn toàn bộ storage), c
 
 ## 7. Security
 
-Aurora được xây dựng với nhiều layer bảo mật:
+Cả Aurora và RDS đều được xây dựng với nhiều layer bảo mật:
 
-- **Encryption at rest**: sử dụng **AWS KMS**, mã hóa toàn bộ data, replicas, snapshots và backups. Phải bật lúc tạo cluster, không thể bật sau.
+- **Encryption at rest**: sử dụng **AWS KMS**, mã hóa toàn bộ data, replicas, snapshots và backups. Nếu master không encrypt, thì replicas cũng không thể encrypt. Phải bật lúc tạo cluster, không thể bật sau. Migrate non-encrypt sang encrypt cần tạo snapshot và restore as encrypted
 - **Encryption in transit**: hỗ trợ **SSL/TLS** giữa application và Aurora.
 - **IAM Authentication**: thay vì dùng username/password truyền thống, bạn có thể authenticate bằng **IAM token** — token tự động rotate, không cần quản lý password.
 - **VPC isolation**: Aurora chạy trong **VPC** của bạn, truy cập được kiểm soát qua **Security Groups**.
