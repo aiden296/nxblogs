@@ -182,33 +182,33 @@ Aurora cho phép tạo **clone** từ cluster hiện tại sử dụng **copy-on
 - Chỉ tốn thêm storage khi data bị thay đổi trên clone
 - Use case: tạo staging environment từ production data để test
 
-**Copy-on-write** là kỹ thuật chia sẻ data giữa hai cluster — chỉ thực sự copy data **khi có thay đổi**. Đây là điểm mấu chốt giúp clone vừa nhanh vừa rẻ.
+**Copy-on-write** là kỹ thuật chia sẻ data giữa hai cluster — chỉ thực sự copy data **khi có thay đổi**. Đây là điểm mấu chốt giúp clone vừa nhanh vừa rẻ. 1 usecase rõ ràng cho việc clone này là bạn muốn tạo 1 cluster cho staging, kế thừa từ production.
 
 **Bước 1: Tạo clone**
 
 ```
 Production cluster ──┐
                      ├──► Cùng trỏ vào Storage gốc
-Clone cluster    ────┘
+Staging cluster    ────┘
 
    ⏱ Vài phút (chỉ tạo metadata)
    💰 Không tốn thêm storage
 ```
 
-Clone **không copy gì cả** — nó chỉ "trỏ chung" đến data của production.
+Staging **không copy gì cả** — nó chỉ "trỏ chung" đến data của production.
 
-**Bước 2: Đọc trên clone** → đọc trực tiếp từ storage gốc, không phát sinh copy.
+**Bước 2: Đọc trên staging** → đọc trực tiếp từ storage gốc, không phát sinh copy.
 
-**Bước 3: Khi clone ghi thay đổi**
+**Bước 3: Khi staging ghi thay đổi**
 
 ```
-Clone: UPDATE users SET name='Bob' WHERE id=5
+Staging: UPDATE users SET name='Bob' WHERE id=5
    ↓
 Aurora phát hiện page chứa id=5 sắp bị thay đổi
    ↓
 Copy riêng page đó cho clone (chỉ page này)
    ↓
-Clone ghi vào bản copy → production giữ nguyên page gốc
+Staging ghi vào bản copy → production giữ nguyên page gốc
 ```
 
 → **Chỉ copy những page bị thay đổi**, phần còn lại vẫn share chung.
