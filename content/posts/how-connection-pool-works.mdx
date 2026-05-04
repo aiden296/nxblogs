@@ -1,0 +1,477 @@
+---
+title: 'Connection Pool: Tại sao mở kết nối database mỗi request là một sự lãng phí'
+date: '2026-05-04'
+tags: ['Backend', 'Database', 'System Design']
+enableComment: true
+---
+
+# Connection Pool: Tại sao mở kết nối database mỗi request là một sự lãng phí
+
+> Bạn đang chạy production ngon lành — rồi đột nhiên flash sale đổ về, dashboard báo đỏ: `FATAL: too many connections for role "app_user"`. CPU database spike 100%, response time từ 50ms nhảy lên 5 giây, rồi timeout hàng loạt.
+
+Phản xạ đầu tiên: tăng `max_connections` lên gấp đôi. Nhưng thực tế, càng tăng càng tệ — database giờ phải quản lý hàng trăm connection, mỗi connection ngốn bộ nhớ, tranh nhau CPU, rồi tất cả cùng chậm.
+
+Vấn đề thật sự không phải database yếu. Vấn đề là **mỗi HTTP request đang mở một kết nối mới đến database, dùng cho đúng 1 câu query, rồi đóng lại** — và cái giá phải trả cho "mở + đóng" đó đắt hơn rất nhiều so với bạn nghĩ.
+
+Bài viết này sẽ mổ xẻ chính xác chuyện gì xảy ra khi bạn mở và đóng một kết nối database, tại sao nó đắt, và cách **connection pool** giải quyết từng vấn đề — từ local pool với `pg` trong Node.js đến global pool với AWS RDS Proxy.
+
+---
+
+## 1. Không có connection pool thì chuyện gì xảy ra?
+
+Hình dung mỗi khi user gửi một HTTP request đến server, application sẽ:
+
+1. Mở một **TCP connection** đến database
+2. Thực hiện **TLS handshake** để mã hoá kênh truyền
+3. Gửi thông tin **xác thực** (username/password)
+4. Database tạo **backend process** riêng, cấp phát bộ nhớ (RAM), thiết lập session state
+5. Chạy câu query (thường chỉ mất vài milliseconds)
+6. Dọn dẹp session, giải phóng bộ nhớ
+7. Đóng kết nối TCP
+
+Tất cả bước 1–4 và 6–7 là **overhead** — chúng không liên quan gì đến câu query, nhưng phải thực hiện **mỗi lần** có request mới.
+
+```
+Request 1 → [TCP] → [TLS] → [Auth] → [Alloc] → [Query 2ms] → [Cleanup] → [Close]
+Request 2 → [TCP] → [TLS] → [Auth] → [Alloc] → [Query 2ms] → [Cleanup] → [Close]
+Request 3 → [TCP] → [TLS] → [Auth] → [Alloc] → [Query 2ms] → [Cleanup] → [Close]
+...
+Request N → [TCP] → [TLS] → [Auth] → [Alloc] → [Query 2ms] → [Cleanup] → [Close]
+```
+
+Giống như bạn gọi điện cho ngân hàng: mỗi lần phải bấm số, chờ kết nối, xác minh danh tính qua 3 câu hỏi bảo mật... chỉ để hỏi **một** câu. Cúp máy. Rồi gọi lại, xác minh lại, hỏi câu tiếp theo. Lặp lại 1000 lần.
+
+Và đây là vấn đề thật sự: PostgreSQL mặc định chỉ cho phép **100 connections đồng thời** (`max_connections = 100`). Request thứ 101 sẽ nhận ngay lỗi `FATAL: too many connections`. Khi mỗi request tạo connection riêng và giữ nó qua cả quá trình setup dài dòng, 100 slot đó hết rất nhanh.
+
+> **Lưu ý**: Con số 100 chỉ là **default** của PostgreSQL. Trong thực tế, `max_connections` thay đổi tùy theo **cấu hình hardware** của database. AWS RDS chẳng hạn, set `max_connections` tự động theo công thức `LEAST({DBInstanceClassMemory/9531392}, 5000)` — nghĩa là tỉ lệ với RAM của instance:
+>
+> | Instance class | RAM | `max_connections` (RDS PostgreSQL default) |
+> |---------------|-----|------------------------------------------|
+> | `db.t3.micro` | 1 GB | ~85 |
+> | `db.t3.medium` | 4 GB | ~410 |
+> | `db.r5.large` | 16 GB | ~1700 |
+> | `db.r5.4xlarge` | 128 GB | ~5000 (capped) |
+>
+> Nhưng đừng vội mừng vì instance to có nhiều slot — như Section 3 sẽ chỉ ra, **càng nhiều connection không đồng nghĩa với throughput cao hơn**. Chi phí context switching, memory, lock contention đều scale theo số connection. Mục tiêu của connection pool không phải "dùng hết max_connections" mà là **dùng số connection tối ưu cho workload**.
+
+Vì `max_connections` tỉ lệ với RAM, một **hotfix nhanh** khi production bị `FATAL: too many connections` là **vertical scale**: nâng instance từ `db.t3.medium` (4GB, ~410 connections) lên `db.r5.large` (16GB, ~1700 connections). Vài cú click trên AWS Console, sau khi reboot là có thêm slot ngay.
+
+Nhưng ngay sau khi scale xong, bạn sẽ thấy **hệ quả đến rất nhanh**:
+
+- **Hóa đơn AWS tăng vài lần** — `db.r5.large` đắt gấp ~4 lần `db.t3.medium`, và bạn vừa "đốt" tiền cho RAM mà thật ra application chỉ cần để giữ connection idle, không phải để xử lý dữ liệu.
+- **CPU vẫn cao** — vì bottleneck thật sự là TLS/SCRAM handshake và context switching, không phải RAM. Instance to hơn chỉ trì hoãn vấn đề chứ không giải quyết nó.
+- **Latency p99 vẫn tệ** — query phải chờ context switch, và càng nhiều connection thì kernel càng switch nhiều.
+- **Lần spike tiếp theo lại hết slot** — vì application vẫn tạo connection mỗi request, chỉ là ngưỡng trần dời lên cao hơn một chút.
+
+Vertical scale là **mua thời gian**, không phải lời giải. Lời giải là dừng việc tạo/đóng connection cho mỗi request — và đó chính là việc connection pool làm.
+
+---
+
+## 2. Chi phí ẩn của mỗi kết nối: Trước và sau câu query
+
+Hãy zoom vào từng bước overhead để hiểu tại sao chúng đắt đến vậy.
+
+### 2.1. Chi phí thiết lập kết nối (Connection Setup)
+
+**TCP 3-way handshake**
+
+Trước khi gửi bất kỳ dữ liệu nào, client và database phải thiết lập kết nối TCP qua 3 bước:
+
+```
+Client                        Database
+  │                               │
+  │─── SYN ──────────────────────►│
+  │                               │
+  │◄── SYN-ACK ───────────────────│
+  │                               │
+  │─── ACK ──────────────────────►│
+  │                               │
+       1.5 Round Trip Time (RTT)
+```
+
+Chi phí: **1.5 RTT**. Nếu application chạy ở `ap-southeast-1` (Singapore) và database ở `us-east-1` (Virginia) với latency ~200ms/RTT, bạn đã mất **300ms** chỉ để thiết lập kết nối TCP. Ngay cả trong cùng region, cross-AZ latency ~1-2ms/RTT cũng cộng dồn nhanh khi nhân với hàng nghìn request.
+
+**TLS negotiation**
+
+Hầu hết production database đều bật TLS (SSL) để mã hóa dữ liệu trên đường truyền. Sau khi TCP connection sẵn sàng, client và database phải trao đổi certificate, thống nhất cipher suite, và tạo session key:
+
+- **TLS 1.3**: thêm **1 RTT** (ClientHello + ServerHello trong 1 round trip)
+- **TLS 1.2**: thêm **2 RTT** (thêm 1 round trip cho key exchange)
+
+Đây không chỉ tốn thời gian mà còn **tốn CPU** — cả hai bên phải thực hiện phép toán mã hóa bất đối xứng (asymmetric cryptography) để trao đổi key.
+
+**Authentication**
+
+PostgreSQL mặc định dùng **SCRAM-SHA-256** — một giao thức xác thực hiện đại và an toàn. Quá trình bao gồm:
+
+1. Client gửi username
+2. Server phản hồi với **salt** và **iteration count** (mặc định 4096)
+3. Client tính toán proof bằng PBKDF2 với 4096 iterations
+4. Server xác minh proof
+
+Chi phí: ít nhất **1 RTT** thêm, cộng thêm **CPU time** đáng kể cho PBKDF2 hashing. Trên một database instance nhỏ (ví dụ `db.t3.medium`), khi 500 connections cùng xác thực đồng thời, CPU sẽ dành phần lớn thời gian cho crypto thay vì xử lý query.
+
+**Memory allocation**
+
+PostgreSQL sử dụng mô hình **process-per-connection**: mỗi kết nối mới, PostgreSQL fork một backend process hoàn toàn mới. Process này cần cấp phát bộ nhớ riêng:
+
+| Thành phần | Dung lượng | Mục đích |
+|-----------|-----------|---------|
+| `work_mem` | 4MB (default) | Bộ nhớ cho sort, hash operations |
+| `temp_buffers` | 8MB (default) | Bộ nhớ cho temporary tables |
+| Catalog cache | ~1-2MB | Cache metadata bảng, index |
+| Plan cache | ~1-2MB | Cache execution plan |
+| Stack + overhead | ~0.5-1MB | Process stack và kernel overhead |
+| **Tổng** | **~5-10MB** | **Per connection** |
+
+Nghe có vẻ ít, nhưng nhân lên: **200 connections = 1-2GB** chỉ cho connection overhead, chưa tính shared buffers hay dữ liệu thật sự.
+
+**Session state initialization**
+
+Sau khi xác thực thành công, PostgreSQL còn phải:
+
+- Load các cấu hình của user (`search_path`, `timezone`, `client_encoding`)
+- Khởi tạo transaction state machine
+- Tạo các cấu trúc dữ liệu nội bộ cho session
+
+### 2.2. Chi phí dọn dẹp (Connection Teardown)
+
+Khi request xong và application đóng kết nối, database phải:
+
+- **Rollback** mọi transaction chưa commit và giải phóng lock
+- **Giải phóng bộ nhớ** — `work_mem`, temp buffers, plan cache, catalog cache — tất cả phải trả lại cho OS
+- **Đóng kết nối TCP** — quy trình 4-way FIN/ACK:
+
+```
+Client                        Database
+  │                               │
+  │────── FIN ───────────────────►│
+  │◄───── ACK ────────────────────│
+  │◄───── FIN ────────────────────│
+  │────── ACK ───────────────────►│
+  │                               │
+        2 RTT để đóng kết nối
+```
+
+- **Ephemeral port** mà connection sử dụng không giải phóng ngay — nó chuyển sang trạng thái **TIME_WAIT trong 60 giây** (trên Linux) trước khi port thật sự khả dụng trở lại.
+
+### 2.3. Tổng chi phí
+
+| Bước | Chi phí thời gian | Chi phí tài nguyên |
+|------|------------------|-------------------|
+| TCP handshake | 1.5 RTT | Socket, file descriptor |
+| TLS 1.3 | 1 RTT | CPU cho crypto |
+| Authentication | 1+ RTT | CPU cho PBKDF2 |
+| Memory allocation | — | ~5-10MB RAM |
+| Session init | — | CPU time |
+| **Teardown** | 2 RTT | Port bị giữ 60s (TIME_WAIT) |
+| **Tổng setup + teardown** | **5.5+ RTT** | **RAM + CPU + port** |
+
+> Câu query của bạn chạy trong 2ms. Nhưng setup + teardown bao quanh nó tốn **150-200ms** (cross-AZ) hoặc hàng giây (cross-region). Bạn đang trả 99% overhead cho 1% công việc thật sự.
+
+---
+
+## 3. Khi hàng nghìn kết nối cùng đổ về
+
+Những chi phí ở Section 2 là cho **một** kết nối. Khi traffic spike và hàng nghìn request đổ về đồng thời, các chi phí này cộng hưởng tạo ra hiệu ứng domino:
+
+### 3.1. Port exhaustion
+
+Mỗi kết nối TCP sử dụng một **ephemeral port** (phạm vi 32768–60999 trên Linux, tổng cộng khoảng **28,000 ports**). Khi đóng kết nối, port không giải phóng ngay mà nằm trong `TIME_WAIT` **60 giây**.
+
+Làm phép tính: nếu application tạo **500 connections/giây**, mỗi port bị giữ 60s → cần **30,000 ports** — vượt quá tổng số ephemeral ports. Kết quả: lỗi `EADDRNOTAVAIL` (Cannot assign requested address). Application hoàn toàn không thể mở thêm kết nối nào nữa.
+
+### 3.2. Memory pressure
+
+- 100 connections × 10MB = **1GB** chỉ cho connection overhead
+- 500 connections × 10MB = **5GB** — rất có thể vượt quá RAM khả dụng của database instance
+- Khi hết RAM, OS bắt đầu **swap** sang disk → performance của toàn bộ database sụp đổ
+- Hoặc tệ hơn, OOM Killer sẽ kill process PostgreSQL
+
+### 3.3. CPU bị đốt cho handshake
+
+Dưới traffic spike, CPU database không dành cho việc xử lý query — mà bận:
+
+- **TLS negotiation**: mỗi kết nối cần asymmetric crypto (RSA/ECDSA)
+- **SCRAM-SHA-256**: mỗi kết nối chạy PBKDF2 với **4096 iterations**
+
+Khi 1000 connections cùng thiết lập đồng thời, CPU gần như 100% là crypto, query thật sự phải xếp hàng chờ.
+
+### 3.4. Context switching
+
+PostgreSQL dùng mô hình **process-per-connection**: mỗi connection là một OS process độc lập. Database instance thường chỉ có vài CPU cores (4, 8, 16…), nhưng khi có hàng trăm connections, kernel phải liên tục **chuyển CPU qua lại giữa các process** để mỗi process được chạy một lượt.
+
+Mỗi lần context switch, kernel phải:
+
+- **Save** state hiện tại của process đang chạy (registers, program counter, stack pointer)
+- **Flush TLB** (Translation Lookaside Buffer) — bảng cache mapping virtual address sang physical address
+- **Load** state của process mới
+- CPU cache bị **invalidate** một phần → process mới phải đọc lại data từ RAM (chậm hơn cache 100 lần)
+
+Một context switch trên Linux tốn khoảng **1–10 microseconds** đo theo wall clock, nhưng chi phí thật sự (cache miss sau switch) có thể lên đến **vài chục microseconds**. Khi có 500 connections active, kernel có thể switch hàng chục nghìn lần/giây — CPU dành phần lớn thời gian cho việc chuyển ngữ cảnh thay vì thực thi query.
+
+Đây là lý do tại sao **tăng `max_connections` không tỉ lệ thuận với throughput**: vượt qua một ngưỡng nào đó (thường là 2-4 lần số CPU cores), throughput **giảm** do context switching overhead vượt qua lợi ích của việc xử lý song song.
+
+### 3.5. Connection limit
+
+PostgreSQL có giới hạn cứng `max_connections` (default **100**). Tăng lên 300, 500? Mỗi connection tốn resource, nên:
+
+- Nhiều connection hơn → nhiều **context switching** (Section 3.4)
+- Nhiều connection hơn → nhiều **lock contention** trên shared structures (lock manager, buffer manager)
+- Vượt quá ~300 connections, PostgreSQL thực tế **chậm hơn** dù có đủ RAM
+
+### 3.6. File descriptor exhaustion
+
+Mỗi connection chiếm **1 file descriptor**. Default `ulimit -n` trên nhiều Linux distribution là **1024**. Cộng thêm file descriptors cho data files, WAL, logs — 1024 hết rất nhanh.
+
+### Tổng hợp
+
+| Vấn đề | Ngưỡng | Triệu chứng |
+|--------|-------|-------------|
+| Port exhaustion | ~28K ports / TIME_WAIT 60s | `EADDRNOTAVAIL` |
+| Memory pressure | ~5-10MB per connection | OOM, swapping, crash |
+| CPU saturation | TLS + SCRAM per connection | `%sys` CPU cao, query chậm |
+| Context switching | > 2-4× CPU cores | Throughput giảm, latency tăng |
+| Connection limit | `max_connections` (default 100) | `FATAL: too many connections` |
+| File descriptor limit | `ulimit -n` (default 1024) | `Too many open files` |
+
+Tất cả 5 vấn đề trên đều đến từ cùng một nguyên nhân gốc: **tạo và hủy kết nối liên tục cho mỗi request**.
+
+---
+
+## 4. Connection Pool giải quyết vấn đề như thế nào
+
+Ý tưởng của connection pool rất đơn giản: **tạo kết nối một lần, dùng lại nhiều lần**.
+
+Thay vì mỗi request tự mở kết nối, xác thực, rồi đóng — application giữ sẵn một nhóm (**pool**) kết nối đã được thiết lập đầy đủ (TCP + TLS + Auth xong hết). Khi request cần query database, nó **mượn** một kết nối từ pool, dùng xong thì **trả lại** — không đóng, không tạo mới.
+
+```
+Pool khởi tạo:
+  [TCP+TLS+Auth] → C1 ─┐
+  [TCP+TLS+Auth] → C2 ─┤
+  [TCP+TLS+Auth] → C3 ─┼──► Idle Pool [C1, C2, C3, C4, C5]
+  [TCP+TLS+Auth] → C4 ─┤
+  [TCP+TLS+Auth] → C5 ─┘
+
+
+Khi có request:
+  Request → checkout C1 → execute query (2ms) → release C1 về pool
+  Request → checkout C2 → execute query (3ms) → release C2 về pool
+
+Không có TCP/TLS/Auth overhead. Tổng thời gian ≈ thời gian query.
+```
+
+### Mapping vấn đề → giải pháp
+
+| Vấn đề (Section 3) | Connection Pool giải quyết |
+|---------------------|---------------------------|
+| TCP+TLS+Auth mỗi request | Chi phí setup chỉ trả **1 lần** khi pool khởi tạo |
+| Port exhaustion | Số connection cố định, không tạo/đóng liên tục → không có TIME_WAIT |
+| Memory pressure | Pool có `max` — giới hạn cứng số connection → bộ nhớ bounded |
+| CPU burn cho handshake | Không lặp lại handshake → CPU dành cho query |
+| `max_connections` hit | Pool `max` nhỏ hơn nhiều so với `max_connections` → luôn đủ slot |
+| Connection churn | Connection được **reuse**, không bị destroy/recreate |
+
+### Vòng đời của connection trong pool
+
+1. **Creation** — Pool tạo `min` connections khi khởi động. TCP + TLS + Auth hoàn tất cho tất cả.
+2. **Checkout** — Request mượn connection. Nếu có idle connection → lấy ngay. Nếu hết idle nhưng chưa đạt `max` → tạo mới. Nếu đạt `max` → xếp hàng chờ.
+3. **Release** — Request xong, trả connection về pool. Pool reset session state (rollback nếu có transaction dở, clear temp settings).
+4. **Validation** — Pool kiểm tra connection còn sống không trước khi cho mượn (chạy `SELECT 1` hoặc ping).
+5. **Cleanup** — Connection idle quá lâu (`idleTimeout`) → pool đóng bớt, giữ lại tối thiểu `min` connections.
+
+### Các tham số cấu hình quan trọng
+
+| Tham số | Ý nghĩa | Giá trị ví dụ |
+|---------|---------|--------------|
+| `min` | Số connection giữ sẵn khi idle | 5 |
+| `max` | Số connection tối đa dưới tải cao | 20 |
+| `idleTimeout` | Connection idle quá lâu → đóng | 30 giây |
+| `connectionTimeout` | Chờ tối đa để lấy connection từ pool | 2 giây |
+| `validation` | Cách kiểm tra connection còn sống | `SELECT 1` trước khi checkout |
+
+---
+
+## 5. Local Pool: `pg` Pool trong Node.js
+
+Khi application chỉ chạy **một instance duy nhất**, local pool là giải pháp đơn giản và hiệu quả nhất. Thư viện `pg` (node-postgres) cung cấp sẵn đối tượng `Pool` với đầy đủ tính năng.
+
+### 5.1. Cấu hình
+
+```ts
+import { Pool } from 'pg'
+
+const pool = new Pool({
+  host: 'your-db-host.rds.amazonaws.com',
+  port: 5432,
+  database: 'myapp',
+  user: 'app_user',
+  password: process.env.DB_PASSWORD,
+  ssl: { rejectUnauthorized: true },
+
+  // Pool sizing
+  min: 5,                        // Giữ sẵn 5 connections khi idle
+  max: 20,                       // Tối đa 20 connections dưới tải cao
+
+  // Timeouts
+  idleTimeoutMillis: 30000,      // Connection idle > 30s → đóng, trả về OS
+  connectionTimeoutMillis: 2000, // Chờ tối đa 2s để lấy connection từ pool
+
+  // Cho phép process exit khi pool rỗng
+  allowExitOnIdle: true,
+})
+```
+
+Giải thích các giá trị:
+
+- **`min: 5`** — khi không có traffic, pool vẫn giữ 5 connections sẵn sàng. Request đầu tiên không phải chờ TCP+TLS+Auth.
+- **`max: 20`** — dù có 1000 request đồng thời, chỉ tối đa 20 connections đến database. Request thứ 21 xếp hàng chờ trong tối đa `connectionTimeoutMillis`.
+- **`idleTimeoutMillis: 30000`** — connection không ai dùng quá 30 giây sẽ bị đóng, giải phóng resource cho database. Pool sẽ không đóng dưới `min`.
+- **`connectionTimeoutMillis: 2000`** — nếu chờ quá 2 giây mà không lấy được connection, throw error. Tốt hơn là để user chờ mãi.
+
+### 5.2. Sử dụng trong code
+
+**Pattern 1: `pool.query()`** — Pool tự động checkout, chạy query, rồi release. Phù hợp cho single query.
+
+```ts
+async function getUser(id: number) {
+  const { rows } = await pool.query(
+    'SELECT * FROM users WHERE id = $1',
+    [id]
+  )
+  return rows[0]
+}
+```
+
+**Pattern 2: Manual checkout** — Khi cần chạy nhiều query trong một transaction, bạn phải giữ cùng một connection.
+
+```ts
+async function transferMoney(from: number, to: number, amount: number) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(
+      'UPDATE accounts SET balance = balance - $1 WHERE id = $2',
+      [amount, from]
+    )
+    await client.query(
+      'UPDATE accounts SET balance = balance + $1 WHERE id = $2',
+      [amount, to]
+    )
+    await client.query('COMMIT')
+  } catch (e) {
+    await client.query('ROLLBACK')
+    throw e
+  } finally {
+    client.release()
+  }
+}
+```
+
+> **Lưu ý quan trọng**: Luôn gọi `client.release()` trong `finally` block. Nếu quên release, connection bị "leak" — pool nghĩ nó đang bận nhưng thực tế không ai dùng. Leak đủ nhiều, pool cạn kiệt, toàn bộ application bị block.
+
+Local pool hoạt động tốt khi application chạy **một instance**. Nhưng khi bạn scale ra nhiều instances thì sao?
+
+> 10 instances × `max=20` = **200 connections** đến database. Auto-scale lên 50 instances? **1000 connections**. PostgreSQL `max_connections = 100` thì chưa đến instance thứ 6 đã hết slot.
+
+---
+
+## 6. Global Pool: AWS RDS Proxy — Khi local pool không đủ
+
+### 6.1. Vấn đề: N instances × local pool
+
+Mỗi application instance giữ local pool riêng. Các pool này **không biết nhau** — mỗi pool tự quản lý connections độc lập.
+
+```
+┌─────────────┐
+│ Instance 1  │──── Local Pool (max=20) ────┐
+├─────────────┤                             │
+│ Instance 2  │──── Local Pool (max=20) ────┤
+├─────────────┤                             │
+│ Instance 3  │──── Local Pool (max=20) ────┤
+├─────────────┤                             ├──► PostgreSQL
+│ Instance 4  │──── Local Pool (max=20) ────┤    max_connections = 100
+├─────────────┤                             │
+│ Instance 5  │──── Local Pool (max=20) ────┤    ❌ 5 × 20 = 100 → FULL
+├─────────────┤                             │
+│ Instance 6  │──── Local Pool (max=20) ────┘    ❌ Instance 6 → REJECTED
+└─────────────┘
+```
+
+Vấn đề trở nên nghiêm trọng hơn với:
+
+- **Auto-scaling**: ECS/EKS scale từ 5 lên 50 instances khi traffic tăng → connections tăng từ 100 lên 1000
+- **Lambda**: mỗi invocation chạy trong container riêng, mỗi container tạo connection riêng. 1000 concurrent Lambda = 1000 connections
+- **Blue/Green deployment**: trong quá trình deploy, cả fleet cũ và mới cùng chạy → số connections nhân đôi tạm thời
+
+Giảm `max` pool của mỗi instance? Được, nhưng sẽ tạo bottleneck — mỗi instance không đủ connections cho request của chính nó.
+
+### 6.2. RDS Proxy: Centralized connection pool
+
+**AWS RDS Proxy** đặt giữa application instances và database, đóng vai trò **một connection pool chung** cho toàn bộ fleet.
+
+```
+┌─────────────┐
+│ Instance 1  │──── Local Pool ────┐
+├─────────────┤                    │
+│ Instance 2  │──── Local Pool ────┤
+├─────────────┤                    │
+│ Instance 3  │──── Local Pool ────┤
+├─────────────┤                    ├──► RDS Proxy ──► PostgreSQL
+│ Instance 4  │──── Local Pool ────┤    (giữ ~50       max_connections=100
+├─────────────┤                    │     DB connections)
+│    ...      │                    │
+├─────────────┤                    │
+│ Instance 10 │──── Local Pool ────┘
+└─────────────┘
+
+App connections: 10 × 20 = 200
+DB connections:  ~50 (do RDS Proxy multiplex)
+```
+
+RDS Proxy hoạt động bằng cách **multiplexing**: nhận hàng trăm connections từ application, nhưng chỉ mở một số lượng nhỏ connections thật sự đến database. Khi một app connection cần chạy query, Proxy gán nó vào một DB connection rảnh, chạy query, rồi trả DB connection lại pool — tương tự như local pool, nhưng ở tầng infrastructure.
+
+Ngoài multiplexing, RDS Proxy còn mang lại:
+
+- **Failover nhanh hơn**: khi Aurora primary fail, RDS Proxy phát hiện và chuyển sang replica mới **nhanh hơn tới 66%** so với khi application tự reconnect. Application không cần xử lý logic reconnect.
+- **IAM Authentication**: thay vì hardcode password, application dùng IAM role để xác thực với Proxy → credentials được quản lý qua AWS Secrets Manager, rotate tự động.
+- **Connection draining**: khi scale down, Proxy đợi query đang chạy xong rồi mới đóng connection — không bị cắt ngang.
+
+### 6.3. Cấu hình quan trọng của RDS Proxy
+
+| Setting | Ý nghĩa | Giá trị thường dùng |
+|---------|---------|---------------------|
+| `MaxConnectionsPercent` | % của `max_connections` mà Proxy được dùng | 50–80% |
+| `MaxIdleConnectionsPercent` | % idle connections Proxy giữ lại | 10–50% |
+| `ConnectionBorrowTimeout` | Client chờ tối đa để mượn connection | 120s |
+| `InitQuery` | SQL chạy khi mượn connection (reset state) | `SET timezone='UTC'` |
+
+Ví dụ: PostgreSQL có `max_connections = 100`, bạn set `MaxConnectionsPercent = 70%` → Proxy dùng tối đa **70 connections** đến database, còn **30 connections** dự phòng cho admin, monitoring, migration tools.
+
+### 6.4. Khi nào cần RDS Proxy?
+
+Không phải lúc nào cũng cần RDS Proxy. Nếu application chỉ chạy 1-2 instances với local pool quản lý tốt, thêm RDS Proxy chỉ tăng chi phí và thêm latency (thêm 1 hop network).
+
+RDS Proxy thật sự cần khi:
+
+- **Multiple instances** với tổng connections vượt `max_connections`
+- **Lambda/serverless** — không có persistent process để giữ local pool
+- **Auto-scaling thường xuyên** — mỗi instance mới tạo thêm connections
+- **Aurora failover** — muốn failover trong suốt, không cần logic reconnect trong application
+- **Connection spike unpredictable** — traffic pattern không đều, khó tune local pool
+
+---
+
+## 7. Tổng kết
+
+Từ đầu bài đến giờ, chúng ta đã đi qua hành trình:
+
+**Chi phí 1 connection** (TCP + TLS + Auth + Memory = 5.5+ RTT + ~10MB) → **Cộng hưởng khi spike** (port exhaustion, OOM, CPU burn) → **Local pool** (reuse connection, bounded resource, queue thay vì reject) → **Global pool** (multiplex N instances qua RDS Proxy).
+
+Một vài nguyên tắc thực tế:
+
+1. **Luôn dùng connection pool** — dù application nhỏ. Chi phí setup pool gần như bằng 0, nhưng lợi ích rõ ràng từ request đầu tiên.
+2. **Set `max` pool dựa trên database, không dựa trên application** — nếu `max_connections = 100` và có 5 instances, mỗi instance nên set `max = 15-18`, không phải `max = 50`.
+3. **Luôn release connection trong `finally`** — connection leak là bug nguy hiểm nhất với pool vì nó âm thầm và chỉ phát hiện khi pool cạn kiệt.
+4. **Monitor pool metrics** — theo dõi pool size, wait time, checkout count. Nếu wait time tăng đều → cần tăng `max` hoặc tối ưu query.
+5. **Thêm RDS Proxy khi local pool không đủ** — đặc biệt khi dùng Lambda hoặc auto-scaling, đừng cố giải quyết bằng cách giảm `max` pool của mỗi instance.
