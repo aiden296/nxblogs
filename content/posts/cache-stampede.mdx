@@ -94,6 +94,7 @@ const group = new SingleFlight<Product>()
 
 async function getProduct(productID: string): Promise<Product> {
   const cached = await cache.get(productID)
+
   if (cached) {
     return cached
   }
