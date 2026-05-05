@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" font-family="system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#374151"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="500" fill="#f9fafb" rx="8"/>
+
+  <!-- Title -->
+  <text x="450" y="35" text-anchor="middle" font-size="18" font-weight="bold" fill="#111827">Cache Stampede: Normal Flow vs Stampede</text>
+
+  <!-- Left: Normal Flow -->
+  <rect x="20" y="55" width="420" height="420" fill="#f0fdf4" rx="6" stroke="#86efac" stroke-width="1"/>
+  <text x="230" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="#166534">Normal Flow (1 cache miss)</text>
+
+  <!-- Normal - Actors -->
+  <rect x="60" y="100" width="80" height="30" fill="#dbeafe" rx="4"/>
+  <text x="100" y="120" text-anchor="middle" font-size="11" fill="#1e40af">Requests</text>
+
+  <rect x="200" y="100" width="60" height="30" fill="#fef3c7" rx="4"/>
+  <text x="230" y="120" text-anchor="middle" font-size="11" fill="#92400e">Cache</text>
+
+  <rect x="330" y="100" width="80" height="30" fill="#e0e7ff" rx="4"/>
+  <text x="370" y="120" text-anchor="middle" font-size="11" fill="#3730a3">Database</text>
+
+  <!-- Normal - Lifelines -->
+  <line x1="100" y1="130" x2="100" y2="440" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4"/>
+  <line x1="230" y1="130" x2="230" y2="440" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4"/>
+  <line x1="370" y1="130" x2="370" y2="440" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4"/>
+
+  <!-- Normal - Step 1: Request hits cache (miss) -->
+  <line x1="100" y1="160" x2="220" y2="160" stroke="#374151" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="160" y="153" text-anchor="middle" font-size="10" fill="#374151">GET key</text>
+  <text x="160" y="175" text-anchor="middle" font-size="9" fill="#dc2626">MISS</text>
+
+  <!-- Normal - Step 2: 1 request to DB -->
+  <line x1="230" y1="200" x2="360" y2="200" stroke="#374151" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="295" y="193" text-anchor="middle" font-size="10" fill="#374151">1 query</text>
+
+  <!-- Normal - Step 3: DB responds -->
+  <line x1="360" y1="240" x2="240" y2="240" stroke="#374151" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="295" y="233" text-anchor="middle" font-size="10" fill="#374151">response</text>
+
+  <!-- Normal - Step 4: Cache set -->
+  <rect x="215" y="255" width="30" height="20" fill="#bbf7d0" rx="2"/>
+  <text x="230" y="269" text-anchor="middle" font-size="9" fill="#166534">SET</text>
+
+  <!-- Normal - Step 5: Subsequent requests hit cache -->
+  <line x1="100" y1="310" x2="220" y2="310" stroke="#374151" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="160" y="303" text-anchor="middle" font-size="10" fill="#374151">GET key</text>
+  <text x="160" y="325" text-anchor="middle" font-size="9" fill="#16a34a">HIT</text>
+
+  <line x1="220" y1="340" x2="110" y2="340" stroke="#374151" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="160" y="355" text-anchor="middle" font-size="10" fill="#374151">cached data</text>
+
+  <!-- Normal - Result -->
+  <rect x="50" y="390" width="370" height="35" fill="#dcfce7" rx="4"/>
+  <text x="235" y="412" text-anchor="middle" font-size="11" fill="#166534">DB load: 1 query. Users happy.</text>
+
+  <!-- Right: Stampede Flow -->
+  <rect x="460" y="55" width="420" height="420" fill="#fef2f2" rx="6" stroke="#fca5a5" stroke-width="1"/>
+  <text x="670" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="#991b1b">Stampede (hot key expires)</text>
+
+  <!-- Stampede - Actors -->
+  <rect x="490" y="100" width="90" height="30" fill="#dbeafe" rx="4"/>
+  <text x="535" y="120" text-anchor="middle" font-size="11" fill="#1e40af">10K Requests</text>
+
+  <rect x="640" y="100" width="60" height="30" fill="#fef3c7" rx="4"/>
+  <text x="670" y="120" text-anchor="middle" font-size="11" fill="#92400e">Cache</text>
+
+  <rect x="770" y="100" width="80" height="30" fill="#e0e7ff" rx="4"/>
+  <text x="810" y="120" text-anchor="middle" font-size="11" fill="#3730a3">Database</text>
+
+  <!-- Stampede - Lifelines -->
+  <line x1="535" y1="130" x2="535" y2="440" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4"/>
+  <line x1="670" y1="130" x2="670" y2="440" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4"/>
+  <line x1="810" y1="130" x2="810" y2="440" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4"/>
+
+  <!-- Stampede - Step 1: All requests hit cache (miss) -->
+  <line x1="535" y1="160" x2="660" y2="160" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+  <line x1="535" y1="170" x2="660" y2="170" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+  <line x1="535" y1="180" x2="660" y2="180" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+  <text x="597" y="153" text-anchor="middle" font-size="10" fill="#dc2626">10K GET key</text>
+  <text x="597" y="198" text-anchor="middle" font-size="9" fill="#dc2626">ALL MISS!</text>
+
+  <!-- Stampede - Step 2: All go to DB -->
+  <line x1="670" y1="220" x2="800" y2="220" stroke="#dc2626" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <line x1="670" y1="230" x2="800" y2="230" stroke="#dc2626" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <line x1="670" y1="240" x2="800" y2="240" stroke="#dc2626" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <text x="735" y="213" text-anchor="middle" font-size="10" fill="#dc2626">10K queries!</text>
+
+  <!-- Stampede - DB Overload -->
+  <rect x="785" y="260" width="50" height="50" fill="#fecaca" rx="4" stroke="#dc2626" stroke-width="2"/>
+  <text x="810" y="282" text-anchor="middle" font-size="18" fill="#dc2626">💥</text>
+  <text x="810" y="300" text-anchor="middle" font-size="9" fill="#991b1b">Overload</text>
+
+  <!-- Stampede - Timeout -->
+  <line x1="800" y1="330" x2="680" y2="330" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="3" marker-end="url(#arrowRed)"/>
+  <text x="735" y="345" text-anchor="middle" font-size="10" fill="#dc2626">timeout / error</text>
+
+  <!-- Stampede - Retry -->
+  <line x1="535" y1="370" x2="660" y2="370" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+  <text x="597" y="363" text-anchor="middle" font-size="10" fill="#dc2626">retry × 3 = 30K!</text>
+
+  <!-- Stampede - Result -->
+  <rect x="490" y="390" width="370" height="35" fill="#fecaca" rx="4"/>
+  <text x="675" y="412" text-anchor="middle" font-size="11" fill="#991b1b">DB crashed. Cascading failure. System down.</text>
+</svg>

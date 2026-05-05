@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" font-family="system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#374151"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#16a34a"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="700" height="400" fill="#f9fafb" rx="8"/>
+
+  <!-- Title -->
+  <text x="350" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#111827">Request Coalescing (Singleflight)</text>
+
+  <!-- Requests column -->
+  <rect x="30" y="55" width="120" height="25" fill="#dbeafe" rx="4"/>
+  <text x="90" y="72" text-anchor="middle" font-size="11" font-weight="600" fill="#1e40af">Requests</text>
+
+  <!-- Individual requests -->
+  <rect x="40" y="95" width="100" height="22" fill="#eff6ff" rx="3" stroke="#93c5fd" stroke-width="1"/>
+  <text x="90" y="110" text-anchor="middle" font-size="10" fill="#1e40af">Request #1</text>
+
+  <rect x="40" y="125" width="100" height="22" fill="#eff6ff" rx="3" stroke="#93c5fd" stroke-width="1"/>
+  <text x="90" y="140" text-anchor="middle" font-size="10" fill="#1e40af">Request #2</text>
+
+  <rect x="40" y="155" width="100" height="22" fill="#eff6ff" rx="3" stroke="#93c5fd" stroke-width="1"/>
+  <text x="90" y="170" text-anchor="middle" font-size="10" fill="#1e40af">Request #3</text>
+
+  <text x="90" y="200" text-anchor="middle" font-size="12" fill="#6b7280">...</text>
+
+  <rect x="40" y="210" width="100" height="22" fill="#eff6ff" rx="3" stroke="#93c5fd" stroke-width="1"/>
+  <text x="90" y="225" text-anchor="middle" font-size="10" fill="#1e40af">Request #N</text>
+
+  <!-- Singleflight box -->
+  <rect x="200" y="85" width="130" height="170" fill="#fefce8" rx="6" stroke="#fbbf24" stroke-width="2"/>
+  <text x="265" y="108" text-anchor="middle" font-size="11" font-weight="600" fill="#92400e">Singleflight</text>
+
+  <!-- Mutex indicator -->
+  <rect x="220" y="120" width="90" height="20" fill="#fef3c7" rx="3"/>
+  <text x="265" y="134" text-anchor="middle" font-size="9" fill="#92400e">🔒 Mutex Lock</text>
+
+  <!-- First request goes through -->
+  <rect x="215" y="150" width="100" height="20" fill="#dcfce7" rx="3" stroke="#86efac" stroke-width="1"/>
+  <text x="265" y="164" text-anchor="middle" font-size="9" fill="#166534">Req #1 → Execute</text>
+
+  <!-- Others wait -->
+  <rect x="215" y="180" width="100" height="50" fill="#f3f4f6" rx="3" stroke="#d1d5db" stroke-width="1"/>
+  <text x="265" y="200" text-anchor="middle" font-size="9" fill="#6b7280">Req #2..#N</text>
+  <text x="265" y="218" text-anchor="middle" font-size="10" font-weight="600" fill="#6b7280">⏳ Wait</text>
+
+  <!-- Arrows: Requests to Singleflight -->
+  <line x1="140" y1="106" x2="195" y2="155" stroke="#374151" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <line x1="140" y1="136" x2="195" y2="190" stroke="#9ca3af" stroke-width="1" stroke-dasharray="3" marker-end="url(#arrow)"/>
+  <line x1="140" y1="166" x2="195" y2="200" stroke="#9ca3af" stroke-width="1" stroke-dasharray="3" marker-end="url(#arrow)"/>
+  <line x1="140" y1="221" x2="195" y2="215" stroke="#9ca3af" stroke-width="1" stroke-dasharray="3" marker-end="url(#arrow)"/>
+
+  <!-- Database -->
+  <rect x="400" y="130" width="100" height="50" fill="#e0e7ff" rx="6" stroke="#818cf8" stroke-width="1.5"/>
+  <text x="450" y="152" text-anchor="middle" font-size="11" font-weight="600" fill="#3730a3">Database</text>
+  <text x="450" y="168" text-anchor="middle" font-size="10" fill="#4f46e5">1 query only</text>
+
+  <!-- Arrow: Singleflight to DB (only 1) -->
+  <line x1="330" y1="155" x2="395" y2="155" stroke="#16a34a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="362" y="148" text-anchor="middle" font-size="9" font-weight="600" fill="#16a34a">1 req</text>
+
+  <!-- Arrow: DB response back -->
+  <line x1="395" y1="170" x2="330" y2="195" stroke="#16a34a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="370" y="193" text-anchor="middle" font-size="9" fill="#16a34a">response</text>
+
+  <!-- Broadcast phase -->
+  <rect x="200" y="270" width="130" height="30" fill="#dcfce7" rx="4" stroke="#86efac" stroke-width="1"/>
+  <text x="265" y="289" text-anchor="middle" font-size="10" font-weight="600" fill="#166534">Broadcast Result</text>
+
+  <!-- Arrow down from singleflight to broadcast -->
+  <line x1="265" y1="255" x2="265" y2="267" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+  <!-- Results back to all requests -->
+  <rect x="40" y="320" width="100" height="22" fill="#dcfce7" rx="3" stroke="#86efac" stroke-width="1"/>
+  <text x="90" y="335" text-anchor="middle" font-size="9" fill="#166534">✓ All N requests</text>
+  <text x="90" y="355" text-anchor="middle" font-size="9" fill="#166534">get same result</text>
+
+  <line x1="200" y1="290" x2="145" y2="325" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+  <!-- Summary box -->
+  <rect x="390" y="250" width="280" height="120" fill="white" rx="6" stroke="#e5e7eb" stroke-width="1"/>
+  <text x="530" y="275" text-anchor="middle" font-size="12" font-weight="bold" fill="#111827">Result</text>
+  <text x="410" y="300" font-size="11" fill="#374151">• N requests arrive simultaneously</text>
+  <text x="410" y="322" font-size="11" fill="#374151">• Only 1 DB query executed</text>
+  <text x="410" y="344" font-size="11" fill="#374151">• All N requests get the result</text>
+  <text x="410" y="366" font-size="11" fill="#16a34a">• DB load reduced by N×</text>
+</svg>

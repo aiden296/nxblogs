@@ -1,0 +1,457 @@
+---
+title: 'Cache Stampede: Khi hàng ngàn request cùng "giẫm đạp" lên Database'
+date: '2026-05-05'
+tags: ['Backend', 'System Design', 'Cache']
+enableComment: true
+---
+
+# Cache Stampede: Khi hàng ngàn request cùng "giẫm đạp" lên Database
+
+Hình dung bạn đang vận hành một sàn thương mại điện tử. 23h59, flash sale bắt đầu. 50,000 users đồng loạt truy cập trang sản phẩm hot nhất. Cache key cho sản phẩm đó vừa expire đúng lúc đó. Kết quả? 50,000 requests **cùng lúc** đổ thẳng xuống Database — DB quá tải, timeout lan truyền, toàn bộ hệ thống sập trong vài giây.
+
+Đây chính là **Cache Stampede** — hay còn gọi là **Thundering Herd Problem** hoặc **Dog-piling Effect**. Một trong những failure mode nguy hiểm nhất khi làm việc với caching.
+
+Trong bài [Cache Pitfalls](/posts/cache-pitfalls), chúng ta đã điểm qua vấn đề này ở mức tổng quan. Bài viết này sẽ đi sâu vào **5 giải pháp** với production code, diagrams, và decision framework để bạn có thể áp dụng ngay.
+
+---
+
+## 1. Giải phẫu Cache Stampede
+
+### 1.1. Điều kiện cần
+
+Cache Stampede xảy ra khi **3 yếu tố** kết hợp cùng lúc:
+
+1. **High concurrency**: Nhiều client truy cập cùng một resource
+2. **Hot key**: Một key cụ thể có lượng read cực lớn
+3. **Single point of expiry**: Key hết hạn tại một thời điểm xác định
+
+Chỉ cần một trong ba yếu tố bị loại bỏ, stampede sẽ không xảy ra. Đây là insight quan trọng — mỗi solution dưới đây đều nhắm vào việc phá vỡ ít nhất một trong ba điều kiện.
+
+### 1.2. Bốn nguyên nhân gốc rễ
+
+| Nguyên nhân             | Mô tả                                | Ví dụ                             |
+| ----------------------- | ------------------------------------ | --------------------------------- |
+| **Cold Start**          | Cache trống hoàn toàn                | Deploy mới, restart service       |
+| **Synchronized Expiry** | Nhiều keys cùng TTL expire đồng thời | Batch import data với cùng TTL    |
+| **Cache Invalidation**  | Data bị invalidate chủ động          | Admin update product, clear cache |
+| **Cache Eviction**      | Cache đầy, evict hot keys            | Memory pressure, LRU eviction     |
+
+### 1.3. Hiệu ứng domino
+
+Stampede không chỉ làm DB chậm — nó tạo ra **cascading failure**:
+
+```
+Cache Miss (hot key)
+  → 10,000 concurrent DB queries
+    → DB connection pool exhausted
+      → Query timeout
+        → Client retry (x3)
+          → 30,000 queries (retry storm)
+            → DB completely unresponsive
+              → Tất cả services phụ thuộc DB đều fail
+```
+
+![Cache Stampede Anatomy](/cache-stampede-anatomy.svg)
+
+---
+
+## 2. Request Coalescing (Singleflight)
+
+Đây là solution **mạnh nhất và phổ biến nhất** — đặc biệt hiệu quả cho single-instance hoặc CDN edge.
+
+### Cơ chế hoạt động
+
+Khi nhiều requests cùng hỏi một key đang bị miss, thay vì tất cả đều gọi DB, hệ thống **chỉ cho phép DUY NHẤT một request** đi xuống. Các requests còn lại **đợi** cho đến khi request đầu tiên hoàn thành, rồi nhận chung kết quả.
+
+![Request Coalescing Flow](/cache-stampede-coalescing.svg)
+
+### Implementation với Node.js + TypeScript
+
+Node không có sẵn thư viện như Go's `singleflight`, nhưng nhờ tính chất single-threaded của event loop, chúng ta có thể implement pattern này chỉ với một `Map<string, Promise>`. Ý tưởng: nếu đã có promise đang in-flight cho key đó, **trả về cùng một promise** cho mọi caller — tất cả requests sẽ `await` cùng một result.
+
+```ts
+class SingleFlight<T> {
+  private inflight = new Map<string, Promise<T>>()
+
+  async do(key: string, fn: () => Promise<T>): Promise<T> {
+    const existing = this.inflight.get(key)
+
+    if (existing) {
+      return existing
+    }
+
+    const promise = fn().finally(() => {
+      this.inflight.delete(key)
+    })
+
+    this.inflight.set(key, promise)
+
+    return promise
+  }
+}
+
+const group = new SingleFlight<Product>()
+
+async function getProduct(productID: string): Promise<Product> {
+  const cached = await cache.get(productID)
+  if (cached) {
+    return cached
+  }
+
+  return group.do(productID, async () => {
+    const product = await db.queryProduct(productID)
+
+    await cache.set(productID, product, 300)
+
+    return product
+  })
+}
+```
+
+**Tại sao điều này hoạt động trong Node?**
+
+Vì Node.js single-threaded, việc `inflight.get()` → `inflight.set()` là atomic — không có race condition. Khi request #1 set promise vào map, các requests #2..#N (đến cùng tick hoặc tick sau) sẽ thấy promise đó và `await` cùng một kết quả.
+
+> **Lưu ý production**: Nếu chạy nhiều Node instances (cluster mode hoặc Kubernetes pods), singleflight chỉ coalesce **trong cùng một process**. Mỗi process vẫn sẽ gửi 1 query xuống DB. Để giải quyết cross-process stampede, kết hợp với **Distributed Locking** ở section dưới.
+
+**Thư viện sẵn có**: Nếu không muốn tự implement, có thể dùng [`p-memoize`](https://www.npmjs.com/package/p-memoize) hoặc [`async-cache-dedupe`](https://www.npmjs.com/package/async-cache-dedupe) — package thứ hai được Fastify team maintain, hỗ trợ cả TTL và Redis backend.
+
+### Ưu và nhược điểm
+
+| Ưu điểm                                          | Nhược điểm                                 |
+| ------------------------------------------------ | ------------------------------------------ |
+| Đơn giản, ít code                                | Chỉ hoạt động trong **một process**        |
+| Zero latency overhead cho request đầu tiên       | Không giải quyết cross-instance stampede   |
+| Battle-tested (Cloudflare, Google dùng rộng rãi) | Request đầu tiên vẫn phải chờ DB           |
+| Không cần infrastructure thêm                    | Nếu DB query fail, tất cả waiters đều fail |
+
+### Khi nào dùng
+
+- Single-instance services
+- CDN/reverse proxy layer (Nginx `proxy_cache_lock`)
+- Kết hợp với Distributed Locking cho multi-instance
+
+---
+
+## 3. Distributed Locking
+
+Khi hệ thống có **nhiều instances** (horizontal scaling), singleflight trong một process không đủ. Cần **distributed lock** để đảm bảo chỉ một instance duy nhất regenerate cache.
+
+### Cơ chế hoạt động
+
+```
+Request đến Instance A → Cache MISS
+  → Try SETNX "lock:product:123" (Redis)
+    → Thành công: Query DB → Set cache → Release lock
+    → Thất bại: Sleep 50ms → Retry đọc cache
+```
+
+### Implementation
+
+```ts
+import { randomUUID } from 'crypto'
+import Redis from 'ioredis'
+
+const redis = new Redis()
+
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function getProductDistributed(productID: string): Promise<Product> {
+  const cached = await cache.get(productID)
+
+  if (cached) {
+    return cached
+  }
+
+  const lockKey = `lock:product:${productID}`
+  const lockValue = randomUUID()
+  const lockTTL = 5
+
+  const acquired = await redis.set(lockKey, lockValue, 'EX', lockTTL, 'NX')
+
+  if (acquired === 'OK') {
+    try {
+      const product = await db.queryProduct(productID)
+
+      await cache.set(productID, product, 300)
+
+      return product
+    } finally {
+      const releaseScript = `
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+          return redis.call("del", KEYS[1])
+        else
+          return 0
+        end
+      `
+
+      await redis.eval(releaseScript, 1, lockKey, lockValue)
+    }
+  }
+
+  for (let i = 0; i < 20; i++) {
+    await sleep(50 + Math.random() * 30)
+
+    const cached = await cache.get(productID)
+
+    if (cached) {
+      return cached
+    }
+  }
+
+  return db.queryProduct(productID)
+}
+```
+
+### Gotchas quan trọng
+
+**1. Lock TTL phải ngắn**: Nếu instance giữ lock crash, lock phải tự expire. TTL nên = 2-3x thời gian DB query trung bình.
+
+**2. Owner verification**: Trong production, nên dùng unique value (UUID) khi SETNX và chỉ DEL nếu value match — tránh trường hợp instance A release lock của instance B.
+
+**3. Retry thundering**: Nếu 1000 requests đều retry sau 50ms, chúng sẽ đồng thời check cache. Thêm **jitter** vào sleep time:
+
+```ts
+await sleep(50 + Math.random() * 30) // 50-80ms với jitter
+```
+
+**4. Thư viện sẵn có**: [`redlock`](https://www.npmjs.com/package/redlock) implement Redlock algorithm chuẩn của Redis, hỗ trợ multi-node Redis cluster và auto-extend lock cho long-running operations.
+
+### Ưu và nhược điểm
+
+| Ưu điểm                         | Nhược điểm                                      |
+| ------------------------------- | ----------------------------------------------- |
+| Hoạt động cross-instance        | Thêm dependency vào Redis                       |
+| Đảm bảo chỉ 1 DB query globally | Latency tăng cho waiting requests               |
+| Familiar pattern (SETNX)        | Lock management phức tạp (TTL, owner, deadlock) |
+
+### Khi nào dùng
+
+- Multi-instance deployment (Kubernetes, ECS)
+- Cache-aside pattern với Redis
+- Hot keys có DB query tốn kém (> 100ms)
+
+---
+
+## 4. Probabilistic Early Expiration — XFetch
+
+Thay vì **phản ứng** khi stampede xảy ra (lock, coalesce), XFetch **chủ động ngăn chặn** stampede bằng cách refresh cache **trước khi** nó expire.
+
+### Intuition
+
+Hình dung cache TTL như một đồng hồ đếm ngược. Thay vì đợi đồng hồ về 0 (khi tất cả requests cùng thấy cache miss), mỗi request "tung xúc xắc" — càng gần 0, xác suất trúng càng cao. Request "trúng" sẽ chủ động refresh cache, đảm bảo cache **không bao giờ thực sự expire**.
+
+### Công thức XFetch
+
+```
+should_refresh = (current_time + β × gap × (−ln(random()))) ≥ expiry_time
+```
+
+Trong đó:
+
+- `current_time`: Thời điểm hiện tại
+- `expiry_time`: Thời điểm cache hết hạn
+- `gap`: Thời gian trung bình để recompute value (DB query time)
+- `β` (beta): Hệ số điều chỉnh, mặc định = 1. Tăng β → refresh sớm hơn
+- `random()`: Số ngẫu nhiên (0, 1]
+
+![XFetch Probability Curve](/cache-stampede-xfetch.svg)
+
+### Implementation
+
+```ts
+interface CacheEntry<T> {
+  value: T
+  gap: number
+  expiry: number
+}
+
+async function getWithXFetch<T>(key: string, fetchFn: () => Promise<T>, ttlMs = 3_600_000, beta = 1.0): Promise<T> {
+  const cached = await cache.get<CacheEntry<T>>(key)
+
+  if (!cached) {
+    const start = Date.now()
+    const value = await fetchFn()
+    const gap = Date.now() - start
+
+    await cache.set(key, {
+      value,
+      gap,
+      expiry: Date.now() + ttlMs,
+    })
+
+    return value
+  }
+
+  const now = Date.now()
+  const { expiry, gap } = cached
+
+  const randVal = Math.random() || Number.EPSILON
+  const offset = beta * gap * -Math.log(randVal)
+
+  if (now + offset >= expiry) {
+    const start = Date.now()
+    const value = await fetchFn()
+    const newGap = Date.now() - start
+
+    await cache.set(key, {
+      value,
+      gap: newGap,
+      expiry: Date.now() + ttlMs,
+    })
+
+    return value
+  }
+
+  return cached.value
+}
+```
+
+### Tuning tham số β
+
+- `β = 0.5`: Refresh muộn, tiết kiệm DB calls. Rủi ro stampede cao hơn.
+- `β = 1.0`: Cân bằng (recommended default).
+- `β = 2.0`: Refresh sớm, gần như không bao giờ expire. Tốn nhiều DB calls hơn.
+
+Với hot key (>1000 req/s), `β = 1.0` gần như đảm bảo **luôn có ít nhất một request** refresh cache trước khi TTL hết — nhờ tính chất thống kê của `-ln(random())`.
+
+### Ưu và nhược điểm
+
+| Ưu điểm                         | Nhược điểm                                        |
+| ------------------------------- | ------------------------------------------------- |
+| Không cần lock hay coordination | Không giải quyết Cold Start (cache miss đầu tiên) |
+| Hoạt động tốt ở mọi scale       | Cần store metadata (gap, expiry) cùng value       |
+| Mathematically proven optimal   | Ít hiệu quả với low-traffic keys                  |
+| Zero latency overhead           | Cần tuning β cho workload cụ thể                  |
+
+### Khi nào dùng
+
+- Hot keys với traffic ổn định (homepage, trending content)
+- Khi không muốn thêm infrastructure (no Redis lock needed)
+- Kết hợp với singleflight cho best-of-both-worlds
+
+---
+
+## 5. Stale-While-Revalidate
+
+Ý tưởng: **trả dữ liệu cũ ngay lập tức**, đồng thời trigger background refresh. User không bao giờ phải chờ DB query.
+
+### Cơ chế dual-TTL
+
+```ts
+interface SwrEntry<T> {
+  value: T
+  softExpiry: number
+  hardExpiry: number
+}
+
+async function getStaleWhileRevalidate<T>(key: string, fetchFn: () => Promise<T>): Promise<T> {
+  const cached = await cache.get<SwrEntry<T>>(key)
+  const now = Date.now()
+
+  if (!cached || now >= cached.hardExpiry) {
+    return fetchAndCache(key, fetchFn)
+  }
+
+  if (now >= cached.softExpiry) {
+    fetchAndCache(key, fetchFn).catch((err) => {
+      console.error(`Background refresh failed for ${key}:`, err)
+    })
+
+    return cached.value
+  }
+
+  return cached.value
+}
+```
+
+Pattern này được áp dụng rộng rãi:
+
+- HTTP header `Cache-Control: stale-while-revalidate=60`
+- Nginx: `proxy_cache_use_stale updating`
+- Java Caffeine: `refreshAfterWrite` + `expireAfterWrite`
+
+### Khi nào dùng
+
+- Data không cần real-time (product catalog, user profile)
+- UX-first: user không chấp nhận latency spike
+- Kết hợp với XFetch: stale-while-revalidate cho soft guarantee, XFetch cho statistical guarantee
+
+---
+
+## 6. Cache Warming + TTL Jitter
+
+Hai kỹ thuật **phòng ngừa** đơn giản nhưng hiệu quả cao.
+
+### Cache Warming
+
+Trước khi service nhận traffic (sau deploy, trước flash sale), chạy script **pre-populate** hot keys:
+
+```ts
+async function warmCache() {
+  const hotProducts = await db.query<{ id: string }>('SELECT id FROM products ORDER BY views DESC LIMIT 1000')
+
+  await Promise.all(
+    hotProducts.map(async ({ id }) => {
+      const data = await db.getProduct(id)
+
+      await cache.set(`product:${id}`, data, 3600)
+    })
+  )
+}
+```
+
+### TTL Jitter
+
+Tránh synchronized expiry bằng cách thêm random vào TTL:
+
+```ts
+const baseTtl = 3600 // 1 hour
+const jitter = Math.floor(Math.random() * 600) - 300 // ±5 phút
+await cache.set(key, value, baseTtl + jitter)
+```
+
+Chi tiết về hai kỹ thuật này đã được cover trong [Cache Avalanche — bài Cache Pitfalls](/posts/cache-pitfalls).
+
+---
+
+## 7. Tổng hợp: Chọn giải pháp nào?
+
+### Bảng so sánh
+
+| Giải pháp                  | Complexity | Latency Impact      | Data Freshness           | Distributed? | Best For                     |
+| -------------------------- | ---------- | ------------------- | ------------------------ | ------------ | ---------------------------- |
+| **Singleflight**           | Thấp       | Waiters chờ         | Real-time                | Không        | Single instance, CDN         |
+| **Distributed Lock**       | Trung bình | Waiters chờ + retry | Real-time                | Có           | Multi-instance, cache-aside  |
+| **XFetch**                 | Trung bình | Không               | Near real-time           | Có           | Hot keys, steady traffic     |
+| **Stale-While-Revalidate** | Thấp       | Không               | Eventually fresh         | Có           | Non-critical data, UX-first  |
+| **Warming + Jitter**       | Thấp       | Không               | Depends on refresh cycle | N/A          | Cold start, scheduled events |
+
+### Chiến lược phòng thủ nhiều lớp (Defense-in-Depth)
+
+Không có silver bullet. Production systems nên kết hợp nhiều layers:
+
+1. **Layer 1 — Prevention**: TTL Jitter + Cache Warming (ngăn stampede xảy ra)
+2. **Layer 2 — Proactive**: XFetch (refresh cache trước khi expire)
+3. **Layer 3 — Reactive**: Singleflight + Distributed Lock (nếu stampede vẫn xảy ra)
+4. **Layer 4 — Protection**: Circuit Breaker + Rate Limiting ở DB layer (bảo vệ DB khi mọi thứ fail)
+
+### Edge cases cần lưu ý
+
+- **Negative caching**: Cache cả kết quả "không tìm thấy" (empty result) — tránh stampede khi users liên tục query key không tồn tại
+- **Lock holder crash**: Luôn đặt TTL trên distributed lock. Nếu lock holder chết, lock tự release sau vài giây
+- **Stale fallback**: Khi DB hoàn toàn không phản hồi, serve last-known-good data thay vì trả error 500 cho tất cả users
+
+---
+
+## Kết luận
+
+**3 điều cần nhớ:**
+
+1. Cache Stampede xảy ra khi **hot key + high concurrency + expiry** kết hợp — chỉ cần phá vỡ một điều kiện là đủ.
+2. **Singleflight** là first-line defense đơn giản nhất. **XFetch** là elegant nhất. **Distributed Lock** là robust nhất cho multi-instance.
+3. Production systems cần **defense-in-depth**: prevention (jitter) → proactive (XFetch) → reactive (locking) → protection (circuit breaker).
+
+Để giám sát và phát hiện stampede trong production (cache miss ratio spike, DB query surge), xem bài tiếp theo: [Cache Monitoring & Scaling](/posts/cache-monitoring-and-scaling).

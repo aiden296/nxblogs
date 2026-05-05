@@ -32,7 +32,7 @@ ${posts}
 
   return new Response(xml, {
     headers: {
-      'Content-Type': 'application/rss+xml',
+      'Content-Type': 'application/rss+xml; charset=utf-8',
     },
   })
 }

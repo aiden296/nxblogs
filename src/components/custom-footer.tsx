@@ -8,10 +8,8 @@ const CustomFooter = async () => {
   return (
     <div className="pt-32">
       <div className="space-y-6">
-        <Navbar pageMap={await getPageMap()} />
-
         <div className="flex justify-between items-center gap-4">
-          <div>© {new Date().getFullYear()} Aiden Tran</div>
+          <Navbar pageMap={await getPageMap()} />
           <div className="flex gap-2 items-center">
             <Search placeholder="Search posts..." />
             <ThemeSwitch />
