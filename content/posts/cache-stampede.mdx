@@ -240,9 +240,26 @@ await sleep(50 + Math.random() * 30) // 50-80ms với jitter
 
 Thay vì **phản ứng** khi stampede xảy ra (lock, coalesce), XFetch **chủ động ngăn chặn** stampede bằng cách refresh cache **trước khi** nó expire.
 
+Idea của solution này là mỗi request truy cập cache có 1 xác xuất được extend expires time của dữ liệu, xác xuất này đủ nhỏ (cần nhỏ để đánh giá dược 1 key có phải là **hot key** hay không?) và tăng dần theo thời gian, 
+
 ### Intuition
 
 Hình dung cache TTL như một đồng hồ đếm ngược. Thay vì đợi đồng hồ về 0 (khi tất cả requests cùng thấy cache miss), mỗi request "tung xúc xắc" — càng gần 0, xác suất trúng càng cao. Request "trúng" sẽ chủ động refresh cache, đảm bảo cache **không bao giờ thực sự expire**.
+
+Logic của XFetch nối với Temporal Locality như sau:
+
+1. **Một key được access thường xuyên** → mỗi request đều "tung xúc xắc" XFetch
+2. **Càng gần expiry, càng nhiều "lượt tung"** → xác suất một request "trúng" và refresh sớm tăng dần
+3. **Hot key = nhiều lượt tung** → gần như chắc chắn có request refresh **trước khi** TTL hết
+
+Điểm tinh tế của thuật toán nằm ở chỗ: nó **không cần biết key nào nóng**. XFetch chạy đúng một công thức xác suất giống nhau cho mọi request, mọi key — không có bộ đếm access frequency, không có hit-rate tracker.
+
+Hiệu ứng "hot key được protect" **emerges tự nhiên** từ traffic pattern:
+
+- **Key 10,000 req/s**: trong 100ms gần expiry đã có ~1,000 lượt tung xúc xắc → xác suất ÍT NHẤT một request "trúng" và refresh sớm gần như = 100%
+- **Key 1 req/giờ**: trong toàn bộ TTL chỉ có 1-2 lượt tung → khả năng cao key sẽ expire bình thường, request kế tiếp gặp cache miss và fetch lại
+
+Đây không phải là bug — mà là feature **đúng với điều ta cần**: cold key không bị stampede (vì có quá ít concurrent requests để gây ra stampede), nên cũng không cần protection. XFetch tự động dồn "ngân sách refresh sớm" vào đúng chỗ cần thiết, mà không cần bất kỳ logic phân loại tường minh nào.
 
 ### Công thức XFetch
 
