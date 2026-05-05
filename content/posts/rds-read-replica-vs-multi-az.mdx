@@ -194,6 +194,8 @@ Vì replication là async, nếu user vừa POST một comment xong rồi GET ng
 
 > Khi primary đã tối ưu hết mức (index, query, instance size) mà vẫn nóng — đặc biệt với workload **read-heavy** (báo cáo, dashboard, search). Hoặc khi bạn cần phục vụ user cross-region.
 
+Ngoài ra, khi primary bị sập, RDS cho phép promote 1 read replica lên làm primary
+
 ---
 
 ## 4. Bảng so sánh nhanh
