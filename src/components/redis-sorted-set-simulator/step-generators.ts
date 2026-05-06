@@ -1,6 +1,6 @@
-import { MAX_LEVEL } from './constants'
-import type { SortedNode, Step } from './types'
-import { formatScore, getSortedNodes, memberHeight } from './utils'
+import { MAX_LEVEL } from '@/components/redis-sorted-set-simulator/constants'
+import type { SortedNode, Step } from '@/components/redis-sorted-set-simulator/types'
+import { formatScore, getSortedNodes, memberHeight } from '@/components/redis-sorted-set-simulator/utils'
 
 export function traverseToTarget(sorted: SortedNode[], target: number, targetMember?: string): Step[] {
   const steps: Step[] = []

@@ -16,7 +16,7 @@ const blogComponents = getBlogMDXComponents({
 })
 
 const defaultComponents = getNextraComponents({
-  wrapper({ children, toc }) {
+  wrapper({ children }) {
     return <>{children}</>
   },
 })

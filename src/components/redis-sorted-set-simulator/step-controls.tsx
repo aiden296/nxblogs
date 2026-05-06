@@ -1,4 +1,4 @@
-import type { Step } from './types'
+import type { Step } from '@/components/redis-sorted-set-simulator/types'
 
 export function StepControls({
   step,

@@ -1,7 +1,7 @@
 import type { PageMapItem } from 'nextra'
 import { normalizePages } from 'nextra/normalize-pages'
 import type { FC, ReactNode } from 'react'
-import { NavbarLink } from './navbar-link'
+import { NavbarLink } from '@/components/navbar-link'
 import { cn } from '@/lib/utils'
 
 type NavbarProps = {

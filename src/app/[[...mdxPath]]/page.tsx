@@ -1,5 +1,5 @@
 import { generateStaticParamsFor, importPage } from 'nextra/pages'
-import { useMDXComponents as getMDXComponents } from '../../../mdx-components'
+import { useMDXComponents as getMDXComponents } from '@/mdx-components'
 import type { Metadata } from 'next'
 import { PostDetail } from '@/components/post-detail'
 

@@ -1,4 +1,4 @@
-import type { OpType } from './types'
+import type { OpType } from '@/components/redis-sorted-set-simulator/types'
 
 export const INITIAL_DATA: [string, number][] = [
   ['alice', 1500],

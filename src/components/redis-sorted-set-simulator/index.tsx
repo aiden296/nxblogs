@@ -1,19 +1,19 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { INITIAL_DATA, STEP_DELAY_MS } from './constants'
-import { DualStructurePanel } from './dual-structure-panel'
-import { OperationForm } from './operation-form'
+import { INITIAL_DATA, STEP_DELAY_MS } from '@/components/redis-sorted-set-simulator/constants'
+import { DualStructurePanel } from '@/components/redis-sorted-set-simulator/dual-structure-panel'
+import { OperationForm } from '@/components/redis-sorted-set-simulator/operation-form'
 import {
   genZADDSteps,
   genZRANGESteps,
   genZRANKSteps,
   genZREMSteps,
   genZSCORESteps,
-} from './step-generators'
-import { StepControls } from './step-controls'
-import type { OpType, Step } from './types'
-import { getSortedNodes } from './utils'
+} from '@/components/redis-sorted-set-simulator/step-generators'
+import { StepControls } from '@/components/redis-sorted-set-simulator/step-controls'
+import type { OpType, Step } from '@/components/redis-sorted-set-simulator/types'
+import { getSortedNodes } from '@/components/redis-sorted-set-simulator/utils'
 
 export function RedisSortedSetSimulator() {
   const [members, setMembers] = useState(() => new Map(INITIAL_DATA))

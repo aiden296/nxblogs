@@ -1,7 +1,7 @@
 import { cn } from '@/lib/utils'
-import { HASH_BUCKETS } from './constants'
-import type { Step } from './types'
-import { bucketOf, formatScore } from './utils'
+import { HASH_BUCKETS } from '@/components/redis-sorted-set-simulator/constants'
+import type { Step } from '@/components/redis-sorted-set-simulator/types'
+import { bucketOf, formatScore } from '@/components/redis-sorted-set-simulator/utils'
 
 export function HashTablePanel({ members, step }: { members: Map<string, number>; step: Step | null }) {
   const buckets: { member: string; score: number }[][] = Array.from({ length: HASH_BUCKETS }, () => [])

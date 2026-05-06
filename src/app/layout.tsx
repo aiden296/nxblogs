@@ -3,6 +3,7 @@ import 'nextra-theme-blog/style.css'
 import '@/styles/globals.css'
 import CustomFooter from '@/components/custom-footer'
 import CustomHeader from '@/components/custom-header'
+import { BackToTop } from '@/components/back-to-top'
 import { Metadata } from 'next'
 import { Layout } from 'nextra-theme-blog'
 import { Inter } from 'next/font/google'
@@ -35,6 +36,7 @@ export default async function RootLayout({ children }) {
 
           <CustomFooter />
         </Layout>
+        <BackToTop />
       </body>
     </html>
   )

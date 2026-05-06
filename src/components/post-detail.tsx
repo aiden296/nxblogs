@@ -6,7 +6,7 @@ import GiscusComments from '@/components/giscus-comments'
 import { CustomMetadata } from '@/app/[[...mdxPath]]/page'
 import { Posts } from '@/components/posts'
 import type { Heading } from 'nextra'
-import { TOC } from './toc'
+import { TOC } from '@/components/toc'
 
 type Props = {
   metadata: CustomMetadata

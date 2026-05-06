@@ -1,6 +1,6 @@
 import { cn } from '@/lib/utils'
-import { OPERATIONS, inputClass, runButtonClass } from './constants'
-import type { OpType, SortedNode } from './types'
+import { OPERATIONS, inputClass, runButtonClass } from '@/components/redis-sorted-set-simulator/constants'
+import type { OpType, SortedNode } from '@/components/redis-sorted-set-simulator/types'
 
 export type OperationFormProps = {
   activeOp: OpType

@@ -1,7 +1,7 @@
 import { cn } from '@/lib/utils'
-import { MAX_LEVEL } from './constants'
-import type { DisplayNode, SortedNode, Step } from './types'
-import { formatScore } from './utils'
+import { MAX_LEVEL } from '@/components/redis-sorted-set-simulator/constants'
+import type { DisplayNode, SortedNode, Step } from '@/components/redis-sorted-set-simulator/types'
+import { formatScore } from '@/components/redis-sorted-set-simulator/utils'
 
 const LEVEL_ROW_H = 'h-8'
 

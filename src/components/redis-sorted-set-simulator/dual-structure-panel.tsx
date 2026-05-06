@@ -1,6 +1,6 @@
-import { HashTablePanel } from './hash-table-panel'
-import { SkipListPanel } from './skip-list-panel'
-import type { SortedNode, Step } from './types'
+import { HashTablePanel } from '@/components/redis-sorted-set-simulator/hash-table-panel'
+import { SkipListPanel } from '@/components/redis-sorted-set-simulator/skip-list-panel'
+import type { SortedNode, Step } from '@/components/redis-sorted-set-simulator/types'
 
 export function DualStructurePanel({
   nodes,

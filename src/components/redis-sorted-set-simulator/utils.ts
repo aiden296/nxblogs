@@ -1,5 +1,5 @@
-import { MAX_LEVEL } from './constants'
-import type { SortedNode } from './types'
+import { MAX_LEVEL } from '@/components/redis-sorted-set-simulator/constants'
+import type { SortedNode } from '@/components/redis-sorted-set-simulator/types'
 
 export function memberHeight(member: string): number {
   let h = 5381

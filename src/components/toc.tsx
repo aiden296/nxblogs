@@ -3,7 +3,7 @@
 import type { Heading } from 'nextra'
 import { useEffect, useRef, useState } from 'react'
 import { useLocalStorage } from 'react-use'
-import { IconLayoutSidebarLeftCollapse, IconLayoutSidebarLeftExpand } from '@tabler/icons-react'
+import { AlignRightIcon } from '@/components/animated-icons/align-right-icon'
 
 export function TOC({ toc }: { toc: Heading[] }) {
   const [activeId, setActiveId] = useState<string>('')
@@ -85,15 +85,9 @@ export function TOC({ toc }: { toc: Heading[] }) {
       <button
         type="button"
         onClick={() => setCollapsed(!collapsed)}
-        aria-label={collapsed ? 'Expand table of contents' : 'Collapse table of contents'}
-        aria-expanded={!collapsed}
         className="shrink-0 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
       >
-        {collapsed ? (
-          <IconLayoutSidebarLeftExpand className="w-5 h-5" />
-        ) : (
-          <IconLayoutSidebarLeftCollapse className="w-5 h-5" />
-        )}
+        <AlignRightIcon size={24} />
       </button>
     </div>
   )
