@@ -379,6 +379,14 @@ const trending = await redis.zrevrange('trending:today', 0, 19, 'WITHSCORES')
 
 ---
 
+## 8. Playground
+
+Visualize cách Sorted Set hoạt động bên trong với **hash table + skip list** kết hợp. Chọn một operation, điền tham số, nhấn **Run** rồi xem từng bước thực thi: cách hash table được tra cứu, cách skip list traverse từ level cao xuống thấp, và cách hai cấu trúc được cập nhật song song.
+
+<RedisSortedSetSimulator />
+
+---
+
 ## Kết
 
 Sorted Set không có gì "phép thuật" — sức mạnh của nó đến từ một insight đơn giản: **dùng hai cấu trúc dữ liệu bù trừ điểm yếu của nhau**.

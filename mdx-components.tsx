@@ -3,6 +3,7 @@ import {useMDXComponents as getNextraComponents} from 'nextra/mdx-components'
 import {Posts} from "@/components/posts";
 import {Tags} from "@/components/tags";
 import {Avatar} from "@/components/avatar";
+import {RedisSortedSetSimulator} from "@/components/redis-sorted-set-simulator";
 
 const blogComponents = getBlogMDXComponents({
     h1: ({children}) => (
@@ -38,5 +39,6 @@ export function useMDXComponents() {
         Posts: Posts,
         Tags: Tags,
         Avatar: Avatar,
+        RedisSortedSetSimulator: RedisSortedSetSimulator,
     }
 }
