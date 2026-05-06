@@ -14,6 +14,7 @@ export function TOC({ toc }: { toc: Heading[] }) {
   useEffect(() => {
     setMounted(true)
   }, [])
+
   const observerRef = useRef<IntersectionObserver | null>(null)
 
   useEffect(() => {
@@ -45,7 +46,7 @@ export function TOC({ toc }: { toc: Heading[] }) {
   return (
     <div className="sticky top-20 flex items-start gap-2">
       <div
-        className="grid transition-[grid-template-columns] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"
+        className="grid transition-[grid-template-columns] duration-300 ease-in-out"
         style={{ gridTemplateColumns: collapsed ? '0fr' : '18rem' }}
       >
         <div className="overflow-hidden">
