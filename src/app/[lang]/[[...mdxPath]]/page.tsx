@@ -1,6 +1,7 @@
 import { generateStaticParamsFor, importPage } from 'nextra/pages'
 import { useMDXComponents as getMDXComponents } from '@/mdx-components'
 import type { Metadata } from 'next'
+import type { ReadingTime } from 'nextra'
 import { PostDetail } from '@/components/post-detail'
 
 type PageParams = {
@@ -16,6 +17,7 @@ export type CustomMetadata = Metadata & {
   date?: string
   enableComment?: boolean
   tags?: string[]
+  readingTime?: ReadingTime
 }
 
 export const generateStaticParams = generateStaticParamsFor('mdxPath', 'lang')

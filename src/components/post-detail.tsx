@@ -16,7 +16,7 @@ type Props = {
 }
 
 export function PostDetail({ metadata, toc, lang, children }: Props) {
-  const backLabel = lang === 'vi' ? 'Quay lại bài viết' : 'Back to Posts'
+  const backLabel = lang === 'vi' ? 'Quay lại bài viết' : 'Back to posts'
 
   return (
     <>
@@ -29,6 +29,13 @@ export function PostDetail({ metadata, toc, lang, children }: Props) {
         <IconPoint className="w-3" />
 
         <div>{formatDate(metadata.date, lang)}</div>
+
+        {metadata.readingTime && (
+          <>
+            <IconPoint className="w-3" />
+            <div>{metadata.readingTime.text}</div>
+          </>
+        )}
       </div>
 
       <div className="relative">
