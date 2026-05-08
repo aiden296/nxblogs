@@ -33,12 +33,12 @@ gh repo clone phucbm/nextra-blog-starter
 
 ### Install
 ```bash
-pnpm i
+yarn install
 ```
 
 ### Run the development server
 ```bash
-pnpm dev
+yarn dev
 ```
 
 ## 📝 Usage
