@@ -1,5 +1,5 @@
 import { Link } from 'next-view-transitions'
-import { IconArrowBack, IconPoint } from '@tabler/icons-react'
+import { IconPoint } from '@tabler/icons-react'
 import { formatDate } from '@/lib/format-date'
 import GiscusComments from '@/components/giscus-comments'
 import { CustomMetadata } from '@/app/[lang]/[[...mdxPath]]/page'
@@ -7,6 +7,7 @@ import { Posts } from '@/components/posts'
 import type { Heading } from 'nextra'
 import { TOC } from '@/components/toc'
 import { ReactNode } from 'react'
+import { CornerDownLeftIcon } from './animated-icons/corner-down-left'
 
 type Props = {
   metadata: CustomMetadata
@@ -22,7 +23,8 @@ export function PostDetail({ metadata, toc, lang, children }: Props) {
     <>
       <div className="flex items-center gap-4 text-sm mb-6">
         <Link href="/posts" className="hover:underline no-underline flex items-center gap-1">
-          <IconArrowBack className="w-4" />
+          <CornerDownLeftIcon size={20} />
+
           {backLabel}
         </Link>
 
