@@ -32,6 +32,8 @@ Key constraints:
 - Each transition must respect the **minimum storage duration** of the target class (e.g., you can't transition to Standard-IA before 30 days)
 - Transitions happen within **24 hours** of the specified day — not instantly at midnight
 
+![S3 Storage Class Transition Rules](/s3-storage-class-transitions.svg)
+
 > If you need objects to move **both directions** automatically (down when idle, back up when accessed), use **Intelligent-Tiering** instead of lifecycle rules. Lifecycle rules are best when your access pattern is predictable and decays over time.
 
 ---

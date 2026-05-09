@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 600" font-family="system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="cost-arrow" viewBox="0 0 10 10" refX="5" refY="10" markerWidth="8" markerHeight="8" orient="auto">
+      <polygon points="0 0, 10 0, 5 10" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <text x="390" y="30" text-anchor="middle" font-size="18" font-weight="700" fill="#1e293b">S3 Storage Class Transition Rules</text>
+  <text x="390" y="50" text-anchor="middle" font-size="12" fill="#94a3b8">Objects can only transition downward — never back up</text>
+
+  <!-- Cost indicator -->
+  <text x="18" y="200" text-anchor="middle" font-size="11" font-weight="600" fill="#94a3b8" transform="rotate(-90 18 200)">HIGHER COST</text>
+  <line x1="18" y1="240" x2="18" y2="520" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#cost-arrow)"/>
+  <text x="18" y="550" text-anchor="middle" font-size="11" font-weight="600" fill="#94a3b8" transform="rotate(-90 18 550)">LOWER COST</text>
+
+  <!-- Row y-centers: 100, 168, 236, 304, 372, 440, 508 (spacing=68) -->
+  <!-- Cards: y = center-24, height=48, x=45, width=310 -->
+
+  <!-- 1. S3 Standard -->
+  <rect x="45" y="76" width="310" height="48" rx="8" fill="white" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="45" y="76" width="5" height="48" rx="2" fill="#3b82f6"/>
+  <text x="68" y="104" font-size="14" font-weight="600" fill="#1e40af">S3 Standard</text>
+  <text x="310" y="104" text-anchor="end" font-size="11" fill="#64748b">$0.023/GB</text>
+
+  <!-- 2. S3 Standard-IA -->
+  <rect x="45" y="144" width="310" height="48" rx="8" fill="white" stroke="#6366f1" stroke-width="2"/>
+  <rect x="45" y="144" width="5" height="48" rx="2" fill="#6366f1"/>
+  <text x="68" y="172" font-size="14" font-weight="600" fill="#4338ca">S3 Standard-IA</text>
+  <text x="310" y="172" text-anchor="end" font-size="11" fill="#64748b">$0.0125/GB</text>
+
+  <!-- 3. S3 Intelligent-Tiering -->
+  <rect x="45" y="212" width="310" height="48" rx="8" fill="white" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="45" y="212" width="5" height="48" rx="2" fill="#8b5cf6"/>
+  <text x="68" y="240" font-size="14" font-weight="600" fill="#6d28d9">S3 Intelligent-Tiering</text>
+  <text x="310" y="240" text-anchor="end" font-size="11" fill="#64748b">Auto-tiered</text>
+
+  <!-- 4. S3 One Zone-IA -->
+  <rect x="45" y="280" width="310" height="48" rx="8" fill="white" stroke="#ec4899" stroke-width="2"/>
+  <rect x="45" y="280" width="5" height="48" rx="2" fill="#ec4899"/>
+  <text x="68" y="308" font-size="14" font-weight="600" fill="#9d174d">S3 One Zone-IA</text>
+  <text x="310" y="308" text-anchor="end" font-size="11" fill="#64748b">$0.01/GB</text>
+
+  <!-- 5. Glacier Instant Retrieval -->
+  <rect x="45" y="348" width="310" height="48" rx="8" fill="white" stroke="#06b6d4" stroke-width="2"/>
+  <rect x="45" y="348" width="5" height="48" rx="2" fill="#06b6d4"/>
+  <text x="68" y="376" font-size="14" font-weight="600" fill="#0e7490">Glacier Instant Retrieval</text>
+  <text x="310" y="376" text-anchor="end" font-size="11" fill="#64748b">$0.004/GB</text>
+
+  <!-- 6. Glacier Flexible Retrieval -->
+  <rect x="45" y="416" width="310" height="48" rx="8" fill="white" stroke="#14b8a6" stroke-width="2"/>
+  <rect x="45" y="416" width="5" height="48" rx="2" fill="#14b8a6"/>
+  <text x="68" y="444" font-size="14" font-weight="600" fill="#0f766e">Glacier Flexible Retrieval</text>
+  <text x="310" y="444" text-anchor="end" font-size="11" fill="#64748b">$0.0036/GB</text>
+
+  <!-- 7. Glacier Deep Archive -->
+  <rect x="45" y="484" width="310" height="48" rx="8" fill="white" stroke="#475569" stroke-width="2"/>
+  <rect x="45" y="484" width="5" height="48" rx="2" fill="#475569"/>
+  <text x="68" y="512" font-size="14" font-weight="600" fill="#1e293b">Glacier Deep Archive</text>
+  <text x="310" y="512" text-anchor="end" font-size="11" fill="#64748b">$0.00099/GB</text>
+
+  <!-- ===== TRANSITION ARROWS ===== -->
+  <!-- x-columns for each source: 390, 418, 446, 474, 502, 530 -->
+  <!-- Row centers: 100, 168, 236, 304, 372, 440, 508 -->
+
+  <!-- Standard (blue #3b82f6) → all 6 below -->
+  <line x1="355" y1="100" x2="390" y2="100" stroke="#3b82f6" stroke-width="2"/>
+  <line x1="390" y1="100" x2="390" y2="508" stroke="#3b82f6" stroke-width="2" opacity="0.5"/>
+  <circle cx="390" cy="168" r="4" fill="#3b82f6"/>
+  <circle cx="390" cy="236" r="4" fill="#3b82f6"/>
+  <circle cx="390" cy="304" r="4" fill="#3b82f6"/>
+  <circle cx="390" cy="372" r="4" fill="#3b82f6"/>
+  <circle cx="390" cy="440" r="4" fill="#3b82f6"/>
+  <circle cx="390" cy="508" r="4" fill="#3b82f6"/>
+
+  <!-- Standard-IA (indigo #6366f1) → 5 below -->
+  <line x1="355" y1="168" x2="418" y2="168" stroke="#6366f1" stroke-width="2"/>
+  <line x1="418" y1="168" x2="418" y2="508" stroke="#6366f1" stroke-width="2" opacity="0.5"/>
+  <circle cx="418" cy="236" r="4" fill="#6366f1"/>
+  <circle cx="418" cy="304" r="4" fill="#6366f1"/>
+  <circle cx="418" cy="372" r="4" fill="#6366f1"/>
+  <circle cx="418" cy="440" r="4" fill="#6366f1"/>
+  <circle cx="418" cy="508" r="4" fill="#6366f1"/>
+
+  <!-- Intelligent-Tiering (purple #8b5cf6) → 4 below -->
+  <line x1="355" y1="236" x2="446" y2="236" stroke="#8b5cf6" stroke-width="2"/>
+  <line x1="446" y1="236" x2="446" y2="508" stroke="#8b5cf6" stroke-width="2" opacity="0.5"/>
+  <circle cx="446" cy="304" r="4" fill="#8b5cf6"/>
+  <circle cx="446" cy="372" r="4" fill="#8b5cf6"/>
+  <circle cx="446" cy="440" r="4" fill="#8b5cf6"/>
+  <circle cx="446" cy="508" r="4" fill="#8b5cf6"/>
+
+  <!-- One Zone-IA (pink #ec4899) → 3 below -->
+  <line x1="355" y1="304" x2="474" y2="304" stroke="#ec4899" stroke-width="2"/>
+  <line x1="474" y1="304" x2="474" y2="508" stroke="#ec4899" stroke-width="2" opacity="0.5"/>
+  <circle cx="474" cy="372" r="4" fill="#ec4899"/>
+  <circle cx="474" cy="440" r="4" fill="#ec4899"/>
+  <circle cx="474" cy="508" r="4" fill="#ec4899"/>
+
+  <!-- Glacier Instant Retrieval (cyan #06b6d4) → 2 below -->
+  <line x1="355" y1="372" x2="502" y2="372" stroke="#06b6d4" stroke-width="2"/>
+  <line x1="502" y1="372" x2="502" y2="508" stroke="#06b6d4" stroke-width="2" opacity="0.5"/>
+  <circle cx="502" cy="440" r="4" fill="#06b6d4"/>
+  <circle cx="502" cy="508" r="4" fill="#06b6d4"/>
+
+  <!-- Glacier Flexible Retrieval (teal #14b8a6) → 1 below -->
+  <line x1="355" y1="440" x2="530" y2="440" stroke="#14b8a6" stroke-width="2"/>
+  <line x1="530" y1="440" x2="530" y2="508" stroke="#14b8a6" stroke-width="2" opacity="0.5"/>
+  <circle cx="530" cy="508" r="4" fill="#14b8a6"/>
+
+  <!-- Source dots (on the horizontal connector lines) -->
+  <circle cx="355" cy="100" r="4" fill="#3b82f6"/>
+  <circle cx="355" cy="168" r="4" fill="#6366f1"/>
+  <circle cx="355" cy="236" r="4" fill="#8b5cf6"/>
+  <circle cx="355" cy="304" r="4" fill="#ec4899"/>
+  <circle cx="355" cy="372" r="4" fill="#06b6d4"/>
+  <circle cx="355" cy="440" r="4" fill="#14b8a6"/>
+
+  <!-- Legend -->
+  <rect x="380" y="550" width="390" height="40" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <circle cx="400" cy="570" r="4" fill="#3b82f6"/>
+  <text x="410" y="574" font-size="10" fill="#64748b">Std</text>
+  <circle cx="445" cy="570" r="4" fill="#6366f1"/>
+  <text x="455" y="574" font-size="10" fill="#64748b">Std-IA</text>
+  <circle cx="500" cy="570" r="4" fill="#8b5cf6"/>
+  <text x="510" y="574" font-size="10" fill="#64748b">Int-Tier</text>
+  <circle cx="560" cy="570" r="4" fill="#ec4899"/>
+  <text x="570" y="574" font-size="10" fill="#64748b">OZ-IA</text>
+  <circle cx="615" cy="570" r="4" fill="#06b6d4"/>
+  <text x="625" y="574" font-size="10" fill="#64748b">Glacier IR</text>
+  <circle cx="685" cy="570" r="4" fill="#14b8a6"/>
+  <text x="695" y="574" font-size="10" fill="#64748b">Glacier FR</text>
+</svg>

@@ -32,6 +32,8 @@ Các ràng buộc quan trọng:
 - Mỗi transition phải tuân thủ **minimum storage duration** của class đích (ví dụ: không thể transition sang Standard-IA trước 30 ngày)
 - Transitions xảy ra trong vòng **24 giờ** kể từ ngày chỉ định — không phải ngay lúc nửa đêm
 
+![S3 Storage Class Transition Rules](/s3-storage-class-transitions.svg)
+
 > Nếu bạn cần objects tự động di chuyển **hai chiều** (xuống khi không truy cập, lên lại khi được truy cập), hãy dùng **Intelligent-Tiering** thay vì lifecycle rules. Lifecycle rules phù hợp nhất khi access pattern có thể dự đoán và giảm dần theo thời gian.
 
 ---
