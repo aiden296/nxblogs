@@ -1,0 +1,336 @@
+---
+title: 'S3 Lifecycle Rules: Automate Storage Cost Optimization'
+date: '2026-05-09'
+tags: ['Devops', 'AWS', 'SAA']
+enableComment: true
+---
+
+# S3 Lifecycle Rules: Automate Storage Cost Optimization
+
+> Manually moving objects between storage classes is like sorting mail by hand every day — it works at first, but it doesn't scale.
+
+In practice, you rarely pick just one storage class and leave it forever. Data tends to be **hot when new** and **cold over time** — logs are queried heavily in the first week, user uploads are viewed frequently in the first month, then gradually forgotten.
+
+**S3 Lifecycle Rules** let you define automatic transitions between storage classes based on object age. You configure rules at the bucket level, and S3 handles the rest — no cron jobs, no scripts, no manual intervention.
+
+If you're not familiar with the different S3 storage classes and their trade-offs, check out [S3 Storage Classes: Choosing the Right One for Your Data](/en/posts/s3-storage-classes) first.
+
+---
+
+## How Lifecycle Rules Work
+
+A lifecycle rule consists of:
+
+- **Filter**: which objects the rule applies to (by prefix, tag, or both)
+- **Transitions**: when to move objects to a cheaper storage class
+- **Expiration**: when to delete objects entirely
+- **NoncurrentVersionTransitions/Expiration**: same as above, but for previous versions (when versioning is enabled)
+
+Key constraints:
+
+- Transitions only move objects **down** the cost ladder — you cannot transition from Glacier back to Standard
+- Each transition must respect the **minimum storage duration** of the target class (e.g., you can't transition to Standard-IA before 30 days)
+- Transitions happen within **24 hours** of the specified day — not instantly at midnight
+
+> If you need objects to move **both directions** automatically (down when idle, back up when accessed), use **Intelligent-Tiering** instead of lifecycle rules. Lifecycle rules are best when your access pattern is predictable and decays over time.
+
+---
+
+## Example: Shopify Analytics Pipeline
+
+Problem: You're designing the storage layer for an analytics pipeline. To keep things simple, you're focusing on a single metric — **product clicks**.
+
+Your system is an analytics platform for Shopify store owners that lets them analyze product click metrics such as conversion rate, click-through rate, and more.
+
+Each store's storefront streams product click events through **Kinesis Data Firehose** into an S3 bucket as raw data. **AWS Glue** runs ETL jobs to clean, deduplicate, and aggregate this raw data into structured tables on S3.
+
+Store owners access a dashboard powered by **AWS Athena** that queries the processed data. The dashboard has these constraints:
+
+- Users can query data from the **last 2 years** — the date picker does not allow selecting dates older than that
+- Data within the **last 6 months** must load at the highest speed (daily/weekly reports, real-time monitoring)
+- Data from **6–24 months ago** can have slightly higher latency to optimize cost (monthly comparisons, year-over-year analysis)
+- Data **older than 2 years** is no longer queryable from the dashboard, but still kept for compliance and audit purposes
+
+![Shopify Analytics Pipeline — Data Flow & Lifecycle](/s3-lifecycle-pipeline.svg)
+
+This produces 3 data types on S3, each with a different lifecycle:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "RawStreamData",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "raw/" },
+      "Transitions": [
+        { "Days": 7,   "StorageClass": "STANDARD_IA" },
+        { "Days": 90,  "StorageClass": "GLACIER_FLEXIBLE_RETRIEVAL" },
+        { "Days": 365, "StorageClass": "DEEP_ARCHIVE" }
+      ],
+      "Expiration": { "Days": 1095 }
+    },
+    {
+      "ID": "ProcessedData",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "processed/" },
+      "Transitions": [
+        { "Days": 180, "StorageClass": "STANDARD_IA" },
+        { "Days": 365, "StorageClass": "GLACIER_IR" }
+      ],
+      "Expiration": { "Days": 1095 }
+    },
+    {
+      "ID": "AthenaQueryResults",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "athena-results/" },
+      "Expiration": { "Days": 7 }
+    }
+  ]
+}
+```
+
+### Raw stream data (`raw/`)
+
+Kinesis delivers raw JSON/Parquet files here. Glue reads them within the first few days to run ETL.
+
+- After **7 days**, Glue is done — move to **Standard-IA**. Raw data is kept in case a Glue job needs to be re-run (bug fix, logic change), but this rarely happens
+- After **90 days**, reprocessing is very unlikely — move to **Glacier Flexible Retrieval**. If needed, waiting a few hours is acceptable
+- After **1 year**, move to **Deep Archive** (~$1/TB/month). Raw data is never queried directly by the dashboard, so retrieval speed doesn't matter
+- After **3 years**, delete — no compliance requirement beyond this point
+
+### Processed data (`processed/`)
+
+This is what Athena queries for the store owner's dashboard — storage class directly affects dashboard performance.
+
+- **Day 0–180** (last 6 months): **S3 Standard** — store owners check daily sales, weekly trends, and real-time conversion funnels. No retrieval fee, lowest latency. This is the "hot" window
+- **Day 180–365** (6–12 months ago): **Standard-IA** — still instant access for Athena, but store owners query this less frequently (monthly comparisons, seasonal analysis). Retrieval fee is $0.01/GB — acceptable for occasional queries
+- **Day 365–730** (1–2 years ago): **Glacier Instant Retrieval** — Athena can still query this in milliseconds for year-over-year reports. Storage cost drops ~68% vs Standard. Higher retrieval fee ($0.03/GB), but queries on this range are infrequent
+- **After 730 days** (2+ years): **Expire** — the dashboard blocks date selection beyond 2 years, so no need to keep processed data. If you need historical data for compliance, it's still available as raw data in Deep Archive
+
+> Do **not** move processed data to Glacier Flexible Retrieval or below — Athena cannot query objects in those classes without a manual restore first, which would break the dashboard experience.
+
+### Athena query results (`athena-results/`)
+
+Athena saves every query result to S3. These are purely temporary — any query can be re-run. Delete after **7 days** — no reason to transition to a cheaper class, just expire them.
+
+---
+
+## Cost Estimation
+
+Let's assume the platform handles **~500 active stores**, generating a combined **50 GB/day** of raw event data, and Glue produces **10 GB/day** of processed data. Here's the cost at **steady state after 2 years**:
+
+**S3 storage pricing (us-east-1):**
+
+| Storage Class | Price per GB/month |
+|---|---|
+| S3 Standard | $0.023 |
+| S3 Standard-IA | $0.0125 |
+| Glacier Instant Retrieval | $0.004 |
+| Glacier Flexible Retrieval | $0.0036 |
+| Deep Archive | $0.00099 |
+
+### Storage costs
+
+**Raw data (50 GB/day):**
+
+| Period | Class | Volume | Monthly Cost |
+|---|---|---|---|
+| Day 0–7 | Standard | 350 GB | $8.05 |
+| Day 7–90 | Standard-IA | 4,150 GB | $51.88 |
+| Day 90–365 | Glacier Flexible | 13,750 GB | $49.50 |
+| Day 365–1095 | Deep Archive | 36,500 GB | $36.14 |
+| | **Total** | **54,750 GB** | **$145.57** |
+
+Without lifecycle (all Standard): 54,750 GB × $0.023 = **$1,259.25/month** — savings of **88%**
+
+**Processed data (10 GB/day):**
+
+| Period | Class | Volume | Monthly Cost |
+|---|---|---|---|
+| Day 0–180 | Standard | 1,800 GB | $41.40 |
+| Day 180–365 | Standard-IA | 1,850 GB | $23.13 |
+| Day 365–730 | Glacier IR | 3,650 GB | $14.60 |
+| | **Total** | **7,300 GB** | **$79.13** |
+
+Without lifecycle (all Standard): 7,300 GB × $0.023 = **$167.90/month** — savings of **53%**
+
+### Retrieval costs
+
+Standard-IA and Glacier classes charge a **retrieval fee per GB** when Athena scans data:
+
+| Storage Class | Retrieval Fee per GB |
+|---|---|
+| S3 Standard | Free |
+| S3 Standard-IA | $0.01 |
+| Glacier Instant Retrieval | $0.03 |
+| Glacier Flexible Retrieval | $0.01 (Standard), $0.03 (Expedited) |
+
+Assumptions based on dashboard usage patterns:
+
+- **Raw in Standard-IA**: Glue re-runs failed or updated ETL jobs — **~100 GB/month**
+- **Raw in Glacier Flexible**: Rare full reprocessing — **~50 GB/month**
+- **Processed in Standard-IA**: Store owners running monthly comparison reports on 6–12 month data — **~300 GB/month** scanned by Athena
+- **Processed in Glacier IR**: Occasional year-over-year queries on 1–2 year data — **~100 GB/month**
+
+| Data Type | Class | Retrieved | Cost |
+|---|---|---|---|
+| Raw | Standard-IA | 100 GB | $1.00 |
+| Raw | Glacier Flexible | 50 GB | $0.50 |
+| Processed | Standard-IA | 300 GB | $3.00 |
+| Processed | Glacier IR | 100 GB | $3.00 |
+| | | **Total** | **$7.50** |
+
+### Total
+
+| | With Lifecycle | All Standard | Saved |
+|---|---|---|---|
+| Storage | $224.86 | $1,427.31 | $1,202.45 |
+| Retrieval | $7.50 | $0.00 | -$7.50 |
+| **Total** | **$232.36** | **$1,427.31** | **$1,194.95 (84%)** |
+
+That's roughly **$14,340 saved per year** — with no impact on the dashboard experience for store owners. The 6-month hot window stays on Standard with zero retrieval fees, while older data gradually moves to cheaper classes that still support instant Athena queries.
+
+---
+
+## Combining Lifecycle Rules with Object Tagging
+
+Lifecycle rules can be filtered not just by prefix, but also by **S3 Object Tags**. This opens up powerful patterns — like offering different storage tiers based on a customer's subscription plan.
+
+### Use case: Premium plan upgrade
+
+Continuing the Shopify analytics example — suppose you want to upsell a **premium plan** where store owners get the fastest possible dashboard performance across all their historical data (no retrieval fees, no latency increase for older data).
+
+The approach:
+
+1. Tag all objects with `plan=basic` by default
+2. Configure lifecycle rules to **only transition objects tagged `plan=basic`**:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "BasicPlanProcessed",
+      "Status": "Enabled",
+      "Filter": {
+        "And": {
+          "Prefix": "processed/",
+          "Tags": [{ "Key": "plan", "Value": "basic" }]
+        }
+      },
+      "Transitions": [
+        { "Days": 180, "StorageClass": "STANDARD_IA" },
+        { "Days": 365, "StorageClass": "GLACIER_IR" }
+      ]
+    }
+  ]
+}
+```
+
+3. When a store upgrades to premium → tag their objects as `plan=premium` → objects no longer match the rule → stay in Standard forever
+4. For objects already transitioned to cheaper classes → copy them back to Standard
+
+### Implementation
+
+When a store owner upgrades, you need to **tag** all their objects and **copy** any already-transitioned objects back to Standard:
+
+```typescript
+import {
+  S3Client,
+  ListObjectsV2Command,
+  PutObjectTaggingCommand,
+  CopyObjectCommand,
+} from '@aws-sdk/client-s3'
+import pLimit from 'p-limit'
+
+const s3 = new S3Client({ region: 'us-east-1' })
+const BUCKET = 'your-analytics-bucket'
+const CONCURRENCY = 50
+
+interface UpgradeResult {
+  tagged: number
+  copied: number
+  errors: string[]
+}
+
+async function upgradeStorePlan(storeId: string): Promise<UpgradeResult> {
+  const prefix = `processed/store_id=${storeId}/`
+  const limit = pLimit(CONCURRENCY)
+  const result: UpgradeResult = { tagged: 0, copied: 0, errors: [] }
+
+  let continuationToken: string | undefined
+
+  do {
+    const listResponse = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    )
+
+    const objects = listResponse.Contents ?? []
+
+    await Promise.all(
+      objects.map((obj) =>
+        limit(async () => {
+          const key = obj.Key!
+          try {
+            await s3.send(
+              new PutObjectTaggingCommand({
+                Bucket: BUCKET,
+                Key: key,
+                Tagging: { TagSet: [{ Key: 'plan', Value: 'premium' }] },
+              })
+            )
+            result.tagged++
+
+            if (obj.StorageClass && obj.StorageClass !== 'STANDARD') {
+              await s3.send(
+                new CopyObjectCommand({
+                  Bucket: BUCKET,
+                  CopySource: `${BUCKET}/${key}`,
+                  Key: key,
+                  StorageClass: 'STANDARD',
+                  MetadataDirective: 'COPY',
+                  TaggingDirective: 'COPY',
+                })
+              )
+              result.copied++
+            }
+          } catch (err) {
+            result.errors.push(`${key}: ${(err as Error).message}`)
+          }
+        })
+      )
+    )
+
+    continuationToken = listResponse.NextContinuationToken
+  } while (continuationToken)
+
+  return result
+}
+```
+
+Key details:
+
+- **`p-limit(50)`**: limits to 50 concurrent requests — S3 handles 3,500 PUT/s per prefix, so 50 is safe
+- **`ListObjectsV2`** returns up to 1,000 objects per call, automatically paginated via `ContinuationToken`
+- **`StorageClass` check**: only copy objects that were already transitioned (Standard-IA, Glacier IR) — objects still in Standard don't need copying
+- **`TaggingDirective: 'COPY'`**: preserves the `plan=premium` tag when copying back to Standard
+
+### Cost of upgrading one store
+
+Assuming 1 store with 2 years of data at 20 MB/day (10 GB/day ÷ 500 stores):
+
+| Period | Current Class | Volume | Retrieval Fee |
+|---|---|---|---|
+| Day 0–180 | Standard | 3.6 GB | — (already Standard) |
+| Day 180–365 | Standard-IA | 3.7 GB | $0.037 |
+| Day 365–730 | Glacier IR | 7.3 GB | $0.219 |
+| | | **14.6 GB** | **$0.256** |
+
+S3 request costs (ListObjects + CopyObject + PutObjectTagging) for ~730 objects: **< $0.02**
+
+**Total cost to upgrade 1 store: ~$0.28** — a one-time cost that eliminates ongoing retrieval fees for that store's dashboard.
+
+For comparison, if you **don't copy** and let the premium store query data on Standard-IA and Glacier IR, retrieval fees accumulate to ~$0.11/month. After just **3 months**, cumulative retrieval fees exceed the one-time copy cost. Copying upfront is always cheaper.

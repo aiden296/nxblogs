@@ -1,0 +1,336 @@
+---
+title: 'S3 Lifecycle Rules: Tự động tối ưu chi phí lưu trữ'
+date: '2026-05-09'
+tags: ['Devops', 'AWS', 'SAA']
+enableComment: true
+---
+
+# S3 Lifecycle Rules: Tự động tối ưu chi phí lưu trữ
+
+> Tự tay di chuyển objects giữa các storage class giống như phân loại thư bằng tay mỗi ngày — ban đầu thì ổn, nhưng không scale được.
+
+Trong thực tế, bạn hiếm khi chọn một storage class rồi để mãi. Data thường **hot khi mới** và **cold theo thời gian** — logs được query liên tục trong tuần đầu, user uploads được xem nhiều trong tháng đầu, rồi dần bị quên lãng.
+
+**S3 Lifecycle Rules** cho phép bạn định nghĩa các transition tự động giữa các storage class dựa trên tuổi của object. Bạn cấu hình rules ở cấp bucket, và S3 xử lý phần còn lại — không cần cron jobs, không scripts, không can thiệp thủ công.
+
+Nếu bạn chưa quen với các S3 storage class và trade-offs của chúng, hãy đọc [S3 Storage Classes: Chọn đúng class cho dữ liệu của bạn](/vi/posts/s3-storage-classes) trước.
+
+---
+
+## Lifecycle Rules hoạt động như thế nào
+
+Một lifecycle rule bao gồm:
+
+- **Filter**: rule áp dụng cho objects nào (theo prefix, tag, hoặc cả hai)
+- **Transitions**: khi nào chuyển objects sang storage class rẻ hơn
+- **Expiration**: khi nào xóa objects hoàn toàn
+- **NoncurrentVersionTransitions/Expiration**: tương tự nhưng cho phiên bản cũ (khi versioning được bật)
+
+Các ràng buộc quan trọng:
+
+- Transitions chỉ di chuyển objects **xuống** theo bậc chi phí — bạn không thể transition từ Glacier ngược lại Standard
+- Mỗi transition phải tuân thủ **minimum storage duration** của class đích (ví dụ: không thể transition sang Standard-IA trước 30 ngày)
+- Transitions xảy ra trong vòng **24 giờ** kể từ ngày chỉ định — không phải ngay lúc nửa đêm
+
+> Nếu bạn cần objects tự động di chuyển **hai chiều** (xuống khi không truy cập, lên lại khi được truy cập), hãy dùng **Intelligent-Tiering** thay vì lifecycle rules. Lifecycle rules phù hợp nhất khi access pattern có thể dự đoán và giảm dần theo thời gian.
+
+---
+
+## Ví dụ: Shopify Analytics Pipeline
+
+Bài toán: Bạn đang thiết kế storage layer cho 1 analytic pipeline, để đơn giản hoá, bạn chỉ tập trung vào 1 metrics là **product clicks**
+
+Hệ thống của bạn là một hệ thống analytics cho các store owner trên Shopify có thể phân tích các số liệu liên quan tới product clicks như conversion rate, click through rate, ....
+
+Storefront của mỗi store stream các product click events qua **Kinesis Data Firehose** vào S3 bucket dưới dạng raw data. **AWS Glue** chạy ETL jobs để clean, deduplicate, và aggregate raw data thành các bảng có cấu trúc trên S3.
+
+Store owners truy cập dashboard chạy bằng **AWS Athena** để query processed data. Dashboard có các ràng buộc sau:
+
+- User có thể query dữ liệu trong **2 năm gần nhất** — date picker không cho phép chọn ngày cũ hơn
+- Dữ liệu trong **6 tháng gần nhất** phải load với tốc độ cao nhất (daily/weekly reports, real-time monitoring)
+- Dữ liệu từ **6–24 tháng trước** có thể chấp nhận latency cao hơn để tối ưu chi phí (so sánh monthly, phân tích year-over-year)
+- Dữ liệu **quá 2 năm** không còn queryable từ dashboard, nhưng vẫn giữ lại cho compliance và audit
+
+![Shopify Analytics Pipeline — Data Flow & Lifecycle](/s3-lifecycle-pipeline.svg)
+
+Pipeline tạo ra 3 loại dữ liệu trên S3, mỗi loại có lifecycle khác nhau:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "RawStreamData",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "raw/" },
+      "Transitions": [
+        { "Days": 7,   "StorageClass": "STANDARD_IA" },
+        { "Days": 90,  "StorageClass": "GLACIER_FLEXIBLE_RETRIEVAL" },
+        { "Days": 365, "StorageClass": "DEEP_ARCHIVE" }
+      ],
+      "Expiration": { "Days": 1095 }
+    },
+    {
+      "ID": "ProcessedData",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "processed/" },
+      "Transitions": [
+        { "Days": 180, "StorageClass": "STANDARD_IA" },
+        { "Days": 365, "StorageClass": "GLACIER_IR" }
+      ],
+      "Expiration": { "Days": 1095 }
+    },
+    {
+      "ID": "AthenaQueryResults",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "athena-results/" },
+      "Expiration": { "Days": 7 }
+    }
+  ]
+}
+```
+
+### Raw stream data (`raw/`)
+
+Kinesis giao raw JSON/Parquet files vào đây. Glue đọc chúng trong vài ngày đầu để chạy ETL.
+
+- Sau **7 ngày**, Glue đã xử lý xong — chuyển sang **Standard-IA**. Vẫn giữ raw data phòng trường hợp cần re-run Glue job (bug fix, thay đổi logic), nhưng hiếm khi xảy ra
+- Sau **90 ngày**, khả năng cần reprocess rất thấp — chuyển sang **Glacier Flexible Retrieval**. Nếu cần, chờ vài giờ là chấp nhận được
+- Sau **1 năm**, chuyển sang **Deep Archive** (~$1/TB/tháng). Raw data không bao giờ được dashboard query trực tiếp, nên tốc độ retrieval không quan trọng
+- Sau **3 năm**, xóa — không có yêu cầu compliance nào vượt quá mốc này
+
+### Processed data (`processed/`)
+
+Đây là data mà Athena query cho dashboard của store owner — storage class ảnh hưởng trực tiếp đến tốc độ dashboard.
+
+- **Ngày 0–180** (6 tháng gần nhất): **S3 Standard** — store owners xem daily sales, weekly trends, conversion funnels real-time. Không mất retrieval fee, latency thấp nhất. Đây là "hot" window
+- **Ngày 180–365** (6–12 tháng trước): **Standard-IA** — vẫn instant access cho Athena, nhưng store owners query ít hơn (so sánh monthly, phân tích seasonal). Retrieval fee $0.01/GB — chấp nhận được cho các query không thường xuyên
+- **Ngày 365–730** (1–2 năm trước): **Glacier Instant Retrieval** — Athena vẫn query được trong milliseconds cho year-over-year reports. Storage cost giảm ~68% so với Standard. Retrieval fee cao hơn ($0.03/GB), nhưng queries trên khoảng thời gian này rất ít
+- **Sau 730 ngày** (2+ năm): **Expire** — dashboard chặn date selection quá 2 năm, không cần giữ processed data. Nếu cần dữ liệu lịch sử cho compliance, vẫn có raw data ở Deep Archive
+
+> **Không** chuyển processed data xuống Glacier Flexible Retrieval trở xuống — Athena không thể query objects ở các class đó mà không restore thủ công trước, sẽ làm hỏng trải nghiệm dashboard.
+
+### Athena query results (`athena-results/`)
+
+Athena lưu kết quả mỗi query vào S3. Đây là data hoàn toàn tạm thời — bất kỳ query nào cũng có thể chạy lại. Xóa sau **7 ngày** — không cần chuyển sang class rẻ hơn, cứ expire luôn.
+
+---
+
+## Ước tính chi phí
+
+Giả sử platform phục vụ **~500 stores đang hoạt động**, tổng cộng tạo ra **50 GB/ngày** raw event data, và Glue tạo ra **10 GB/ngày** processed data. Dưới đây là chi phí ở **trạng thái ổn định sau 2 năm**:
+
+**Giá S3 storage (us-east-1):**
+
+| Storage Class | Giá per GB/tháng |
+|---|---|
+| S3 Standard | $0.023 |
+| S3 Standard-IA | $0.0125 |
+| Glacier Instant Retrieval | $0.004 |
+| Glacier Flexible Retrieval | $0.0036 |
+| Deep Archive | $0.00099 |
+
+### Chi phí storage
+
+**Raw data (50 GB/ngày):**
+
+| Giai đoạn | Class | Dung lượng | Chi phí/tháng |
+|---|---|---|---|
+| Ngày 0–7 | Standard | 350 GB | $8.05 |
+| Ngày 7–90 | Standard-IA | 4,150 GB | $51.88 |
+| Ngày 90–365 | Glacier Flexible | 13,750 GB | $49.50 |
+| Ngày 365–1095 | Deep Archive | 36,500 GB | $36.14 |
+| | **Tổng** | **54,750 GB** | **$145.57** |
+
+Không dùng lifecycle (toàn bộ Standard): 54,750 GB × $0.023 = **$1,259.25/tháng** — tiết kiệm **88%**
+
+**Processed data (10 GB/ngày):**
+
+| Giai đoạn | Class | Dung lượng | Chi phí/tháng |
+|---|---|---|---|
+| Ngày 0–180 | Standard | 1,800 GB | $41.40 |
+| Ngày 180–365 | Standard-IA | 1,850 GB | $23.13 |
+| Ngày 365–730 | Glacier IR | 3,650 GB | $14.60 |
+| | **Tổng** | **7,300 GB** | **$79.13** |
+
+Không dùng lifecycle (toàn bộ Standard): 7,300 GB × $0.023 = **$167.90/tháng** — tiết kiệm **53%**
+
+### Chi phí retrieval
+
+Standard-IA và Glacier tính thêm **retrieval fee per GB** khi Athena scan data:
+
+| Storage Class | Retrieval Fee per GB |
+|---|---|
+| S3 Standard | Miễn phí |
+| S3 Standard-IA | $0.01 |
+| Glacier Instant Retrieval | $0.03 |
+| Glacier Flexible Retrieval | $0.01 (Standard), $0.03 (Expedited) |
+
+Giả định dựa trên usage pattern của dashboard:
+
+- **Raw ở Standard-IA**: Glue re-run failed hoặc updated ETL jobs — **~100 GB/tháng**
+- **Raw ở Glacier Flexible**: Hiếm khi cần reprocess toàn bộ — **~50 GB/tháng**
+- **Processed ở Standard-IA**: Store owners chạy monthly comparison reports trên data 6–12 tháng — **~300 GB/tháng** Athena scan
+- **Processed ở Glacier IR**: Query year-over-year trên data 1–2 năm — **~100 GB/tháng** scan
+
+| Loại data | Class | Retrieved | Chi phí |
+|---|---|---|---|
+| Raw | Standard-IA | 100 GB | $1.00 |
+| Raw | Glacier Flexible | 50 GB | $0.50 |
+| Processed | Standard-IA | 300 GB | $3.00 |
+| Processed | Glacier IR | 100 GB | $3.00 |
+| | | **Tổng** | **$7.50** |
+
+### Tổng cộng
+
+| | Có Lifecycle | Toàn Standard | Tiết kiệm |
+|---|---|---|---|
+| Storage | $224.86 | $1,427.31 | $1,202.45 |
+| Retrieval | $7.50 | $0.00 | -$7.50 |
+| **Tổng** | **$232.36** | **$1,427.31** | **$1,194.95 (84%)** |
+
+Tương đương **~$14,340 tiết kiệm mỗi năm** — không ảnh hưởng gì đến trải nghiệm dashboard của store owners. 6 tháng hot window vẫn ở Standard với zero retrieval fee, trong khi data cũ hơn dần chuyển sang các class rẻ hơn mà vẫn hỗ trợ Athena query instant.
+
+---
+
+## Kết hợp Lifecycle Rules với Object Tagging
+
+Lifecycle rules có thể filter không chỉ theo prefix, mà còn theo **S3 Object Tags**. Điều này mở ra các pattern mạnh mẽ — như cung cấp các storage tier khác nhau dựa trên gói subscription của khách hàng.
+
+### Use case: Nâng cấp gói Premium
+
+Tiếp tục ví dụ Shopify analytics — giả sử bạn muốn upsell gói **premium** với dashboard performance nhanh nhất cho toàn bộ dữ liệu lịch sử (không mất retrieval fee, không tăng latency cho data cũ).
+
+Cách tiếp cận:
+
+1. Mặc định tag tất cả objects với `plan=basic`
+2. Cấu hình lifecycle rules **chỉ transition objects có tag `plan=basic`**:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "BasicPlanProcessed",
+      "Status": "Enabled",
+      "Filter": {
+        "And": {
+          "Prefix": "processed/",
+          "Tags": [{ "Key": "plan", "Value": "basic" }]
+        }
+      },
+      "Transitions": [
+        { "Days": 180, "StorageClass": "STANDARD_IA" },
+        { "Days": 365, "StorageClass": "GLACIER_IR" }
+      ]
+    }
+  ]
+}
+```
+
+3. Khi store upgrade lên premium → tag objects thành `plan=premium` → objects không match rule nữa → giữ mãi ở Standard
+4. Với objects đã bị transition sang class rẻ hơn → copy lại về Standard
+
+### Triển khai
+
+Khi store owner upgrade, bạn cần **tag** tất cả objects và **copy** những objects đã bị transition về Standard:
+
+```typescript
+import {
+  S3Client,
+  ListObjectsV2Command,
+  PutObjectTaggingCommand,
+  CopyObjectCommand,
+} from '@aws-sdk/client-s3'
+import pLimit from 'p-limit'
+
+const s3 = new S3Client({ region: 'us-east-1' })
+const BUCKET = 'your-analytics-bucket'
+const CONCURRENCY = 50
+
+interface UpgradeResult {
+  tagged: number
+  copied: number
+  errors: string[]
+}
+
+async function upgradeStorePlan(storeId: string): Promise<UpgradeResult> {
+  const prefix = `processed/store_id=${storeId}/`
+  const limit = pLimit(CONCURRENCY)
+  const result: UpgradeResult = { tagged: 0, copied: 0, errors: [] }
+
+  let continuationToken: string | undefined
+
+  do {
+    const listResponse = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    )
+
+    const objects = listResponse.Contents ?? []
+
+    await Promise.all(
+      objects.map((obj) =>
+        limit(async () => {
+          const key = obj.Key!
+          try {
+            await s3.send(
+              new PutObjectTaggingCommand({
+                Bucket: BUCKET,
+                Key: key,
+                Tagging: { TagSet: [{ Key: 'plan', Value: 'premium' }] },
+              })
+            )
+            result.tagged++
+
+            if (obj.StorageClass && obj.StorageClass !== 'STANDARD') {
+              await s3.send(
+                new CopyObjectCommand({
+                  Bucket: BUCKET,
+                  CopySource: `${BUCKET}/${key}`,
+                  Key: key,
+                  StorageClass: 'STANDARD',
+                  MetadataDirective: 'COPY',
+                  TaggingDirective: 'COPY',
+                })
+              )
+              result.copied++
+            }
+          } catch (err) {
+            result.errors.push(`${key}: ${(err as Error).message}`)
+          }
+        })
+      )
+    )
+
+    continuationToken = listResponse.NextContinuationToken
+  } while (continuationToken)
+
+  return result
+}
+```
+
+Các điểm quan trọng:
+
+- **`p-limit(50)`**: giới hạn 50 requests đồng thời — S3 chịu được 3,500 PUT/s per prefix, nên 50 rất an toàn
+- **`ListObjectsV2`** trả tối đa 1,000 objects/lần, tự pagination qua `ContinuationToken`
+- **`StorageClass` check**: chỉ copy những objects đã bị transition (Standard-IA, Glacier IR) — objects vẫn ở Standard không cần copy
+- **`TaggingDirective: 'COPY'`**: giữ nguyên tag `plan=premium` khi copy về Standard
+
+### Chi phí upgrade 1 store
+
+Giả sử 1 store với 2 năm data, 20 MB/ngày (10 GB/ngày ÷ 500 stores):
+
+| Giai đoạn | Class hiện tại | Dung lượng | Retrieval Fee |
+|---|---|---|---|
+| Ngày 0–180 | Standard | 3.6 GB | — (đã ở Standard) |
+| Ngày 180–365 | Standard-IA | 3.7 GB | $0.037 |
+| Ngày 365–730 | Glacier IR | 7.3 GB | $0.219 |
+| | | **14.6 GB** | **$0.256** |
+
+Chi phí S3 requests (ListObjects + CopyObject + PutObjectTagging) cho ~730 objects: **< $0.02**
+
+**Tổng chi phí upgrade 1 store: ~$0.28** — chi phí một lần, loại bỏ hoàn toàn retrieval fee cho dashboard của store đó.
+
+Để so sánh, nếu **không copy** mà để premium store query data trên Standard-IA và Glacier IR, retrieval fees tích lũy ~$0.11/tháng. Chỉ sau **3 tháng**, tổng retrieval fees đã vượt chi phí copy 1 lần. Copy ngay khi upgrade luôn là lựa chọn rẻ hơn.

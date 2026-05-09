@@ -1,0 +1,292 @@
+---
+title: 'S3 Storage Classes: Choosing the Right One for Your Data'
+date: '2026-05-09'
+tags: ['Devops', 'AWS', 'SAA']
+enableComment: true
+---
+
+# S3 Storage Classes: Choosing the Right One for Your Data
+
+> Storing everything in S3 Standard is like renting a premium warehouse for boxes you only open once a year — it works, but you're paying way more than you need to.
+
+Amazon S3 offers **7 storage classes**, each designed for different access patterns and cost requirements. All classes share the same **11 9's of durability** (99.999999999%) — your data is equally safe regardless of which class you choose. The difference lies in **availability**, **retrieval speed**, and **cost**.
+
+I find it easiest to think of them in **3 groups**:
+
+- **Standard Group** — for data you access regularly or occasionally
+- **Glacier Group** — for long-term archival data
+- **Intelligent-Tiering** — for data with unpredictable access patterns
+
+![S3 Storage Classes Overview](/s3-storage-classes-overview.svg)
+
+---
+
+## 1. Standard Group
+
+This group covers the most common use cases — data that you need available with low latency, ranging from frequently accessed to occasionally accessed.
+
+### S3 Standard (Default)
+
+The default storage class when you upload an object to S3. Designed for **frequently accessed data** with low latency and high throughput.
+
+**Characteristics:**
+- **Availability**: 99.99% (designed), 99.9% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: None
+- **Min billable object size**: None
+- **Retrieval fee**: None
+
+**Pros:**
+- No retrieval fees — read as much as you want without extra cost
+- No minimum storage duration — delete anytime without penalty
+- Lowest latency and highest throughput among all classes
+- No minimum object size charge
+
+**Cons:**
+- Highest storage cost per GB among all classes
+
+**Use cases:**
+- Application assets served to users (images, videos, documents)
+- Data lakes for active analytics workloads
+- Content distribution and media hosting
+- Any data accessed multiple times per month
+
+---
+
+### S3 Standard-IA (Infrequent Access)
+
+Same durability and performance as Standard, but at a **lower storage cost** — with a trade-off: you pay a **retrieval fee** per GB retrieved.
+
+**Characteristics:**
+- **Availability**: 99.9% (designed), 99% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: 30 days
+- **Min billable object size**: 128 KB
+- **Retrieval fee**: Per GB retrieved
+
+**Pros:**
+- Significantly lower storage cost than Standard (~40% cheaper)
+- Same low-latency access — data is immediately available when needed
+- Multi-AZ resilience, same as Standard
+
+**Cons:**
+- Retrieval fee per GB — costs add up if you read data frequently
+- 30-day minimum storage charge — even if you delete the object on day 2, you pay for 30 days
+- 128 KB minimum charge — small objects get billed as 128 KB
+
+**Use cases:**
+- Disaster recovery backups that you rarely need to restore
+- Older log files kept for compliance but rarely queried
+- Previous versions of documents or assets
+- Data that's accessed less than once a month but needs instant access when needed
+
+---
+
+### S3 One Zone-IA
+
+Similar to Standard-IA but stored in **only 1 Availability Zone** instead of >= 3. This makes it the cheapest option in the Standard group — but with a risk: if that AZ goes down, your data is **temporarily unavailable**, and if the AZ is destroyed, your data is **permanently lost**.
+
+**Characteristics:**
+- **Availability**: 99.5% (designed), 99% SLA
+- **Availability Zones**: 1
+- **Min storage duration**: 30 days
+- **Min billable object size**: 128 KB
+- **Retrieval fee**: Per GB retrieved
+
+**Pros:**
+- ~20% cheaper than Standard-IA
+- Same low-latency access as Standard-IA
+- Good for data that can be recreated if lost
+
+**Cons:**
+- Single AZ — if the AZ has issues, data is unavailable
+- Risk of data loss if the AZ is physically destroyed (extremely rare, but possible)
+- Same 30-day minimum and 128 KB minimum as Standard-IA
+
+**Use cases:**
+- Secondary backup copies (primary backup in another class/region)
+- Thumbnails or transcoded media that can be regenerated from originals
+- Replicated data from on-premises that can be re-synced
+- Development/staging environment data
+- Machine learning training datasets that are already stored in another region
+- Temporary data processing outputs (ETL intermediate results, batch job artifacts)
+- Static website assets for non-critical internal tools
+
+---
+
+## 2. Glacier Group
+
+The Glacier group is designed for **archival storage** — data you rarely access but need to keep for months or years. Storage costs are dramatically lower, but you pay in retrieval time and fees.
+
+### S3 Glacier Instant Retrieval
+
+The bridge between Standard-IA and traditional Glacier. You get **archive-level storage pricing** with **millisecond retrieval** — just like Standard or Standard-IA.
+
+**Characteristics:**
+- **Availability**: 99.9% (designed), 99% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: 90 days
+- **Min billable object size**: 128 KB
+- **Retrieval fee**: Per GB retrieved
+
+**Pros:**
+- ~68% cheaper storage than Standard
+- Millisecond access — same as Standard classes
+- Multi-AZ durability
+
+**Cons:**
+- 90-day minimum storage charge
+- Higher retrieval cost than Standard-IA
+- 128 KB minimum object size charge
+
+**Use cases:**
+- Medical images (X-rays, MRIs) accessed once per quarter
+- News media archives that occasionally go viral again
+- User-generated content older than 90 days
+- Quarterly financial reports and audit data
+
+---
+
+### S3 Glacier Flexible Retrieval
+
+Previously known as "S3 Glacier". Data retrieval is **not instant** — you submit a retrieval request and wait. Three retrieval speed options:
+
+- **Expedited**: 1-5 minutes (most expensive)
+- **Standard**: 3-5 hours
+- **Bulk**: 5-12 hours (cheapest)
+
+**Characteristics:**
+- **Availability**: 99.99% (designed), 99.9% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: 90 days
+- **Min billable object size**: 40 KB
+- **Retrieval fee**: Per GB retrieved (varies by speed)
+
+**Pros:**
+- Very low storage cost
+- Flexible retrieval options — pay more for speed, or less for patience
+- High availability (99.99%)
+
+**Cons:**
+- Data is **not immediately accessible** — must initiate a restore request
+- Retrieval can take minutes to hours
+- 90-day minimum storage charge
+
+**Use cases:**
+- Annual compliance data or tax records
+- Video raw footage that may be re-edited someday
+- Scientific datasets archived after a research project
+- Backup archives accessed maybe once or twice a year
+
+---
+
+### S3 Glacier Deep Archive
+
+The **lowest cost** storage class in AWS. Designed for data you might never access again — but need to keep for regulatory or legal reasons. Retrieval takes **12-48 hours**.
+
+Two retrieval options:
+- **Standard**: 12 hours
+- **Bulk**: 48 hours
+
+**Characteristics:**
+- **Availability**: 99.99% (designed), 99.9% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: 180 days
+- **Min billable object size**: 40 KB
+- **Retrieval fee**: Per GB retrieved
+
+**Pros:**
+- Cheapest storage in all of AWS (~$1/TB/month)
+- Designed for 7-10+ year retention
+- Multi-AZ durability
+
+**Cons:**
+- 12-48 hours to retrieve data
+- 180-day minimum storage charge — the longest among all classes
+- Impractical for data you might need on short notice
+
+**Use cases:**
+- Financial records required to be kept for 7+ years
+- Healthcare records with long-term retention requirements (HIPAA)
+- Legal hold data and e-discovery archives
+- Surveillance footage stored for regulatory compliance
+
+---
+
+## 3. Intelligent-Tiering
+
+S3 Intelligent-Tiering is unique — it **automatically moves objects** between access tiers based on usage patterns. You don't need to guess which class is best; S3 monitors access and optimizes cost for you.
+
+### How it works
+
+When you upload an object to Intelligent-Tiering, it starts in the **Frequent Access** tier. Then:
+
+1. If not accessed for **30 days** → moves to **Infrequent Access** tier (lower cost)
+2. If not accessed for **90 days** → moves to **Archive Instant Access** tier (even lower cost)
+3. Optionally, you can enable:
+   - **Archive Access** tier (90-730 days, same as Glacier Flexible Retrieval)
+   - **Deep Archive Access** tier (180-730 days, same as Glacier Deep Archive)
+
+When you access an object, it **automatically moves back** to Frequent Access — no restore request needed for the first 3 tiers.
+
+**Characteristics:**
+- **Availability**: 99.9% (designed), 99% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: None
+- **Min billable object size**: None
+- **Retrieval fee**: None (for Frequent, Infrequent, and Archive Instant tiers)
+
+**Pros:**
+- Zero retrieval fees for the automatic tiers
+- No operational overhead — fully automated
+- No minimum storage duration
+- Combines the cost benefits of multiple classes without manual lifecycle rules
+
+**Cons:**
+- Small **monthly monitoring fee** per object (~$0.0025 per 1,000 objects)
+- Not ideal for very small objects — the monitoring fee can exceed the savings
+- The optional Archive tiers require restore requests (minutes to hours)
+
+**Use cases:**
+- Data lakes with unpredictable query patterns
+- Applications where access patterns change seasonally
+- Migrating on-premises data to S3 without knowing future access patterns
+- Shared datasets where different teams access data at different frequencies
+
+---
+
+## S3 Lifecycle Rules
+
+In practice, you rarely pick just one storage class forever. Data tends to be **hot when new** and **cold over time**. **S3 Lifecycle Rules** let you automate transitions between classes based on object age — for example, moving data from Standard to Standard-IA after 6 months, then to Glacier after a year.
+
+I wrote a dedicated article covering lifecycle rules in depth — including a real-world analytics pipeline example with full cost estimation (saving **84%** compared to using Standard for everything):
+
+**[S3 Lifecycle Rules: Automate Storage Cost Optimization](/en/posts/s3-lifecycle-rules)**
+
+---
+
+## Comparison Table
+
+| | Standard | Intelligent-Tiering | Standard-IA | One Zone-IA | Glacier Instant Retrieval | Glacier Flexible Retrieval | Glacier Deep Archive |
+|---|---|---|---|---|---|---|---|
+| **Durability** | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) |
+| **Availability** | 99.99% | 99.9% | 99.9% | 99.5% | 99.9% | 99.99% | 99.99% |
+| **Availability SLA** | 99.9% | 99% | 99% | 99% | 99% | 99.9% | 99.9% |
+| **AZs** | >= 3 | >= 3 | >= 3 | 1 | >= 3 | >= 3 | >= 3 |
+| **Min Storage Duration** | None | None | 30 days | 30 days | 90 days | 90 days | 180 days |
+| **Min Billable Object Size** | None | None | 128 KB | 128 KB | 128 KB | 40 KB | 40 KB |
+| **Retrieval Fee** | None | None | Per GB | Per GB | Per GB | Per GB | Per GB |
+
+---
+
+## How to Choose?
+
+A quick decision guide:
+
+- **Access frequently (multiple times/month)?** → **S3 Standard**
+- **Access infrequently but need instant access?** → **S3 Standard-IA** (multi-AZ) or **One Zone-IA** (if data is recreatable)
+- **Archive data, need instant access when needed?** → **Glacier Instant Retrieval**
+- **Archive data, can wait minutes/hours?** → **Glacier Flexible Retrieval**
+- **Archive data, can wait 12-48 hours?** → **Glacier Deep Archive**
+- **Unpredictable access patterns?** → **Intelligent-Tiering**
+- **Known access pattern that decays over time?** → Combine classes with **[S3 Lifecycle Rules](/en/posts/s3-lifecycle-rules)**

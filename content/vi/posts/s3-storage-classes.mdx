@@ -1,0 +1,292 @@
+---
+title: 'S3 Storage Classes: Chọn đúng class cho dữ liệu của bạn'
+date: '2026-05-09'
+tags: ['Devops', 'AWS', 'SAA']
+enableComment: true
+---
+
+# S3 Storage Classes: Chọn đúng class cho dữ liệu của bạn
+
+> Lưu mọi thứ vào S3 Standard giống như thuê kho hạng sang cho những thùng hàng bạn chỉ mở mỗi năm một lần — vẫn chạy tốt, nhưng bạn đang trả tiền nhiều hơn mức cần thiết.
+
+Amazon S3 cung cấp **7 storage classes**, mỗi class được thiết kế cho access pattern và yêu cầu chi phí khác nhau. Tất cả các class đều có cùng **11 9's durability** (99.999999999%) — dữ liệu của bạn an toàn như nhau bất kể bạn chọn class nào. Sự khác biệt nằm ở **availability**, **tốc độ retrieval**, và **chi phí**.
+
+Mình thấy cách dễ nhất để hiểu là chia thành **3 nhóm**:
+
+- **Standard Group** — cho data bạn truy cập thường xuyên hoặc thỉnh thoảng
+- **Glacier Group** — cho data lưu trữ dài hạn
+- **Intelligent-Tiering** — cho data có access pattern không dự đoán được
+
+![S3 Storage Classes Overview](/s3-storage-classes-overview.svg)
+
+---
+
+## 1. Standard Group
+
+Nhóm này bao gồm các use case phổ biến nhất — data cần available với low latency, từ truy cập thường xuyên đến thỉnh thoảng.
+
+### S3 Standard (Default)
+
+Storage class mặc định khi bạn upload object lên S3. Được thiết kế cho **data truy cập thường xuyên** với low latency và high throughput.
+
+**Đặc điểm:**
+- **Availability**: 99.99% (designed), 99.9% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: Không có
+- **Min billable object size**: Không có
+- **Retrieval fee**: Không có
+
+**Ưu điểm:**
+- Không mất phí retrieval — đọc bao nhiêu cũng không tốn thêm
+- Không có minimum storage duration — xóa bất kỳ lúc nào không bị phạt
+- Latency thấp nhất và throughput cao nhất trong tất cả các class
+- Không bị charge minimum object size
+
+**Nhược điểm:**
+- Chi phí storage per GB cao nhất trong tất cả các class
+
+**Use cases:**
+- Assets phục vụ người dùng (images, videos, documents)
+- Data lakes cho analytics workloads đang hoạt động
+- Content distribution và media hosting
+- Bất kỳ data nào được truy cập nhiều lần mỗi tháng
+
+---
+
+### S3 Standard-IA (Infrequent Access)
+
+Cùng durability và performance như Standard, nhưng với **storage cost thấp hơn** — đổi lại bạn trả **retrieval fee** cho mỗi GB lấy ra.
+
+**Đặc điểm:**
+- **Availability**: 99.9% (designed), 99% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: 30 ngày
+- **Min billable object size**: 128 KB
+- **Retrieval fee**: Per GB retrieved
+
+**Ưu điểm:**
+- Storage cost thấp hơn đáng kể so với Standard (~40% rẻ hơn)
+- Truy cập instant — data available ngay lập tức khi cần
+- Multi-AZ resilience, giống Standard
+
+**Nhược điểm:**
+- Retrieval fee per GB — chi phí tích lũy nếu bạn đọc data thường xuyên
+- Charge tối thiểu 30 ngày — dù bạn xóa object ngày thứ 2, vẫn bị tính tiền 30 ngày
+- Charge tối thiểu 128 KB — object nhỏ hơn vẫn bị tính giá như 128 KB
+
+**Use cases:**
+- Backup cho disaster recovery mà bạn hiếm khi cần restore
+- Log files cũ giữ lại cho compliance nhưng ít khi query
+- Phiên bản cũ của documents hoặc assets
+- Data truy cập ít hơn 1 lần/tháng nhưng cần instant access khi cần
+
+---
+
+### S3 One Zone-IA
+
+Tương tự Standard-IA nhưng chỉ lưu trong **1 Availability Zone** thay vì >= 3. Đây là option rẻ nhất trong nhóm Standard — nhưng có rủi ro: nếu AZ đó gặp sự cố, data **tạm thời không truy cập được**, và nếu AZ bị phá hủy, data **mất vĩnh viễn**.
+
+**Đặc điểm:**
+- **Availability**: 99.5% (designed), 99% SLA
+- **Availability Zones**: 1
+- **Min storage duration**: 30 ngày
+- **Min billable object size**: 128 KB
+- **Retrieval fee**: Per GB retrieved
+
+**Ưu điểm:**
+- Rẻ hơn ~20% so với Standard-IA
+- Truy cập instant giống Standard-IA
+- Phù hợp cho data có thể tạo lại nếu mất
+
+**Nhược điểm:**
+- Chỉ 1 AZ — nếu AZ có vấn đề, data không truy cập được
+- Rủi ro mất data nếu AZ bị phá hủy vật lý (cực kỳ hiếm, nhưng có thể xảy ra)
+- Cùng mức minimum 30 ngày và 128 KB như Standard-IA
+
+**Use cases:**
+- Bản backup phụ (backup chính ở class/region khác)
+- Thumbnails hoặc transcoded media có thể tạo lại từ bản gốc
+- Data replicate từ on-premises có thể re-sync lại
+- Data cho môi trường development/staging
+- Machine learning training datasets đã được lưu ở region khác
+- Data tạm từ quá trình xử lý (ETL intermediate results, batch job artifacts)
+- Static website assets cho internal tools không quan trọng
+
+---
+
+## 2. Glacier Group
+
+Nhóm Glacier được thiết kế cho **archival storage** — data bạn hiếm khi truy cập nhưng cần giữ hàng tháng hoặc hàng năm. Chi phí storage thấp đáng kể, nhưng đổi lại thời gian retrieval lâu hơn và có retrieval fee.
+
+### S3 Glacier Instant Retrieval
+
+Cầu nối giữa Standard-IA và Glacier truyền thống. Bạn được **archive-level storage pricing** với **millisecond retrieval** — giống hệt Standard hay Standard-IA.
+
+**Đặc điểm:**
+- **Availability**: 99.9% (designed), 99% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: 90 ngày
+- **Min billable object size**: 128 KB
+- **Retrieval fee**: Per GB retrieved
+
+**Ưu điểm:**
+- Storage rẻ hơn ~68% so với Standard
+- Truy cập millisecond — giống các class Standard
+- Multi-AZ durability
+
+**Nhược điểm:**
+- Charge tối thiểu 90 ngày
+- Retrieval cost cao hơn Standard-IA
+- Charge tối thiểu 128 KB
+
+**Use cases:**
+- Hình ảnh y tế (X-ray, MRI) truy cập mỗi quý một lần
+- Kho lưu trữ tin tức có thể viral trở lại
+- User-generated content cũ hơn 90 ngày
+- Báo cáo tài chính và audit data hàng quý
+
+---
+
+### S3 Glacier Flexible Retrieval
+
+Trước đây gọi là "S3 Glacier". Data retrieval **không instant** — bạn gửi retrieval request và chờ. Có 3 tốc độ retrieval:
+
+- **Expedited**: 1-5 phút (đắt nhất)
+- **Standard**: 3-5 giờ
+- **Bulk**: 5-12 giờ (rẻ nhất)
+
+**Đặc điểm:**
+- **Availability**: 99.99% (designed), 99.9% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: 90 ngày
+- **Min billable object size**: 40 KB
+- **Retrieval fee**: Per GB retrieved (khác nhau theo tốc độ)
+
+**Ưu điểm:**
+- Storage cost rất thấp
+- Linh hoạt trong retrieval — trả nhiều hơn để nhanh hơn, hoặc ít hơn nếu chờ được
+- Availability cao (99.99%)
+
+**Nhược điểm:**
+- Data **không truy cập được ngay** — phải gửi restore request
+- Retrieval mất từ phút đến giờ
+- Charge tối thiểu 90 ngày
+
+**Use cases:**
+- Data compliance hàng năm hoặc hồ sơ thuế
+- Raw footage video có thể cần edit lại
+- Bộ dữ liệu khoa học lưu trữ sau khi kết thúc nghiên cứu
+- Backup archives truy cập khoảng 1-2 lần/năm
+
+---
+
+### S3 Glacier Deep Archive
+
+Storage class có **chi phí thấp nhất** trên AWS. Thiết kế cho data bạn có thể không bao giờ truy cập lại — nhưng cần giữ vì lý do regulatory hoặc pháp lý. Retrieval mất **12-48 giờ**.
+
+Hai tùy chọn retrieval:
+- **Standard**: 12 giờ
+- **Bulk**: 48 giờ
+
+**Đặc điểm:**
+- **Availability**: 99.99% (designed), 99.9% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: 180 ngày
+- **Min billable object size**: 40 KB
+- **Retrieval fee**: Per GB retrieved
+
+**Ưu điểm:**
+- Storage rẻ nhất trên toàn bộ AWS (~$1/TB/tháng)
+- Thiết kế cho retention 7-10+ năm
+- Multi-AZ durability
+
+**Nhược điểm:**
+- 12-48 giờ để lấy data
+- Charge tối thiểu 180 ngày — dài nhất trong tất cả các class
+- Không thực tế cho data bạn có thể cần gấp
+
+**Use cases:**
+- Hồ sơ tài chính yêu cầu giữ 7+ năm
+- Hồ sơ y tế với yêu cầu retention dài hạn (HIPAA)
+- Data legal hold và e-discovery archives
+- Footage giám sát lưu trữ theo yêu cầu quy định
+
+---
+
+## 3. Intelligent-Tiering
+
+S3 Intelligent-Tiering là class đặc biệt — nó **tự động di chuyển objects** giữa các access tier dựa trên usage pattern. Bạn không cần đoán class nào tốt nhất; S3 monitor access và tối ưu chi phí cho bạn.
+
+### Cách hoạt động
+
+Khi bạn upload object vào Intelligent-Tiering, nó bắt đầu ở tier **Frequent Access**. Sau đó:
+
+1. Nếu không truy cập trong **30 ngày** → chuyển sang tier **Infrequent Access** (rẻ hơn)
+2. Nếu không truy cập trong **90 ngày** → chuyển sang tier **Archive Instant Access** (rẻ hơn nữa)
+3. Tùy chọn, bạn có thể bật:
+   - Tier **Archive Access** (90-730 ngày, tương đương Glacier Flexible Retrieval)
+   - Tier **Deep Archive Access** (180-730 ngày, tương đương Glacier Deep Archive)
+
+Khi bạn truy cập object, nó **tự động quay lại** Frequent Access — không cần restore request cho 3 tier đầu tiên.
+
+**Đặc điểm:**
+- **Availability**: 99.9% (designed), 99% SLA
+- **Availability Zones**: >= 3
+- **Min storage duration**: Không có
+- **Min billable object size**: Không có
+- **Retrieval fee**: Không có (cho tier Frequent, Infrequent, và Archive Instant)
+
+**Ưu điểm:**
+- Không mất retrieval fee cho các tier tự động
+- Không tốn operational overhead — hoàn toàn tự động
+- Không có minimum storage duration
+- Kết hợp lợi ích chi phí của nhiều class mà không cần lifecycle rules thủ công
+
+**Nhược điểm:**
+- **Monitoring fee** nhỏ hàng tháng per object (~$0.0025 per 1,000 objects)
+- Không lý tưởng cho object rất nhỏ — monitoring fee có thể vượt quá tiền tiết kiệm được
+- Các tier Archive tùy chọn cần restore request (phút đến giờ)
+
+**Use cases:**
+- Data lakes với query pattern không dự đoán được
+- Ứng dụng có access pattern thay đổi theo mùa
+- Migrate data từ on-premises lên S3 mà không biết access pattern tương lai
+- Shared datasets mà các team khác nhau truy cập với tần suất khác nhau
+
+---
+
+## S3 Lifecycle Rules
+
+Trong thực tế, bạn hiếm khi chọn một storage class rồi để mãi. Data thường **hot khi mới** và **cold theo thời gian**. **S3 Lifecycle Rules** cho phép bạn tự động chuyển đổi giữa các class dựa trên tuổi của object — ví dụ: chuyển data từ Standard sang Standard-IA sau 6 tháng, rồi sang Glacier sau 1 năm.
+
+Mình đã viết một bài riêng về lifecycle rules chi tiết — bao gồm ví dụ analytics pipeline thực tế với ước tính chi phí đầy đủ (tiết kiệm **84%** so với dùng toàn Standard):
+
+**[S3 Lifecycle Rules: Tự động tối ưu chi phí lưu trữ](/vi/posts/s3-lifecycle-rules)**
+
+---
+
+## Bảng so sánh
+
+| | Standard | Intelligent-Tiering | Standard-IA | One Zone-IA | Glacier Instant Retrieval | Glacier Flexible Retrieval | Glacier Deep Archive |
+|---|---|---|---|---|---|---|---|
+| **Durability** | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) | 99.999999999% (11 9's) |
+| **Availability** | 99.99% | 99.9% | 99.9% | 99.5% | 99.9% | 99.99% | 99.99% |
+| **Availability SLA** | 99.9% | 99% | 99% | 99% | 99% | 99.9% | 99.9% |
+| **AZs** | >= 3 | >= 3 | >= 3 | 1 | >= 3 | >= 3 | >= 3 |
+| **Min Storage Duration** | Không | Không | 30 ngày | 30 ngày | 90 ngày | 90 ngày | 180 ngày |
+| **Min Billable Object Size** | Không | Không | 128 KB | 128 KB | 128 KB | 40 KB | 40 KB |
+| **Retrieval Fee** | Không | Không | Per GB | Per GB | Per GB | Per GB | Per GB |
+
+---
+
+## Chọn class nào?
+
+Hướng dẫn nhanh:
+
+- **Truy cập thường xuyên (nhiều lần/tháng)?** → **S3 Standard**
+- **Truy cập ít nhưng cần instant access?** → **S3 Standard-IA** (multi-AZ) hoặc **One Zone-IA** (nếu data có thể tạo lại)
+- **Archive data, cần instant access khi cần?** → **Glacier Instant Retrieval**
+- **Archive data, chờ được vài phút/giờ?** → **Glacier Flexible Retrieval**
+- **Archive data, chờ được 12-48 giờ?** → **Glacier Deep Archive**
+- **Access pattern không dự đoán được?** → **Intelligent-Tiering**
+- **Access pattern rõ ràng, giảm dần theo thời gian?** → Kết hợp các class với **[S3 Lifecycle Rules](/vi/posts/s3-lifecycle-rules)**

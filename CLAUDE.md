@@ -25,6 +25,7 @@
 - Frontmatter fields: `title`, `date` (ISO format), `tags` (string array), `description`, `enableComment` (boolean)
 - Post filenames use kebab-case
 - Every post must exist in both `en/` and `vi/` directories
+- When creating a new blog post, write the Vietnamese version first (`content/vi/posts/`), finalize it, then create the English translation (`content/en/posts/`)
 - Available MDX components: `<Posts />`, `<Tags />`, `<Avatar />`, and feature-specific components registered in `src/mdx-components.tsx`
 
 # Code Style
