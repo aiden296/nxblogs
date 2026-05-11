@@ -1,0 +1,155 @@
+---
+title: 'S3 Deep Dive: Kiến trúc 3 lớp và ShardStore Engine'
+date: '2026-05-09'
+tags: ['Devops', 'AWS', 'System Design']
+enableComment: true
+---
+
+# S3 Deep Dive: Kiến trúc 3 lớp và ShardStore Engine
+
+> Hầu hết mọi người dùng S3 như một "chiếc hộp thần kỳ" — PUT object vào, GET object ra. Nhưng bên trong chiếc hộp đó là một hệ thống phân tán phục vụ hơn 150 triệu requests mỗi giây, lưu trữ hơn 400 nghìn tỷ objects trên hàng chục triệu ổ cứng.
+
+Bài viết này sẽ mở nắp chiếc hộp đó ra. Chúng ta sẽ đi từ nền tảng — object storage là gì và tại sao nó thắng ở cloud scale — rồi đi sâu vào kiến trúc 3 lớp của S3, storage engine ShardStore được viết bằng Rust, và cơ chế erasure coding giúp S3 đạt 11 nines durability với chi phí lưu trữ chỉ 1.8x.
+
+Nếu bạn chưa quen với các storage class của S3, hãy đọc [S3 Storage Classes: Chọn đúng class cho dữ liệu của bạn](/vi/posts/s3-storage-classes) trước.
+
+---
+
+## Object Storage vs Block Storage vs File Storage
+
+Trước khi đi vào S3, cần hiểu rõ tại sao object storage lại là lựa chọn cho cloud scale.
+
+Hãy tưởng tượng 3 cách để lưu trữ đồ đạc:
+
+- **Block Storage** giống **bãi đỗ xe có số** — bạn được giao ô số 42, muốn để gì vào đó tuỳ bạn. Nhanh, linh hoạt, nhưng bạn tự quản lý mọi thứ. Đây là cách EBS hoạt động — raw blocks cho databases và boot volumes.
+
+- **File Storage** giống **tủ hồ sơ có thư mục** — có cấu trúc phân cấp (folders), có tên file, nhiều người có thể mở cùng lúc. Đây là NFS, EFS — tốt cho shared file systems nhưng chậm dần khi lên hàng tỷ files.
+
+- **Object Storage** giống **dịch vụ gửi đồ chuyên nghiệp** — bạn đưa đồ kèm nhãn dán (metadata), họ cất vào kho và trả lại khi bạn đưa nhãn. Bạn không biết đồ nằm ở đâu trong kho, không sửa được một phần — muốn thay đổi thì gửi đồ mới hoàn toàn.
+
+![Block vs File vs Object Storage](/s3-storage-types-comparison.svg)
+
+**Tradeoff cốt lõi:** Object storage đánh đổi khả năng sửa đổi (immutable — phải replace cả object) và latency cao hơn (REST API qua HTTP) để đổi lấy khả năng scale gần như vô hạn, durability cực cao, và chi phí thấp nhất.
+
+| | Block (EBS) | File (EFS) | Object (S3) |
+|---|---|---|---|
+| Đơn vị | Block 4-64KB | File trong directory | Object trong bucket |
+| Namespace | Không | Phân cấp (folders) | **Flat** (slashes chỉ là convention) |
+| Mutability | Mutable | Mutable | **Immutable** (replace whole object) |
+| Access | iSCSI, FC | NFS, SMB | **REST API / HTTP** |
+| Scale | TB per volume | Chậm ở billions files | **Near-unlimited** |
+
+---
+
+## S3 ở quy mô lớn
+
+Để hiểu tại sao kiến trúc S3 phải phức tạp đến vậy, hãy nhìn vào những con số:
+
+- **400+ nghìn tỷ objects** được lưu trữ
+- **150 triệu requests/giây** ở peak
+- **>1 PB/s** peak traffic bandwidth
+- **Hàng chục triệu ổ cứng HDD** đang hoạt động
+- **350+ microservices** mỗi region
+- **11 nines durability** (99.999999999%)
+- **99.99% availability** target
+
+Ở quy mô này, mọi thứ bình thường đều trở thành vấn đề. Một bug xác suất 1 trên 1 tỷ sẽ xảy ra hàng trăm lần mỗi ngày. Một ổ cứng chết không phải "nếu" mà là "khi nào" — và câu trả lời là "liên tục".
+
+---
+
+## Kiến trúc 3 lớp
+
+S3 được chia thành 3 lớp rõ ràng, mỗi lớp có trách nhiệm riêng biệt:
+
+![S3 Three-Layer Architecture](/s3-three-layer-architecture.svg)
+
+---
+
+### Layer 1: Frontend — Cổng vào của S3
+
+Frontend layer là nơi request từ client đi vào. Nó xử lý authentication, authorization, validation, và routing.
+
+**Multi-value DNS** là trick đầu tiên. Khi bạn resolve `s3.amazonaws.com`, DNS trả về **nhiều IP addresses** thay vì một. Client tự spread requests qua nhiều frontend servers — đây là load balancing ở tầng DNS, không cần load balancer trung gian nào.
+
+**REST API Servers** handle các operations quen thuộc: PUT, GET, LIST, DELETE. Mỗi request được validate, authenticated (SigV4), và route tới đúng backend.
+
+**AWS Common Runtime (CRT)** là thư viện client-side mà AWS cung cấp, tích hợp sẵn:
+- **Multipart upload** — tự chia file lớn thành parts, upload song song, retry chỉ part bị fail
+- **Range GET** — download song song nhiều byte ranges của cùng một object
+- **Retry algorithms** — exponential backoff với jitter
+- **Checksum validation** — verify integrity end-to-end
+
+Multipart upload là **bắt buộc** cho files >5GB và **khuyến nghị** cho files >100MB. Với file 5GB chia thành 50 parts x 100MB, bạn có thể upload 50 parts song song — tận dụng tối đa bandwidth.
+
+---
+
+### Layer 2: Index — Bộ não của S3
+
+Index layer là thành phần quan trọng nhất. Nhiệm vụ của nó: **map object key tới vị trí vật lý** của data trên disk. Giống như **inode table** trong UNIX file system — bạn cần tên file, inode cho bạn biết data nằm ở block nào trên disk.
+
+Khi bạn PUT `reports/2024/q1/revenue.pdf`, Index layer không lưu data — nó chỉ ghi nhận rằng "object này gồm các shards A, B, C,... nằm trên các drives X, Y, Z...". Khi bạn GET, Index tra cứu và chỉ cho Storage layer biết cần đọc từ đâu.
+
+**Lexicographical partitioning** là cơ chế phân chia tải. Index chia key space thành các partitions dựa trên prefix:
+
+- `images/` → Partition A
+- `logs/` → Partition B  
+- `videos/` → Partition C
+
+Mỗi partition có **throughput độc lập**: 3,500 PUT/s và 5,500 GET/s. Có 3 prefixes? Throughput x3. Có 100 prefixes? Throughput x100. **Throughput scale tuyến tính theo số prefixes.**
+
+Khi một partition bị quá tải, S3 phát hiện qua monitoring liên tục và **tự động split** partition đó thành nhiều partition nhỏ hơn. Ví dụ: `logs/2024/` quá hot → tự chia thành `logs/2024/01-06/` và `logs/2024/07-12/`. Quá trình này hoàn toàn automatic và transparent.
+
+---
+
+### Layer 3: Storage — Trái tim của S3
+
+Storage layer là nơi bytes thật sự sống. Data được chia thành **shards** (chunks), spread qua nhiều drives và nhiều **Availability Zones**.
+
+S3 sử dụng mix giữa **HDD và SSD**:
+- **HDD** cho bulk data — rẻ, dung lượng lớn, phù hợp cho exabyte scale
+- **SSD** cho hot path — metadata, small objects, data cần low latency
+
+Tại sao HDD? Vì ở quy mô exabyte, chi phí là yếu tố quyết định. Giá HDD per GB rẻ hơn SSD khoảng 5-10 lần. Với hàng chục triệu ổ cứng, chênh lệch này trở thành hàng tỷ đô la.
+
+Nhưng HDD có bottleneck vật lý: seek time ~8-9ms, rotational delay ~4ms. Một HDD chỉ đạt khoảng **32 MB/s random I/O** — con số này gần như không đổi trong 30 năm qua. Để vượt qua giới hạn này, S3 thiết kế ShardStore tối ưu cho **sequential I/O** thay vì random I/O.
+
+## Erasure Coding: 5-of-9 Scheme
+
+Khi bạn PUT một object lên S3, data không đơn giản được copy 3 lần. S3 sử dụng **erasure coding** — một kỹ thuật mã hoá cho phép reconstruct data từ một subset của các fragments.
+
+### Cách hoạt động
+
+Object được split thành **5 data shards** và encode thêm **4 parity shards**, tổng cộng **9 shards**. Chỉ cần **bất kỳ 5 trong 9 shards** là đủ để reconstruct lại object gốc.
+
+9 shards này được phân tán qua **ít nhất 3 Availability Zones**, trên các ổ cứng khác nhau, các rack khác nhau.
+
+![Erasure Coding 5-of-9 Scheme](/s3-erasure-coding-5-of-9.svg)
+
+### So sánh với replication
+
+| | 3x Replication | 5-of-9 Erasure Coding |
+|---|---|---|
+| Object 50MB → stored | 150 MB (3 copies) | 90 MB (9 shards x 10MB) |
+| Storage overhead | **3.0x** | **1.8x** |
+| Tolerate failures | 2 | **4** |
+| Read sources | 3 | **9** |
+| CPU overhead | Thấp | Cao hơn (encode/decode) |
+
+Erasure coding cho phép S3 **tiết kiệm 40% storage** so với 3x replication, đồng thời **tolerate nhiều failures hơn** (4 vs 2). Ở exabyte scale, 40% savings là hàng tỷ đô la.
+
+### Hedge requests — giảm tail latency
+
+Một lợi ích phụ thú vị: vì có 9 sources để đọc (chỉ cần 5), S3 có thể dùng **hedge requests**. Khi gửi 5 requests đọc song song, nếu một request nào vượt p95 latency, S3 gửi thêm request thứ 6 tới shard khác. Shard nào trả về trước thì dùng — giảm đáng kể tail latency.
+
+Kỹ thuật này được mô tả trong paper "The Tail at Scale" của Google — và S3 áp dụng nó hiệu quả nhờ có nhiều redundant shards.
+
+---
+
+## Kết
+
+S3 không phải là một "file server trên cloud". Đó là một hệ thống phân tán được engineer ở mức rất sâu — từ cách DNS trả về nhiều IPs, cách Index partition data theo prefix, cách ShardStore tối ưu cho HDD bằng append-only writes, đến cách erasure coding 5-of-9 cân bằng giữa durability và cost.
+
+Hiểu kiến trúc này giúp bạn:
+- **Design prefix tốt hơn** — vì bạn biết prefix ảnh hưởng trực tiếp tới partitioning và throughput
+- **Chọn upload strategy đúng** — multipart upload không chỉ là "best practice" mà là cách tận dụng parallelism ở cả 3 layers
+- **Debug performance issues** — 503 SlowDown không phải lỗi ngẫu nhiên mà là signal từ Index layer rằng partition đang quá tải

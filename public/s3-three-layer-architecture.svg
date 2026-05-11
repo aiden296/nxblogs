@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 720" font-family="system-ui, -apple-system, sans-serif">
+  <text x="450" y="32" text-anchor="middle" font-size="22" font-weight="700" fill="#1e293b">S3 Three-Layer Architecture</text>
+  <text x="450" y="54" text-anchor="middle" font-size="12" fill="#94a3b8">How a PUT/GET request flows through S3 internals</text>
+
+  <!-- Client -->
+  <rect x="310" y="72" width="280" height="50" rx="10" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2"/>
+  <text x="450" y="102" text-anchor="middle" font-size="15" font-weight="600" fill="#475569">Client (AWS SDK / CRT)</text>
+
+  <!-- Arrow Client → Frontend (down) -->
+  <line x1="420" y1="122" x2="420" y2="157" stroke="#64748b" stroke-width="1.5"/>
+  <polygon points="414,152 426,152 420,162" fill="#64748b"/>
+  <text x="400" y="142" text-anchor="end" font-size="10" fill="#64748b">PUT /GET</text>
+
+  <!-- Arrow Frontend → Client (up) -->
+  <line x1="480" y1="162" x2="480" y2="127" stroke="#64748b" stroke-width="1.5"/>
+  <polygon points="474,132 486,132 480,122" fill="#64748b"/>
+  <text x="500" y="142" font-size="10" fill="#64748b">Response</text>
+
+  <!-- Layer 1: Frontend -->
+  <rect x="60" y="162" width="780" height="150" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="60" y="162" width="780" height="32" rx="12" fill="#3b82f6"/>
+  <rect x="60" y="180" width="780" height="14" fill="#3b82f6"/>
+  <text x="450" y="183" text-anchor="middle" font-size="14" font-weight="700" fill="white">Layer 1: Frontend</text>
+
+  <rect x="85" y="205" width="220" height="90" rx="8" fill="white" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="195" y="228" text-anchor="middle" font-size="13" font-weight="600" fill="#1e40af">Multi-Value DNS</text>
+  <text x="195" y="248" text-anchor="middle" font-size="11" fill="#64748b">s3.amazonaws.com resolves</text>
+  <text x="195" y="264" text-anchor="middle" font-size="11" fill="#64748b">to multiple IPs for load</text>
+  <text x="195" y="280" text-anchor="middle" font-size="11" fill="#64748b">spreading across frontends</text>
+
+  <rect x="325" y="205" width="250" height="90" rx="8" fill="white" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="450" y="228" text-anchor="middle" font-size="13" font-weight="600" fill="#1e40af">REST API Servers</text>
+  <text x="450" y="248" text-anchor="middle" font-size="11" fill="#64748b">Authentication, authorization</text>
+  <text x="450" y="264" text-anchor="middle" font-size="11" fill="#64748b">Request validation &amp; routing</text>
+  <text x="450" y="280" text-anchor="middle" font-size="11" fill="#64748b">PUT / GET / LIST / DELETE</text>
+
+  <rect x="595" y="205" width="220" height="90" rx="8" fill="white" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="705" y="228" text-anchor="middle" font-size="13" font-weight="600" fill="#1e40af">AWS CRT Library</text>
+  <text x="705" y="248" text-anchor="middle" font-size="11" fill="#64748b">Multipart upload, range GET</text>
+  <text x="705" y="264" text-anchor="middle" font-size="11" fill="#64748b">Retry algorithms</text>
+  <text x="705" y="280" text-anchor="middle" font-size="11" fill="#64748b">Checksum validation</text>
+
+  <!-- Arrow Frontend → Index (down) -->
+  <line x1="420" y1="312" x2="420" y2="351" stroke="#64748b" stroke-width="1.5"/>
+  <polygon points="414,346 426,346 420,356" fill="#64748b"/>
+  <text x="400" y="336" text-anchor="end" font-size="10" fill="#64748b">key lookup</text>
+
+  <!-- Arrow Index → Frontend (up) -->
+  <line x1="480" y1="356" x2="480" y2="317" stroke="#64748b" stroke-width="1.5"/>
+  <polygon points="474,322 486,322 480,312" fill="#64748b"/>
+  <text x="500" y="336" font-size="10" fill="#64748b">location</text>
+
+  <!-- Layer 2: Index -->
+  <rect x="60" y="356" width="780" height="150" rx="12" fill="#f0fdf4" stroke="#22c55e" stroke-width="2"/>
+  <rect x="60" y="356" width="780" height="32" rx="12" fill="#22c55e"/>
+  <rect x="60" y="374" width="780" height="14" fill="#22c55e"/>
+  <text x="450" y="377" text-anchor="middle" font-size="14" font-weight="700" fill="white">Layer 2: Index (Brain of S3)</text>
+
+  <rect x="85" y="400" width="220" height="90" rx="8" fill="white" stroke="#86efac" stroke-width="1.5"/>
+  <text x="195" y="423" text-anchor="middle" font-size="13" font-weight="600" fill="#15803d">Key → Location Map</text>
+  <text x="195" y="443" text-anchor="middle" font-size="11" fill="#64748b">Maps object key to physical</text>
+  <text x="195" y="459" text-anchor="middle" font-size="11" fill="#64748b">shard locations (like UNIX</text>
+  <text x="195" y="475" text-anchor="middle" font-size="11" fill="#64748b">inode table)</text>
+
+  <rect x="325" y="400" width="250" height="90" rx="8" fill="white" stroke="#86efac" stroke-width="1.5"/>
+  <text x="450" y="423" text-anchor="middle" font-size="13" font-weight="600" fill="#15803d">Prefix Partitioning</text>
+  <text x="450" y="443" text-anchor="middle" font-size="11" fill="#64748b">Lexicographical partitioning</text>
+  <text x="450" y="459" text-anchor="middle" font-size="11" fill="#64748b">Auto-split hot partitions</text>
+  <text x="450" y="475" text-anchor="middle" font-size="11" fill="#64748b">Hot key migration</text>
+
+  <rect x="595" y="400" width="220" height="90" rx="8" fill="white" stroke="#86efac" stroke-width="1.5"/>
+  <text x="705" y="423" text-anchor="middle" font-size="13" font-weight="600" fill="#15803d">Monitoring</text>
+  <text x="705" y="443" text-anchor="middle" font-size="11" fill="#64748b">Detect hot partitions</text>
+  <text x="705" y="459" text-anchor="middle" font-size="11" fill="#64748b">Continuous rebalancing</text>
+  <text x="705" y="475" text-anchor="middle" font-size="11" fill="#64748b">Independent prefix throughput</text>
+
+  <!-- Arrow Index → Storage (down) -->
+  <line x1="420" y1="506" x2="420" y2="545" stroke="#64748b" stroke-width="1.5"/>
+  <polygon points="414,540 426,540 420,550" fill="#64748b"/>
+  <text x="400" y="530" text-anchor="end" font-size="10" fill="#64748b">read/write</text>
+
+  <!-- Arrow Storage → Index (up) -->
+  <line x1="480" y1="550" x2="480" y2="511" stroke="#64748b" stroke-width="1.5"/>
+  <polygon points="474,516 486,516 480,506" fill="#64748b"/>
+  <text x="500" y="530" font-size="10" fill="#64748b">shards</text>
+
+  <!-- Layer 3: Storage -->
+  <rect x="60" y="550" width="780" height="150" rx="12" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+  <rect x="60" y="550" width="780" height="32" rx="12" fill="#f59e0b"/>
+  <rect x="60" y="568" width="780" height="14" fill="#f59e0b"/>
+  <text x="450" y="571" text-anchor="middle" font-size="14" font-weight="700" fill="white">Layer 3: Storage (Heart of S3)</text>
+
+  <rect x="85" y="594" width="160" height="90" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="165" y="617" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">ShardStore</text>
+  <text x="165" y="637" text-anchor="middle" font-size="11" fill="#64748b">Rust engine, LSM tree</text>
+  <text x="165" y="653" text-anchor="middle" font-size="11" fill="#64748b">Append-only writes</text>
+  <text x="165" y="669" text-anchor="middle" font-size="11" fill="#64748b">~40K lines of code</text>
+
+  <rect x="263" y="594" width="160" height="90" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="343" y="617" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">Erasure Coding</text>
+  <text x="343" y="637" text-anchor="middle" font-size="11" fill="#64748b">5 data + 4 parity</text>
+  <text x="343" y="653" text-anchor="middle" font-size="11" fill="#64748b">1.8x overhead</text>
+  <text x="343" y="669" text-anchor="middle" font-size="11" fill="#64748b">Tolerate 4 failures</text>
+
+  <rect x="441" y="594" width="180" height="90" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="531" y="617" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">HDD + SSD Mix</text>
+  <text x="531" y="637" text-anchor="middle" font-size="11" fill="#64748b">HDD: bulk data (cheap)</text>
+  <text x="531" y="653" text-anchor="middle" font-size="11" fill="#64748b">SSD: metadata, hot path</text>
+  <text x="531" y="669" text-anchor="middle" font-size="11" fill="#64748b">Tens of millions of drives</text>
+
+  <rect x="639" y="594" width="180" height="90" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="729" y="617" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">Cross-AZ Spread</text>
+  <text x="729" y="637" text-anchor="middle" font-size="11" fill="#64748b">Shards across >= 3 AZs</text>
+  <text x="729" y="653" text-anchor="middle" font-size="11" fill="#64748b">11 nines durability</text>
+  <text x="729" y="669" text-anchor="middle" font-size="11" fill="#64748b">99.99% availability</text>
+</svg>

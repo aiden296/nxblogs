@@ -27,6 +27,7 @@
 - Every post must exist in both `en/` and `vi/` directories
 - When creating a new blog post, write the Vietnamese version first (`content/vi/posts/`), finalize it, then create the English translation (`content/en/posts/`)
 - Available MDX components: `<Posts />`, `<Tags />`, `<Avatar />`, and feature-specific components registered in `src/mdx-components.tsx`
+- When mentioning a technical concept or term (e.g., data shards, parity shards, erasure coding), always briefly explain what it is so the reader can understand without prior knowledge
 
 # Code Style
 
@@ -65,6 +66,7 @@
 - Save SVG files to the `public/` directory
 - Reference SVGs using standard markdown or MDX image syntax
 - All text content inside SVG files must be written in English
+- For arrows in SVG, use inline `<polygon>` elements instead of `<marker>` defs — markers render inconsistently across browsers. Draw arrowheads as small triangles at the line endpoint pointing in the correct direction (e.g., right-pointing: `points="x1,y-6 x1,y+6 x1+10,y"`, down-pointing: `points="x-6,y1 x+6,y1 x,y1+10"`)
 
 # Git Conventions
 

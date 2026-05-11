@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 520" font-family="system-ui, -apple-system, sans-serif">
+  <text x="490" y="35" text-anchor="middle" font-size="22" font-weight="700" fill="#1e293b">Block vs File vs Object Storage</text>
+
+  <!-- Block Storage -->
+  <rect x="20" y="60" width="300" height="440" rx="12" fill="#fef2f2" stroke="#ef4444" stroke-width="2"/>
+  <text x="170" y="92" text-anchor="middle" font-size="17" font-weight="700" fill="#dc2626">Block Storage</text>
+  <text x="170" y="112" text-anchor="middle" font-size="12" fill="#64748b">e.g. AWS EBS, SAN</text>
+
+  <rect x="40" y="130" width="260" height="55" rx="8" fill="white" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="56" y="152" font-size="12" font-weight="600" fill="#991b1b">Unit</text>
+  <text x="56" y="172" font-size="11" fill="#64748b">Fixed-size blocks (4KB - 64KB)</text>
+
+  <rect x="40" y="198" width="260" height="55" rx="8" fill="white" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="56" y="220" font-size="12" font-weight="600" fill="#991b1b">Hierarchy</text>
+  <text x="56" y="240" font-size="11" fill="#64748b">No hierarchy — raw blocks</text>
+
+  <rect x="40" y="266" width="260" height="55" rx="8" fill="white" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="56" y="288" font-size="12" font-weight="600" fill="#991b1b">Mutability</text>
+  <text x="56" y="308" font-size="11" fill="#64748b">Mutable — modify in place</text>
+
+  <rect x="40" y="334" width="260" height="55" rx="8" fill="white" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="56" y="356" font-size="12" font-weight="600" fill="#991b1b">Access Protocol</text>
+  <text x="56" y="376" font-size="11" fill="#64748b">iSCSI, Fibre Channel</text>
+
+  <rect x="40" y="402" width="260" height="80" rx="8" fill="white" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="56" y="424" font-size="12" font-weight="600" fill="#991b1b">Best For</text>
+  <text x="56" y="444" font-size="11" fill="#64748b">Databases, boot volumes,</text>
+  <text x="56" y="460" font-size="11" fill="#64748b">high-IOPS workloads</text>
+  <text x="56" y="476" font-size="10" fill="#94a3b8">Scale: TB-level per volume</text>
+
+  <!-- File Storage -->
+  <rect x="340" y="60" width="300" height="440" rx="12" fill="#fffbeb" stroke="#f59e0b" stroke-width="2"/>
+  <text x="490" y="92" text-anchor="middle" font-size="17" font-weight="700" fill="#d97706">File Storage</text>
+  <text x="490" y="112" text-anchor="middle" font-size="12" fill="#64748b">e.g. AWS EFS, NFS, SMB</text>
+
+  <rect x="360" y="130" width="260" height="55" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="376" y="152" font-size="12" font-weight="600" fill="#92400e">Unit</text>
+  <text x="376" y="172" font-size="11" fill="#64748b">Files in directory tree</text>
+
+  <rect x="360" y="198" width="260" height="55" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="376" y="220" font-size="12" font-weight="600" fill="#92400e">Hierarchy</text>
+  <text x="376" y="240" font-size="11" fill="#64748b">Hierarchical — folders &amp; paths</text>
+
+  <rect x="360" y="266" width="260" height="55" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="376" y="288" font-size="12" font-weight="600" fill="#92400e">Mutability</text>
+  <text x="376" y="308" font-size="11" fill="#64748b">Mutable — edit, append, seek</text>
+
+  <rect x="360" y="334" width="260" height="55" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="376" y="356" font-size="12" font-weight="600" fill="#92400e">Access Protocol</text>
+  <text x="376" y="376" font-size="11" fill="#64748b">NFS, SMB, POSIX</text>
+
+  <rect x="360" y="402" width="260" height="80" rx="8" fill="white" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="376" y="424" font-size="12" font-weight="600" fill="#92400e">Best For</text>
+  <text x="376" y="444" font-size="11" fill="#64748b">Shared file systems, CMS,</text>
+  <text x="376" y="460" font-size="11" fill="#64748b">home directories</text>
+  <text x="376" y="476" font-size="10" fill="#94a3b8">Scale: slows at billions of files</text>
+
+  <!-- Object Storage -->
+  <rect x="660" y="60" width="300" height="440" rx="12" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+  <text x="810" y="92" text-anchor="middle" font-size="17" font-weight="700" fill="#1d4ed8">Object Storage</text>
+  <text x="810" y="112" text-anchor="middle" font-size="12" fill="#64748b">e.g. AWS S3, GCS</text>
+
+  <rect x="680" y="130" width="260" height="55" rx="8" fill="white" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="696" y="152" font-size="12" font-weight="600" fill="#1e40af">Unit</text>
+  <text x="696" y="172" font-size="11" fill="#64748b">Objects (data + metadata + key)</text>
+
+  <rect x="680" y="198" width="260" height="55" rx="8" fill="white" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="696" y="220" font-size="12" font-weight="600" fill="#1e40af">Hierarchy</text>
+  <text x="696" y="240" font-size="11" fill="#64748b">Flat namespace — no real folders</text>
+
+  <rect x="680" y="266" width="260" height="55" rx="8" fill="white" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="696" y="288" font-size="12" font-weight="600" fill="#1e40af">Mutability</text>
+  <text x="696" y="308" font-size="11" fill="#64748b">Immutable — replace whole object</text>
+
+  <rect x="680" y="334" width="260" height="55" rx="8" fill="white" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="696" y="356" font-size="12" font-weight="600" fill="#1e40af">Access Protocol</text>
+  <text x="696" y="376" font-size="11" fill="#64748b">REST API / HTTP(S)</text>
+
+  <rect x="680" y="402" width="260" height="80" rx="8" fill="white" stroke="#93c5fd" stroke-width="1.5"/>
+  <text x="696" y="424" font-size="12" font-weight="600" fill="#1e40af">Best For</text>
+  <text x="696" y="444" font-size="11" fill="#64748b">Data lakes, backups, media,</text>
+  <text x="696" y="460" font-size="11" fill="#64748b">static assets, analytics</text>
+  <text x="696" y="476" font-size="10" fill="#94a3b8">Scale: near-unlimited (400T+ objects)</text>
+</svg>

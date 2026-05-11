@@ -1,0 +1,155 @@
+---
+title: 'S3 Deep Dive: Three-Layer Architecture and ShardStore Engine'
+date: '2026-05-09'
+tags: ['Devops', 'AWS', 'System Design']
+enableComment: true
+---
+
+# S3 Deep Dive: Three-Layer Architecture and ShardStore Engine
+
+> Most people use S3 like a magic box — PUT an object in, GET an object out. But inside that box is a distributed system serving over 150 million requests per second, storing over 400 trillion objects across tens of millions of hard drives.
+
+This post opens the lid. We'll start from the foundations — what object storage is and why it wins at cloud scale — then dive deep into S3's three-layer architecture, the Rust-based ShardStore storage engine, and the erasure coding scheme that gives S3 eleven nines of durability at just 1.8x storage overhead.
+
+If you're not familiar with S3's storage classes, start with [S3 Storage Classes: Choosing the Right One for Your Data](/posts/s3-storage-classes).
+
+---
+
+## Object Storage vs Block Storage vs File Storage
+
+Before diving into S3, let's understand why object storage is the choice for cloud scale.
+
+Think of three ways to store things:
+
+- **Block Storage** is like **a numbered parking spot** — you get spot #42, you decide what goes there. Fast and flexible, but you manage everything yourself. This is how EBS works — raw blocks for databases and boot volumes.
+
+- **File Storage** is like **a filing cabinet with folders** — hierarchical structure, file names, multiple people can access simultaneously. This is NFS, EFS — great for shared file systems but slows down at billions of files.
+
+- **Object Storage** is like **a professional storage service** — you hand over your stuff with a label (metadata), they store it in a warehouse and return it when you show the label. You don't know where it sits in the warehouse, you can't modify part of it — to change something, you send an entirely new item.
+
+![Block vs File vs Object Storage](/s3-storage-types-comparison.svg)
+
+**The core tradeoff:** Object storage trades mutability (immutable — must replace the whole object) and higher latency (REST API over HTTP) for near-unlimited scalability, extreme durability, and the lowest cost.
+
+| | Block (EBS) | File (EFS) | Object (S3) |
+|---|---|---|---|
+| Unit | 4-64KB blocks | Files in directories | Objects in buckets |
+| Namespace | None | Hierarchical (folders) | **Flat** (slashes are just convention) |
+| Mutability | Mutable | Mutable | **Immutable** (replace whole object) |
+| Access | iSCSI, FC | NFS, SMB | **REST API / HTTP** |
+| Scale | TB per volume | Slows at billions of files | **Near-unlimited** |
+
+---
+
+## S3 at Scale
+
+To understand why S3's architecture has to be this complex, look at the numbers:
+
+- **400+ trillion objects** stored
+- **150 million requests/second** at peak
+- **>1 PB/s** peak traffic bandwidth
+- **Tens of millions of HDDs** in operation
+- **350+ microservices** per region
+- **11 nines durability** (99.999999999%)
+- **99.99% availability** target
+
+At this scale, everything ordinary becomes a problem. A bug with a one-in-a-billion probability will occur hundreds of times per day. A hard drive dying isn't "if" but "when" — and the answer is "constantly."
+
+---
+
+## Three-Layer Architecture
+
+S3 is divided into three distinct layers, each with its own clear responsibility:
+
+![S3 Three-Layer Architecture](/s3-three-layer-architecture.svg)
+
+---
+
+### Layer 1: Frontend — The Gateway
+
+The Frontend layer is where client requests enter. It handles authentication, authorization, validation, and routing.
+
+**Multi-value DNS** is the first trick. When you resolve `s3.amazonaws.com`, DNS returns **multiple IP addresses** instead of one. The client spreads requests across multiple frontend servers — this is DNS-level load balancing with no intermediate load balancer.
+
+**REST API Servers** handle the familiar operations: PUT, GET, LIST, DELETE. Each request is validated, authenticated (SigV4), and routed to the right backend.
+
+**AWS Common Runtime (CRT)** is a client-side library that AWS provides, with built-in:
+- **Multipart upload** — automatically splits large files into parts, uploads in parallel, retries only failed parts
+- **Range GET** — downloads multiple byte ranges of the same object in parallel
+- **Retry algorithms** — exponential backoff with jitter
+- **Checksum validation** — end-to-end integrity verification
+
+Multipart upload is **required** for files >5GB and **recommended** for files >100MB. With a 5GB file split into 50 parts x 100MB, you can upload 50 parts in parallel — maximizing bandwidth utilization.
+
+---
+
+### Layer 2: Index — The Brain
+
+The Index layer is the most critical component. Its job: **map object keys to physical data locations** on disk. Like an **inode table** in a UNIX file system — you need a filename, the inode tells you which blocks hold the data on disk.
+
+When you PUT `reports/2024/q1/revenue.pdf`, the Index layer doesn't store the data — it records that "this object consists of shards A, B, C,... located on drives X, Y, Z..." When you GET, the Index looks up the locations and tells the Storage layer where to read from.
+
+**Lexicographical partitioning** is how load is distributed. The Index divides the key space into partitions based on prefix:
+
+- `images/` → Partition A
+- `logs/` → Partition B
+- `videos/` → Partition C
+
+Each partition has **independent throughput**: 3,500 PUT/s and 5,500 GET/s. Three prefixes? 3x throughput. A hundred prefixes? 100x throughput. **Throughput scales linearly with the number of prefixes.**
+
+When a partition becomes overloaded, S3 detects it through continuous monitoring and **automatically splits** it into smaller partitions. For example: `logs/2024/` gets too hot → automatically split into `logs/2024/01-06/` and `logs/2024/07-12/`. This process is fully automatic and transparent.
+
+---
+
+### Layer 3: Storage — The Heart
+
+The Storage layer is where bytes actually live. Data is split into **shards** (chunks), spread across multiple drives and multiple **Availability Zones**.
+
+S3 uses a mix of **HDD and SSD**:
+- **HDD** for bulk data — cheap, high capacity, suited for exabyte scale
+- **SSD** for the hot path — metadata, small objects, low-latency data
+
+Why HDD? Because at exabyte scale, cost is the deciding factor. HDD cost per GB is 5-10x cheaper than SSD. With tens of millions of drives, this difference amounts to billions of dollars.
+
+But HDD has a physical bottleneck: seek time ~8-9ms, rotational delay ~4ms. A single HDD can only achieve about **32 MB/s random I/O** — a number that hasn't changed in 30 years. To overcome this limitation, S3 designed ShardStore to optimize for **sequential I/O** instead of random I/O.
+
+## Erasure Coding: 5-of-9 Scheme
+
+When you PUT an object to S3, the data isn't simply copied three times. S3 uses **erasure coding** — an encoding technique that allows reconstructing data from a subset of fragments.
+
+### How it works
+
+The object is split into **5 data shards** and encoded into **4 additional parity shards**, for a total of **9 shards**. **Any 5 of the 9 shards** are sufficient to reconstruct the original object.
+
+These 9 shards are distributed across **at least 3 Availability Zones**, on different drives, in different racks.
+
+![Erasure Coding 5-of-9 Scheme](/s3-erasure-coding-5-of-9.svg)
+
+### Comparison with replication
+
+| | 3x Replication | 5-of-9 Erasure Coding |
+|---|---|---|
+| 50MB object → stored | 150 MB (3 copies) | 90 MB (9 shards x 10MB) |
+| Storage overhead | **3.0x** | **1.8x** |
+| Tolerate failures | 2 | **4** |
+| Read sources | 3 | **9** |
+| CPU overhead | Low | Higher (encode/decode) |
+
+Erasure coding lets S3 **save 40% on storage** compared to 3x replication, while **tolerating more failures** (4 vs 2). At exabyte scale, 40% savings is billions of dollars.
+
+### Hedge requests — reducing tail latency
+
+An interesting side benefit: since there are 9 sources to read from (only 5 needed), S3 can use **hedge requests**. When sending 5 read requests in parallel, if any request exceeds p95 latency, S3 sends a 6th request to a different shard. Whichever shard responds first is used — significantly reducing tail latency.
+
+This technique is described in Google's "The Tail at Scale" paper — and S3 leverages it effectively thanks to its redundant shards.
+
+---
+
+## Conclusion
+
+S3 isn't a "file server in the cloud." It's a distributed system engineered at a very deep level — from how DNS returns multiple IPs, how the Index partitions data by prefix, how ShardStore optimizes for HDD with append-only writes, to how 5-of-9 erasure coding balances durability and cost.
+
+Understanding this architecture helps you:
+- **Design better prefixes** — because you know prefixes directly affect partitioning and throughput
+- **Choose the right upload strategy** — multipart upload isn't just a "best practice," it's how you leverage parallelism across all 3 layers
+- **Debug performance issues** — 503 SlowDown isn't a random error but a signal from the Index layer that a partition is overloaded
