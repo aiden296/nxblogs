@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="900" height="400" fill="#f9fafb" rx="8"/>
+
+  <text x="450" y="32" text-anchor="middle" font-size="18" font-weight="700" fill="#1e293b">Decoding: Recovering Lost Shards</text>
+
+  <!-- STAGE 1: Received fragments -->
+  <text x="110" y="62" text-anchor="middle" font-size="13" font-weight="700" fill="#6366f1">Received Fragments</text>
+
+  <!-- d1 - OK -->
+  <rect x="30" y="80" width="55" height="34" fill="#dbeafe" rx="5" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="57" y="101" text-anchor="middle" font-size="13" fill="#3b82f6" font-weight="600">d1 &#10003;</text>
+
+  <!-- d2 - LOST -->
+  <rect x="30" y="120" width="55" height="34" fill="#fef2f2" rx="5" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="57" y="141" text-anchor="middle" font-size="13" fill="#ef4444" font-weight="600">d2 &#10007;</text>
+  <line x1="32" y1="137" x2="83" y2="137" stroke="#ef4444" stroke-width="2"/>
+
+  <!-- d3 - OK -->
+  <rect x="30" y="160" width="55" height="34" fill="#dbeafe" rx="5" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="57" y="181" text-anchor="middle" font-size="13" fill="#3b82f6" font-weight="600">d3 &#10003;</text>
+
+  <!-- d4 - OK -->
+  <rect x="30" y="200" width="55" height="34" fill="#dbeafe" rx="5" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="57" y="221" text-anchor="middle" font-size="13" fill="#3b82f6" font-weight="600">d4 &#10003;</text>
+
+  <!-- p1 - LOST -->
+  <rect x="30" y="244" width="55" height="34" fill="#fef2f2" rx="5" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="57" y="265" text-anchor="middle" font-size="13" fill="#ef4444" font-weight="600">p1 &#10007;</text>
+  <line x1="32" y1="261" x2="83" y2="261" stroke="#ef4444" stroke-width="2"/>
+
+  <!-- p2 - OK -->
+  <rect x="30" y="284" width="55" height="34" fill="#fef3c7" rx="5" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="57" y="305" text-anchor="middle" font-size="13" fill="#f59e0b" font-weight="600">p2 &#10003;</text>
+
+  <text x="110" y="340" text-anchor="middle" font-size="11" fill="#ef4444" font-weight="600">Lost: d2 and p1</text>
+
+  <!-- Arrow from stage 1 to stage 2 -->
+  <line x1="128" y1="190" x2="178" y2="190" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="178,184 178,196 190,190" fill="#94a3b8"/>
+
+  <!-- STAGE 2: Select surviving rows -->
+  <text x="370" y="62" text-anchor="middle" font-size="13" font-weight="700" fill="#6366f1">Select Surviving Rows</text>
+
+  <!-- Full 6x4 matrix with crossed out rows -->
+  <text x="240" y="82" font-size="10" fill="#64748b">6x4 encoding matrix:</text>
+
+  <!-- Row d1 - keep -->
+  <rect x="200" y="90" width="130" height="22" fill="#dbeafe" rx="2"/>
+  <text x="220" y="106" font-size="11" fill="#3b82f6">1  0  0  0</text>
+  <text x="340" y="106" font-size="10" fill="#3b82f6">d1</text>
+
+  <!-- Row d2 - crossed out -->
+  <rect x="200" y="114" width="130" height="22" fill="#fef2f2" rx="2" opacity="0.5"/>
+  <text x="220" y="130" font-size="11" fill="#ef4444" opacity="0.4">0  1  0  0</text>
+  <text x="340" y="130" font-size="10" fill="#ef4444">d2</text>
+  <line x1="200" y1="125" x2="330" y2="125" stroke="#ef4444" stroke-width="2"/>
+
+  <!-- Row d3 - keep -->
+  <rect x="200" y="138" width="130" height="22" fill="#dbeafe" rx="2"/>
+  <text x="220" y="154" font-size="11" fill="#3b82f6">0  0  1  0</text>
+  <text x="340" y="154" font-size="10" fill="#3b82f6">d3</text>
+
+  <!-- Row d4 - keep -->
+  <rect x="200" y="162" width="130" height="22" fill="#dbeafe" rx="2"/>
+  <text x="220" y="178" font-size="11" fill="#3b82f6">0  0  0  1</text>
+  <text x="340" y="178" font-size="10" fill="#3b82f6">d4</text>
+
+  <!-- Row p1 - crossed out -->
+  <rect x="200" y="186" width="130" height="22" fill="#fef2f2" rx="2" opacity="0.5"/>
+  <text x="220" y="202" font-size="11" fill="#ef4444" opacity="0.4">1  2 -1  4</text>
+  <text x="340" y="202" font-size="10" fill="#ef4444">p1</text>
+  <line x1="200" y1="197" x2="330" y2="197" stroke="#ef4444" stroke-width="2"/>
+
+  <!-- Row p2 - keep -->
+  <rect x="200" y="210" width="130" height="22" fill="#fef3c7" rx="2"/>
+  <text x="215" y="226" font-size="11" fill="#92400e">-1  5  1 -3</text>
+  <text x="340" y="226" font-size="10" fill="#f59e0b">p2</text>
+
+  <!-- Arrow to submatrix -->
+  <line x1="355" y1="170" x2="395" y2="170" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="395,164 395,176 407,170" fill="#94a3b8"/>
+
+  <!-- 4x4 Submatrix -->
+  <text x="470" y="82" font-size="10" fill="#64748b">4x4 submatrix:</text>
+
+  <path d="M408,90 L402,90 L402,222 L408,222" stroke="#475569" stroke-width="2" fill="none"/>
+
+  <rect x="410" y="90" width="120" height="28" fill="#dbeafe" rx="2"/>
+  <text x="425" y="109" font-size="12" fill="#3b82f6" font-weight="600">1  0  0  0</text>
+
+  <rect x="410" y="122" width="120" height="28" fill="#dbeafe" rx="2"/>
+  <text x="425" y="141" font-size="12" fill="#3b82f6" font-weight="600">0  0  1  0</text>
+
+  <rect x="410" y="154" width="120" height="28" fill="#dbeafe" rx="2"/>
+  <text x="425" y="173" font-size="12" fill="#3b82f6" font-weight="600">0  0  0  1</text>
+
+  <rect x="410" y="186" width="120" height="28" fill="#fef3c7" rx="2"/>
+  <text x="422" y="205" font-size="12" fill="#92400e" font-weight="600">-1  5  1 -3</text>
+
+  <path d="M522,90 L528,90 L528,222 L522,222" stroke="#475569" stroke-width="2" fill="none"/>
+
+  <text x="370" y="260" text-anchor="middle" font-size="11" fill="#64748b" font-weight="600">Remove lost rows &#8594; 4x4 submatrix</text>
+
+  <!-- Arrow from stage 2 to stage 3 -->
+  <line x1="545" y1="170" x2="585" y2="170" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="585,164 585,176 597,170" fill="#94a3b8"/>
+
+  <!-- STAGE 3: Recover -->
+  <text x="745" y="62" text-anchor="middle" font-size="13" font-weight="700" fill="#6366f1">Recover</text>
+
+  <!-- Formula box -->
+  <rect x="600" y="80" width="290" height="180" fill="#f0fdf4" rx="8" stroke="#bbf7d0" stroke-width="1.5"/>
+
+  <text x="745" y="105" text-anchor="middle" font-size="12" fill="#475569" font-weight="600">Invert &amp; Multiply</text>
+
+  <!-- [submatrix]^-1 -->
+  <text x="640" y="138" text-anchor="middle" font-size="13" fill="#475569" font-family="ui-monospace, monospace">[A]</text>
+  <text x="656" y="128" text-anchor="start" font-size="10" fill="#475569" font-family="ui-monospace, monospace">-1</text>
+
+  <!-- x -->
+  <text x="685" y="138" text-anchor="middle" font-size="16" fill="#475569" font-weight="700">x</text>
+
+  <!-- surviving values vector -->
+  <path d="M700,115 L695,115 L695,165 L700,165" stroke="#475569" stroke-width="1.5" fill="none"/>
+  <text x="720" y="128" text-anchor="middle" font-size="11" fill="#3b82f6" font-weight="600">d1</text>
+  <text x="720" y="140" text-anchor="middle" font-size="11" fill="#3b82f6" font-weight="600">d3</text>
+  <text x="720" y="152" text-anchor="middle" font-size="11" fill="#3b82f6" font-weight="600">d4</text>
+  <text x="720" y="164" text-anchor="middle" font-size="11" fill="#f59e0b" font-weight="600">p2</text>
+  <path d="M740,115 L745,115 L745,165 L740,165" stroke="#475569" stroke-width="1.5" fill="none"/>
+
+  <!-- = -->
+  <text x="765" y="142" text-anchor="middle" font-size="18" fill="#475569" font-weight="700">=</text>
+
+  <!-- result vector -->
+  <path d="M782,115 L777,115 L777,165 L782,165" stroke="#475569" stroke-width="1.5" fill="none"/>
+  <text x="805" y="128" text-anchor="middle" font-size="11" fill="#3b82f6" font-weight="600">d1</text>
+  <text x="805" y="140" text-anchor="middle" font-size="11" fill="#10b981" font-weight="700">d2</text>
+  <text x="805" y="152" text-anchor="middle" font-size="11" fill="#3b82f6" font-weight="600">d3</text>
+  <text x="805" y="164" text-anchor="middle" font-size="11" fill="#3b82f6" font-weight="600">d4</text>
+  <path d="M825,115 L830,115 L830,165 L825,165" stroke="#475569" stroke-width="1.5" fill="none"/>
+
+  <!-- Highlight d2 recovered -->
+  <rect x="790" y="132" width="30" height="14" fill="#d1fae5" rx="3" opacity="0.6"/>
+  <text x="805" y="143" text-anchor="middle" font-size="11" fill="#10b981" font-weight="700">d2</text>
+
+  <!-- Recovered badge -->
+  <rect x="834" y="132" width="50" height="16" fill="#10b981" rx="8"/>
+  <text x="859" y="144" text-anchor="middle" font-size="9" fill="white" font-weight="700">Recovered!</text>
+
+  <!-- Explanation -->
+  <text x="745" y="200" text-anchor="middle" font-size="11" fill="#475569">Any k surviving shards can recover</text>
+  <text x="745" y="215" text-anchor="middle" font-size="11" fill="#475569">the original data via matrix inversion.</text>
+  <text x="745" y="240" text-anchor="middle" font-size="11" fill="#10b981" font-weight="600">Invert &amp; multiply &#8594; original data</text>
+
+  <!-- Flow arrows along bottom -->
+  <rect x="60" y="362" width="160" height="28" fill="#dbeafe" rx="14"/>
+  <text x="140" y="380" text-anchor="middle" font-size="11" fill="#3b82f6" font-weight="600">1. Identify survivors</text>
+
+  <line x1="230" y1="376" x2="270" y2="376" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="270,370 270,382 282,376" fill="#94a3b8"/>
+
+  <rect x="290" y="362" width="200" height="28" fill="#ede9fe" rx="14"/>
+  <text x="390" y="380" text-anchor="middle" font-size="11" fill="#6366f1" font-weight="600">2. Build submatrix from rows</text>
+
+  <line x1="500" y1="376" x2="540" y2="376" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="540,370 540,382 552,376" fill="#94a3b8"/>
+
+  <rect x="560" y="362" width="220" height="28" fill="#d1fae5" rx="14"/>
+  <text x="670" y="380" text-anchor="middle" font-size="11" fill="#10b981" font-weight="600">3. Invert matrix &amp; recover data</text>
+</svg>

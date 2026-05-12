@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 350" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="800" height="350" fill="#f9fafb" rx="8"/>
+  <text x="400" y="36" text-anchor="middle" font-size="17" font-weight="bold" fill="#111827">Erasure Coding Overview (4+2)</text>
+
+  <!-- File rectangle -->
+  <rect x="30" y="110" width="100" height="120" rx="8" fill="#6366f1" opacity="0.15" stroke="#6366f1" stroke-width="2"/>
+  <rect x="50" y="135" width="60" height="8" rx="2" fill="#6366f1" opacity="0.5"/>
+  <rect x="50" y="150" width="50" height="8" rx="2" fill="#6366f1" opacity="0.5"/>
+  <rect x="50" y="165" width="55" height="8" rx="2" fill="#6366f1" opacity="0.5"/>
+  <rect x="50" y="180" width="40" height="8" rx="2" fill="#6366f1" opacity="0.5"/>
+  <text x="80" y="210" text-anchor="middle" font-size="14" font-weight="600" fill="#6366f1">File</text>
+
+  <!-- Arrow from file to split -->
+  <line x1="140" y1="170" x2="182" y2="170" stroke="#6b7280" stroke-width="2"/>
+  <polygon points="182,164 182,176 194,170" fill="#6b7280"/>
+
+  <!-- Split label -->
+  <text x="220" y="162" text-anchor="middle" font-size="12" fill="#6b7280">Split +</text>
+  <text x="220" y="177" text-anchor="middle" font-size="12" fill="#6b7280">Encode</text>
+
+  <!-- Arrows from split to 6 servers -->
+  <!-- To Server 1 (d1) -->
+  <line x1="250" y1="158" x2="330" y2="78" stroke="#3b82f6" stroke-width="1.5" opacity="0.5"/>
+  <polygon points="325,72 325,84 336,78" fill="#3b82f6" opacity="0.7"/>
+
+  <!-- To Server 2 (d2) -->
+  <line x1="250" y1="163" x2="330" y2="133" stroke="#3b82f6" stroke-width="1.5" opacity="0.5"/>
+  <polygon points="325,127 325,139 336,133" fill="#3b82f6" opacity="0.7"/>
+
+  <!-- To Server 3 (d3) -->
+  <line x1="250" y1="170" x2="330" y2="188" stroke="#3b82f6" stroke-width="1.5" opacity="0.5"/>
+  <polygon points="325,182 325,194 336,188" fill="#3b82f6" opacity="0.7"/>
+
+  <!-- To Server 4 (d4) -->
+  <line x1="250" y1="178" x2="330" y2="243" stroke="#3b82f6" stroke-width="1.5" opacity="0.5"/>
+  <polygon points="325,237 325,249 336,243" fill="#3b82f6" opacity="0.7"/>
+
+  <!-- To Server 5 (p1) -->
+  <line x1="250" y1="168" x2="560" y2="78" stroke="#f59e0b" stroke-width="1.5" opacity="0.5"/>
+  <polygon points="555,72 555,84 566,78" fill="#f59e0b" opacity="0.7"/>
+
+  <!-- To Server 6 (p2) -->
+  <line x1="250" y1="173" x2="560" y2="133" stroke="#f59e0b" stroke-width="1.5" opacity="0.5"/>
+  <polygon points="555,127 555,139 566,133" fill="#f59e0b" opacity="0.7"/>
+
+  <!-- Server 1: d1 -->
+  <rect x="340" y="56" width="180" height="44" rx="6" fill="white" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="352" y="64" width="44" height="28" rx="4" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="374" y="83" text-anchor="middle" font-size="13" font-weight="600" fill="#3b82f6">d1</text>
+  <text x="448" y="76" text-anchor="middle" font-size="11" fill="#6b7280">Server 1</text>
+  <rect x="420" y="82" width="48" height="3" rx="1" fill="#d1d5db"/>
+
+  <!-- Server 2: d2 -->
+  <rect x="340" y="111" width="180" height="44" rx="6" fill="white" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="352" y="119" width="44" height="28" rx="4" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="374" y="138" text-anchor="middle" font-size="13" font-weight="600" fill="#3b82f6">d2</text>
+  <text x="448" y="131" text-anchor="middle" font-size="11" fill="#6b7280">Server 2</text>
+  <rect x="420" y="137" width="48" height="3" rx="1" fill="#d1d5db"/>
+
+  <!-- Server 3: d3 -->
+  <rect x="340" y="166" width="180" height="44" rx="6" fill="white" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="352" y="174" width="44" height="28" rx="4" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="374" y="193" text-anchor="middle" font-size="13" font-weight="600" fill="#3b82f6">d3</text>
+  <text x="448" y="186" text-anchor="middle" font-size="11" fill="#6b7280">Server 3</text>
+  <rect x="420" y="192" width="48" height="3" rx="1" fill="#d1d5db"/>
+
+  <!-- Server 4: d4 -->
+  <rect x="340" y="221" width="180" height="44" rx="6" fill="white" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="352" y="229" width="44" height="28" rx="4" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="374" y="248" text-anchor="middle" font-size="13" font-weight="600" fill="#3b82f6">d4</text>
+  <text x="448" y="241" text-anchor="middle" font-size="11" fill="#6b7280">Server 4</text>
+  <rect x="420" y="247" width="48" height="3" rx="1" fill="#d1d5db"/>
+
+  <!-- Server 5: p1 -->
+  <rect x="570" y="56" width="180" height="44" rx="6" fill="white" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="582" y="64" width="44" height="28" rx="4" fill="#f59e0b" opacity="0.15" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="604" y="83" text-anchor="middle" font-size="13" font-weight="600" fill="#f59e0b">p1</text>
+  <text x="678" y="76" text-anchor="middle" font-size="11" fill="#6b7280">Server 5</text>
+  <rect x="650" y="82" width="48" height="3" rx="1" fill="#d1d5db"/>
+
+  <!-- Server 6: p2 -->
+  <rect x="570" y="111" width="180" height="44" rx="6" fill="white" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="582" y="119" width="44" height="28" rx="4" fill="#f59e0b" opacity="0.15" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="604" y="138" text-anchor="middle" font-size="13" font-weight="600" fill="#f59e0b">p2</text>
+  <text x="678" y="131" text-anchor="middle" font-size="11" fill="#6b7280">Server 6</text>
+  <rect x="650" y="137" width="48" height="3" rx="1" fill="#d1d5db"/>
+
+  <!-- Labels -->
+  <rect x="340" y="278" width="180" height="24" rx="4" fill="#3b82f6" opacity="0.08"/>
+  <text x="430" y="295" text-anchor="middle" font-size="12" fill="#3b82f6">Data Chunks (k=4)</text>
+
+  <rect x="570" y="168" width="180" height="24" rx="4" fill="#f59e0b" opacity="0.08"/>
+  <text x="660" y="185" text-anchor="middle" font-size="12" fill="#f59e0b">Parity Chunks (m=2)</text>
+
+  <!-- Bottom note -->
+  <text x="400" y="328" text-anchor="middle" font-size="13" fill="#6b7280" font-style="italic">Any 4 of 6 fragments can reconstruct the original file</text>
+</svg>

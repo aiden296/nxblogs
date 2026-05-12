@@ -1,0 +1,322 @@
+---
+title: 'Erasure Coding: How Storage Systems Protect Data Without Tripling Copies'
+date: '2026-05-13'
+tags: ['System Design', 'Storage', 'Distributed Systems']
+enableComment: true
+---
+
+# Erasure Coding: How Storage Systems Protect Data Without Tripling Copies
+
+You're running a storage cluster with 100TB of data. To keep it safe, the system uses **3-copy replication** — every byte is copied three times and placed on three different servers. Total disk needed: **300TB** — 200TB is pure overhead just for safety.
+
+Then one day the CFO asks: *"Can we cut storage costs by 60% without losing data durability?"*
+
+The answer: **Erasure Coding**.
+
+This is exactly what AWS S3, Azure Blob Storage, Google Cloud Storage, and HDFS use under the hood to store exabytes of data cost-effectively. This post will dissect erasure coding from basic intuition to the math behind it, and the limitations it **doesn't** solve.
+
+---
+
+## 1. What is Erasure Coding?
+
+**Erasure coding** is a data protection method that works by:
+
+1. **Splitting** the original data into **k** equal parts (called **data fragments** or **data shards**)
+2. **Computing** an additional **m** redundant parts (called **parity fragments**) from those k data parts
+3. **Distributing** all k + m parts across different servers/disks
+
+The key property: **any k parts** out of the total k + m are sufficient to **reconstruct the entire** original data. This means the system can lose up to **m** parts simultaneously without losing data.
+
+Imagine writing a letter, tearing it into **4 pieces**, then creating **2 magic summary cards** from the letter's contents. You send all 6 pieces to 6 different friends. Even if 2 of them lose their piece, you can still reassemble the complete letter from the remaining 4 — regardless of which 4 they are.
+
+This configuration is called **4+2** (4 data + 2 parity), and it's one of the most common setups in practice.
+
+![Erasure Coding Overview](/erasure-coding-overview.svg)
+
+Quick comparison with replication:
+
+| | 3-Copy Replication | Erasure Coding 4+2 |
+|---|---|---|
+| Storage for 100MB of data | 300MB | 150MB |
+| Storage overhead | 200% | 50% |
+| Failures tolerated | 2 | 2 |
+
+Same fault tolerance (2 failures), but erasure coding uses only **one-quarter the overhead** compared to replication.
+
+---
+
+## 2. Where Does the Name "Erasure Coding" Come From?
+
+The name sounds odd — "erasure" means "deletion", so is "erasure coding" about "encoding for deletion"? Not quite.
+
+In coding theory (the branch of mathematics that studies reliable data transmission over noisy channels), there are two types of failures:
+
+- **Error**: data is corrupted but you **don't know** which position is wrong. Example: a bit in memory flips from 0 to 1 without anyone noticing.
+- **Erasure**: data is lost and you **know exactly** which position is missing. Example: a hard drive dies — you know which drive is dead, you just don't know what data was on it.
+
+"Erasure coding" means **encoding data so it can be recovered when losses occur at known positions**. The name emphasizes that this technique is designed for "whole chunk lost" scenarios (dead disks, crashed servers) — not "random bit flips".
+
+### Brief History
+
+- **1950s**: Richard Hamming developed **Hamming codes** — the first error-correcting codes, capable of detecting and correcting single-bit errors.
+- **1960**: Irving Reed and Gustave Solomon published **Reed-Solomon codes** — the most powerful and widely used erasure coding algorithm to this day. Originally designed for satellite communications.
+- **1982+**: Reed-Solomon was applied to **CDs** to recover data from scratches. Each scratch on a CD is an "erasure" — you know which area is damaged, you just need to reconstruct the data there.
+- **2000s+**: Distributed storage systems like Google File System, HDFS, Azure, and S3 began applying erasure coding at exabyte scale.
+
+Note: "Coding" here means **mathematical encoding** (adding redundant information to protect data), not "programming" or "writing code".
+
+---
+
+## 3. Before Erasure Coding — The Problem and Legacy Solutions
+
+### The Core Problem
+
+Data lives on hardware. Hardware failure is **normal**, not exceptional. Google has reported that roughly **2-4% of hard drives** in their data centers die each year. With millions of drives, that means drives die **every single day**.
+
+The question: how do you protect data against this reality?
+
+### Solution 1: RAID (1987)
+
+**RAID** (Redundant Array of Independent Disks) was one of the earliest solutions:
+
+| RAID Level | Mechanism | Overhead | Tolerates |
+|---|---|---|---|
+| RAID 1 (Mirroring) | Duplicate each drive | 100% | 1 disk failure |
+| RAID 5 (Striping + Parity) | Stripe data across N drives, add 1 parity drive | 1/N | 1 disk failure |
+| RAID 6 (Double Parity) | Like RAID 5 but with 2 parity drives | 2/N | 2 disk failures |
+
+RAID 5 and RAID 6 are actually **erasure coding** — they use mathematical operations (Reed-Solomon or similar) to compute parity. But RAID has a major limitation: it operates within **a single server or chassis**. When the entire server dies (power failure, fire, motherboard failure), the whole RAID array is lost.
+
+### Solution 2: Replication
+
+When moving to distributed systems, the simplest solution was **replication**: copy all data 3 times and place it on 3 different servers (or even 3 different data centers).
+
+**Google File System** (2003) and **HDFS** (Hadoop Distributed File System) defaulted to 3 replicas. The advantages are clear:
+
+- **Simple**: no complex computation — just copy.
+- **Fast reads**: read from the nearest copy.
+- **Fast repair**: when a server dies, just copy from a surviving replica to a new server.
+
+But the downside is equally clear: **200% overhead**. Every 1 PB of real data requires 3 PB of disk. When Google, Facebook, and Microsoft operate hundreds of PB, 200% overhead means **millions of dollars in disk costs per year**.
+
+### Erasure Coding Emerged from This Context
+
+The idea: maintain **durability** equal to or higher than 3-copy replication, but reduce storage overhead from **200% down to 30-50%**. This is why large-scale storage systems gradually shifted to erasure coding for **cold** (rarely accessed) and **warm** (moderately accessed) data.
+
+---
+
+## 4. Deep Dive — Erasure Coding from A to Z
+
+### 4.1. The Simplest Parity — Addition
+
+The easiest way to understand erasure coding is to start with the simplest parity: **addition**.
+
+Suppose you have 4 data shards with values:
+
+- d1 = 3, d2 = 7, d3 = 1, d4 = 5
+
+You compute parity by adding them all up:
+
+**p = d1 + d2 + d3 + d4 = 3 + 7 + 1 + 5 = 16**
+
+Now you store these 5 values (d1, d2, d3, d4, p) on 5 different servers.
+
+![Simple Parity](/erasure-coding-simple-parity.svg)
+
+**When d3 is lost** (the server holding d3 dies), you recover it with subtraction:
+
+**d3 = p - d1 - d2 - d4 = 16 - 3 - 7 - 5 = 1** ✓
+
+The logic is intuitive: knowing the sum and 3 out of 4 terms, you can deduce the remaining term.
+
+But this approach has a **critical limitation**: with only 1 parity, it can only tolerate **1 failure**. If 2 shards are lost simultaneously (e.g., d2 and d3), you have 2 unknowns but only 1 equation — unsolvable.
+
+Want to tolerate 2 failures? You need 2 parities. Want to tolerate m failures? You need m parities. And to create multiple **independent** parities (so that any combination of k surviving parts can recover the data), simple addition isn't enough — you need more sophisticated math. That's where **Reed-Solomon codes** come in.
+
+> **Technical note**: the "addition" here isn't regular integer addition — it takes place in a **special number system** called a **Galois Field** to ensure results don't overflow. Details in section 4.4.
+
+### 4.2. Reed-Solomon Codes — The Main Weapon
+
+**Reed-Solomon codes** are the most widely used erasure coding algorithm in modern storage systems. The core idea rests on an elegant mathematical property:
+
+> **A polynomial of degree k-1 is uniquely determined by k points.**
+
+For example: a line (degree 1) needs 2 points to be determined. A parabola (degree 2) needs 3 points. A degree-3 polynomial needs 4 points.
+
+Reed-Solomon applies this property as follows:
+
+1. Treat the **k data shards** as coefficients of a degree k-1 polynomial. For example, with k=4 and data (3, 7, 1, 5):
+
+   **f(x) = 3 + 7x + x² + 5x³**
+
+2. This polynomial already "contains" all the original data in its coefficients. Now, **evaluate** the polynomial at **k + m distinct points**:
+
+   - f(1), f(2), f(3), f(4) → 4 values from data
+   - f(5), f(6) → 2 additional parity values
+
+3. Send these **k + m values** to k + m servers.
+
+4. When any m values are lost, the remaining **k values** are still enough to **uniquely determine** the degree k-1 polynomial → recover all coefficients → recover the original data.
+
+![Reed-Solomon Polynomial](/erasure-coding-reed-solomon.svg)
+
+This is the power of Reed-Solomon: it **mathematically guarantees** that any k out of k+m parts are sufficient for recovery, regardless of which specific combination is lost.
+
+### 4.3. Encoding Matrix
+
+In practice, Reed-Solomon encoding is implemented using **matrix multiplication**.
+
+The formula:
+
+**[encoded] = [encoding_matrix] × [data]**
+
+Where:
+- **data** is a k-element vector: [d1, d2, d3, d4]
+- **encoding_matrix** is a (k+m) × k matrix
+- **encoded** is a (k+m)-element vector: [d1, d2, d3, d4, p1, p2]
+
+The encoding matrix has a special structure:
+
+- The **top k rows** form an **identity matrix** (1s on the diagonal, 0s elsewhere). This ensures the first k elements of the output are the original data (unchanged).
+- The **bottom m rows** contain the parity coefficients, typically constructed from a **Vandermonde matrix** (a matrix where each row consists of powers of a distinct value).
+
+![Encoding Matrix](/erasure-coding-encoding-matrix.svg)
+
+Example with a 4+2 configuration:
+
+```
+| 1  0  0  0 |   | d1 |   | d1                          |
+| 0  1  0  0 |   | d2 |   | d2                          |
+| 0  0  1  0 | × | d3 | = | d3                          |
+| 0  0  0  1 |   | d4 |   | d4                          |
+| 1  2 -1  4 |             | 1·d1 + 2·d2 + (-1)·d3 + 4·d4  = p1 |
+|-1  5  1 -3 |             | (-1)·d1 + 5·d2 + 1·d3 + (-3)·d4 = p2 |
+```
+
+The last two rows produce 2 parities with **different formulas** — this is exactly why the system can recover from 2 simultaneous losses: 2 parities = 2 independent equations = enough to solve for 2 unknowns.
+
+### 4.4. Galois Field GF(2⁸) — Why Not Use Regular Numbers?
+
+In section 4.1, addition was presented as a simple abstraction. In practice, the arithmetic doesn't use regular integers or floating-point numbers — it operates in a **Galois Field** (a finite number system named after mathematician Évariste Galois).
+
+Why?
+
+- **Regular integers**: addition/multiplication can **overflow**. 200 + 200 = 400 — doesn't fit in 1 byte (0-255). When storing at the byte level, overflow = lost information = unrecoverable data.
+- **Floating-point numbers**: suffer from **precision loss** due to rounding. Since erasure coding requires **absolute precision** (a single wrong bit = corrupted data), floating point doesn't cut it.
+
+**GF(2⁸)** — a Galois Field with 256 elements (0 to 255, exactly 1 byte) — solves both problems:
+
+- **Addition** in GF(2⁸) is actually **XOR** (exclusive-or) at the hardware level. XOR always keeps the result within 1 byte: 200 XOR 200 = 0, 255 XOR 1 = 254. Never overflows.
+- **Multiplication** is done via **lookup tables** — precomputed 256 × 256 = 65,536 results, looked up in O(1).
+- Every element (except 0) has a **multiplicative inverse** — ensuring division is always possible, which is necessary for decoding.
+
+You don't need to deeply understand GF(2⁸) to grasp erasure coding. Just remember: **all arithmetic in erasure coding takes place in a special number system that guarantees exact results within 1 byte**.
+
+### 4.5. Decoding — Recovering Data from Lost Shards
+
+When shards are lost (dead disk, crashed server), the recovery process works as follows:
+
+**Step 1**: Identify which shards are lost. Suppose **d2** and **p1** are lost (2 out of 6 shards).
+
+**Step 2**: In the 6×4 encoding matrix, remove the rows corresponding to the lost shards (rows 2 and 5). The remaining 4 rows form a **4×4 submatrix**.
+
+**Step 3**: **Invert** the 4×4 submatrix. An invertible square matrix always has an inverse — and the Vandermonde structure guarantees that **any** k rows form an invertible matrix.
+
+**Step 4**: Multiply the inverted matrix by the vector of surviving shards:
+
+**[d1, d2, d3, d4] = [submatrix]⁻¹ × [d1, d3, d4, p2]**
+
+Result: **d2** is recovered (along with all original data).
+
+![Decoding Process](/erasure-coding-decoding.svg)
+
+Computationally: inverting a k×k matrix has complexity **O(k³)**, but k in practice is typically small (4-20), so this cost is acceptable.
+
+### 4.6. Real-World Configurations
+
+Major storage systems use erasure coding with various configurations, depending on durability, performance, and cost requirements:
+
+| System | Configuration | Storage Overhead | Tolerates | Notes |
+|---|---|---|---|---|
+| AWS S3 Standard | ~8+3 or similar | ~37% | 3 failures | 11 nines durability |
+| HDFS 3.x | 6+3 (Reed-Solomon) | 50% | 3 failures | Default EC policy |
+| 3-copy Replication | N/A | 200% | 2 failures | ~6 nines durability |
+
+---
+
+## 5. Erasure Coding vs Replication
+
+| Metric | 3-Copy Replication | Erasure Coding (4+2) |
+|---|---|---|
+| Storage overhead | 200% | 50% |
+| Durability (0.81% node failure/year) | ~6 nines (99.9999%) | ~11 nines (99.999999999%) |
+| Read latency | Low (read from any replica) | Higher (read k shards, decode) |
+| Write latency | Moderate (write 3 copies) | Higher (encode + write k+m shards) |
+| Repair cost (1 failure) | Low: copy 1 replica (1× data size) | High: read k shards, compute, write 1 shard |
+| Implementation complexity | Simple | Complex |
+| Best suited for | Hot data, low-latency needs | Cold/warm data, cost optimization |
+
+![Replication vs Erasure Coding](/erasure-coding-replication-vs-ec.svg)
+
+In summary: replication wins on **speed and simplicity**, erasure coding wins on **cost and durability**. This is why most real-world systems use **both**: replication for hot data (frequently accessed), erasure coding for cold/warm data (infrequently accessed).
+
+---
+
+## 6. Limitations of Erasure Coding
+
+Erasure coding is not a silver bullet. Here are the cases it **can't** solve or where it creates new problems.
+
+### 6.1. High CPU Cost for Encoding/Decoding
+
+Encoding requires matrix multiplication in Galois Field arithmetic for **every byte** of data. Decoding adds the additional step of matrix inversion. This consumes significantly more CPU compared to replication (which only needs `memcpy`).
+
+Modern CPUs mitigate this with **SIMD instructions** (Single Instruction Multiple Data). Intel's ISA-L (Intelligent Storage Acceleration Library) achieves encoding throughput of 2-10 GB/s — fast enough for most workloads, but still notably slower than raw memory copy speeds (20+ GB/s).
+
+### 6.2. Repair Amplification — "Fix One Brick, Tear Down the Wall"
+
+When 1 shard is lost, the system must read **k surviving shards** over the network to recompute the lost one. In a 10+4 configuration, repairing 1 shard = reading 10 shards — generating **10x** the network traffic relative to the data being recovered.
+
+This is called **repair amplification** — and it's especially painful at large scale, where disks die continuously and the system must repair nonstop.
+
+### 6.3. Not Suited for Mutable Workloads
+
+Erasure coding operates on **immutable chunks**. If you need to modify a single byte, the entire stripe (k data shards + m parity shards) must be **re-encoded** — because parity depends on all data shards.
+
+This is why erasure coding is used for **object storage** (write-once, read-many) like S3, not for **block storage** or **databases** — where data changes constantly.
+
+### 6.4. Tail Latency — As Slow as the Slowest Shard
+
+To read data, the system must read **k shards** in parallel from k different servers/disks. Read latency = latency of the **slowest shard**. A single slow disk or congested network path slows down the entire request.
+
+With replication, you can read from the fastest replica. Erasure coding doesn't have that luxury.
+
+Some systems mitigate this with **speculative reads**: send k+1 requests instead of k, use the first k responses, discard the slowest. But this wastes additional network bandwidth.
+
+### 6.5. Small File Inefficiency
+
+Erasure coding splits data into k parts. If a file is smaller than k parts (e.g., a 1KB file with k=10), each shard holds only a few dozen bytes but still incurs per-shard metadata and management overhead — the **overhead per byte of data** becomes disproportionately large.
+
+The common solution: **batch many small files** into a large object before applying erasure coding. Both HDFS and S3 do this.
+
+### 6.6. Not a Replacement for Backup
+
+This is perhaps the most dangerous misconception: erasure coding protects data against **hardware failures** (dead disks, crashed servers). It does **NOT** protect against:
+
+- **Logic errors** (software bugs writing wrong data) — incorrect data gets encoded and distributed correctly, so all shards contain wrong data.
+- **Accidental deletion** — the delete command removes all k+m shards.
+- **Ransomware** — encrypts all shards across all servers.
+- **Silent data corruption** — without separate checksums, a corrupted shard is still considered "valid".
+
+Erasure coding solves the **durability** problem (data survives hardware failures), not the **recoverability** problem (restoring to a correct state at a point in time). **Backups** and **versioning** remain essential.
+
+---
+
+## 7. Conclusion
+
+Back to the original question: *"Cut storage costs by 60% without losing durability?"*
+
+Erasure coding achieves this by **trading CPU and complexity for storage efficiency**. Instead of keeping 3 identical copies, it splits data into small fragments and creates a few redundant ones — saving hundreds of petabytes of disk at the scale of S3, Azure, or Google Cloud.
+
+But erasure coding is no panacea. It's best suited for **write-once, read-many** data (immutable, cold/warm) — not active databases or files being continuously edited. And it **doesn't replace backups** — it protects hardware, not logic.
+
+If you're designing a storage system, the question isn't "erasure coding or replication?" but rather "**which parts use erasure coding, and which use replication?**" — and most large-scale systems answer: both.

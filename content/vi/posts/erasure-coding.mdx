@@ -1,0 +1,322 @@
+---
+title: 'Erasure Coding: Cách hệ thống lưu trữ bảo vệ dữ liệu mà không cần nhân ba bản sao'
+date: '2026-05-13'
+tags: ['System Design', 'Storage', 'Distributed Systems']
+enableComment: true
+---
+
+# Erasure Coding: Cách hệ thống lưu trữ bảo vệ dữ liệu mà không cần nhân ba bản sao
+
+Bạn đang vận hành một cụm lưu trữ 100TB dữ liệu. Để đảm bảo an toàn, hệ thống dùng **3-copy replication** (sao chép ba bản) — nghĩa là mỗi byte dữ liệu được copy ra 3 bản giống hệt nhau, đặt trên 3 server khác nhau. Tổng dung lượng thật sự cần: **300TB** — 200TB là overhead thuần tuý chỉ để "phòng thân".
+
+Rồi một ngày CFO hỏi: *"Có cách nào cắt 60% chi phí storage mà không mất độ bền dữ liệu không?"*
+
+Câu trả lời: **Erasure Coding**.
+
+Đây chính xác là kỹ thuật mà AWS S3, Azure Blob Storage, Google Cloud Storage và HDFS đang dùng bên trong để lưu trữ hàng exabyte dữ liệu với chi phí hợp lý. Bài viết này sẽ mổ xẻ erasure coding từ ý tưởng cơ bản đến cách nó hoạt động ở tầng toán học, và những giới hạn mà nó **không** giải quyết được.
+
+---
+
+## 1. Erasure Coding là gì?
+
+**Erasure coding** là một phương pháp bảo vệ dữ liệu bằng cách:
+
+1. **Chia** dữ liệu gốc thành **k** phần bằng nhau (gọi là **data fragment** hay **data shard** — mảnh dữ liệu)
+2. **Tính toán** thêm **m** phần dư thừa (gọi là **parity fragment** — mảnh kiểm tra) từ k phần dữ liệu đó
+3. **Phân tán** tất cả k + m phần lên các server/disk khác nhau
+
+Điểm mấu chốt: **bất kỳ k phần nào** trong tổng số k + m phần đều đủ để **khôi phục toàn bộ** dữ liệu gốc. Nghĩa là hệ thống có thể mất đồng thời tối đa **m** phần mà không mất dữ liệu.
+
+Hãy hình dung bạn viết một lá thư, xé nó thành **4 mảnh**, rồi tạo thêm **2 phiếu tóm tắt ma thuật** từ nội dung lá thư. Bạn gửi 6 mảnh này cho 6 người bạn khác nhau. Kể cả 2 người trong số họ mất mảnh của mình, bạn vẫn có thể ghép lại nguyên vẹn lá thư từ 4 mảnh còn lại — bất kể đó là mảnh nào.
+
+Cấu hình này gọi là **4+2** (4 data + 2 parity), và đây là một trong những cấu hình phổ biến nhất trong thực tế.
+
+![Erasure Coding Overview](/erasure-coding-overview.svg)
+
+So sánh nhanh với replication:
+
+| | 3-Copy Replication | Erasure Coding 4+2 |
+|---|---|---|
+| Dung lượng cho 100MB data | 300MB | 150MB |
+| Storage overhead | 200% | 50% |
+| Số failure chịu được | 2 | 2 |
+
+Cùng mức chịu lỗi (2 failure), nhưng erasure coding chỉ tốn **1/4 overhead** so với replication.
+
+---
+
+## 2. Tên gọi "Erasure Coding" từ đâu?
+
+Cái tên nghe có vẻ lạ — "erasure" nghĩa là "xoá", vậy "erasure coding" là "mã hoá để xoá"? Không hẳn.
+
+Trong lý thuyết mã hoá (coding theory — ngành toán nghiên cứu cách truyền dữ liệu đáng tin cậy qua kênh nhiễu), có hai loại lỗi:
+
+- **Error** (lỗi): dữ liệu bị sai nhưng bạn **không biết** vị trí nào sai. Ví dụ: một bit trong bộ nhớ bị flip từ 0 thành 1 mà không ai hay.
+- **Erasure** (mất mát): dữ liệu bị mất và bạn **biết chính xác** vị trí nào bị mất. Ví dụ: một ổ cứng chết — bạn biết ổ nào chết, chỉ không biết dữ liệu trên đó là gì.
+
+"Erasure coding" nghĩa là **mã hoá dữ liệu sao cho có thể khôi phục khi bị mất mát ở vị trí đã biết**. Tên gọi nhấn mạnh rằng kỹ thuật này được thiết kế cho kịch bản "mất nguyên cục" (ổ cứng chết, server sập) — không phải "sai lẻ tẻ từng bit".
+
+### Lịch sử ngắn gọn
+
+- **1950s**: Richard Hamming phát triển **Hamming code** — mã sửa lỗi đầu tiên, có thể phát hiện và sửa 1 bit lỗi.
+- **1960**: Irving Reed và Gustave Solomon công bố **Reed-Solomon code** — thuật toán erasure coding mạnh nhất và được dùng rộng rãi nhất cho đến ngày nay. Ban đầu được thiết kế cho truyền thông vệ tinh.
+- **1982+**: Reed-Solomon được áp dụng vào **đĩa CD** để phục hồi dữ liệu khi đĩa bị xước. Mỗi vết xước trên CD là một "erasure" — bạn biết vùng nào bị hỏng, chỉ cần khôi phục dữ liệu tại đó.
+- **2000s+**: Các hệ thống lưu trữ phân tán (distributed storage) như Google File System, HDFS, Azure, S3 bắt đầu áp dụng erasure coding ở quy mô exabyte.
+
+Lưu ý: "Coding" ở đây nghĩa là **mã hoá bằng toán học** (thêm thông tin dư thừa để bảo vệ dữ liệu), không phải "viết code" hay "lập trình".
+
+---
+
+## 3. Trước Erasure Coding — Bài toán và các giải pháp cũ
+
+### Bài toán cốt lõi
+
+Dữ liệu nằm trên phần cứng. Phần cứng hỏng là chuyện **bình thường**, không phải ngoại lệ. Google từng công bố rằng khoảng **2-4% ổ cứng** trong data center của họ chết mỗi năm. Với hàng triệu ổ cứng, nghĩa là **mỗi ngày** đều có ổ chết.
+
+Câu hỏi: làm sao bảo vệ dữ liệu trước thực tế đó?
+
+### Giải pháp 1: RAID (1987)
+
+**RAID** (Redundant Array of Independent Disks — mảng ổ đĩa dự phòng) là một trong những giải pháp sớm nhất:
+
+| RAID Level | Cơ chế | Overhead | Chịu được |
+|---|---|---|---|
+| RAID 1 (Mirroring) | Nhân đôi mỗi ổ cứng | 100% | 1 disk failure |
+| RAID 5 (Striping + Parity) | Chia data qua N ổ, thêm 1 ổ parity | 1/N | 1 disk failure |
+| RAID 6 (Double Parity) | Như RAID 5 nhưng 2 ổ parity | 2/N | 2 disk failures |
+
+RAID 5 và RAID 6 thực chất **chính là erasure coding** — chúng dùng phép tính toán học (Reed-Solomon hoặc tương tự) để tạo parity. Nhưng RAID có một giới hạn lớn: nó hoạt động trong phạm vi **1 server hoặc 1 chassis**. Khi cả server chết (mất điện, cháy nổ, lỗi mainboard), toàn bộ RAID array mất theo.
+
+### Giải pháp 2: Replication
+
+Khi chuyển sang hệ thống phân tán (distributed systems), giải pháp đơn giản nhất là **replication** (nhân bản): copy toàn bộ dữ liệu 3 lần, đặt trên 3 server khác nhau (thậm chí 3 data center khác nhau).
+
+**Google File System** (2003) và **HDFS** (Hadoop Distributed File System) mặc định dùng 3 replicas. Ưu điểm rõ ràng:
+
+- **Đơn giản**: không cần tính toán phức tạp — chỉ copy.
+- **Read nhanh**: đọc từ bản gần nhất.
+- **Repair nhanh**: khi 1 server chết, chỉ cần copy từ bản còn sống sang server mới.
+
+Nhưng nhược điểm cũng rõ ràng: **200% overhead**. Cứ 1 PB dữ liệu thật cần 3 PB ổ cứng. Khi Google, Facebook, Microsoft vận hành hàng trăm PB, 200% overhead đồng nghĩa với **hàng triệu USD tiền ổ cứng mỗi năm**.
+
+### Erasure coding ra đời trong bối cảnh đó
+
+Ý tưởng: giữ **durability** (độ bền dữ liệu) bằng hoặc cao hơn 3-copy replication, nhưng giảm storage overhead từ **200% xuống còn 30-50%**. Đây chính là lý do các hệ thống storage lớn dần chuyển sang erasure coding cho dữ liệu **cold** (ít truy cập) và **warm** (truy cập vừa phải).
+
+---
+
+## 4. Deep Dive — Erasure Coding từ A đến Z
+
+### 4.1. Parity đơn giản nhất — Phép cộng
+
+Cách dễ nhất để hiểu erasure coding là bắt đầu với parity đơn giản nhất: **phép cộng**.
+
+Giả sử bạn có 4 data shard với giá trị lần lượt là:
+
+- d1 = 3, d2 = 7, d3 = 1, d4 = 5
+
+Bạn tính parity bằng cách cộng tất cả lại:
+
+**p = d1 + d2 + d3 + d4 = 3 + 7 + 1 + 5 = 16**
+
+Bây giờ bạn lưu 5 giá trị này (d1, d2, d3, d4, p) lên 5 server khác nhau.
+
+![Simple Parity](/erasure-coding-simple-parity.svg)
+
+**Khi d3 bị mất** (server chứa d3 chết), bạn khôi phục bằng phép trừ:
+
+**d3 = p - d1 - d2 - d4 = 16 - 3 - 7 - 5 = 1** ✓
+
+Logic rất trực quan: biết tổng và biết 3 trong 4 số hạng → suy ra số hạng còn lại.
+
+Nhưng cách này có **giới hạn nghiêm trọng**: chỉ có 1 parity, nên chỉ chịu được **1 failure**. Nếu mất đồng thời 2 shard (ví dụ d2 và d3), bạn có 2 ẩn số nhưng chỉ 1 phương trình — không giải được.
+
+Muốn chịu được 2 failure? Cần 2 parity. Muốn chịu m failure? Cần m parity. Và để tạo ra nhiều parity **độc lập** với nhau (sao cho mỗi tổ hợp k phần đều giải được), phép cộng đơn thuần không đủ — cần toán học phức tạp hơn. Đó là lúc **Reed-Solomon code** xuất hiện.
+
+> **Lưu ý kỹ thuật**: phép "cộng" ở đây không phải phép cộng số nguyên thông thường — nó diễn ra trong một **hệ số đặc biệt** gọi là **Galois Field** (trường Galois) để đảm bảo kết quả không bị tràn số (overflow). Chi tiết ở section 4.4.
+
+### 4.2. Reed-Solomon Code — Vũ khí chính
+
+**Reed-Solomon code** là thuật toán erasure coding được dùng rộng rãi nhất trong các hệ thống lưu trữ hiện đại. Ý tưởng cốt lõi dựa trên một tính chất toán học thanh lịch:
+
+> **Một đa thức (polynomial) bậc k-1 được xác định duy nhất bởi k điểm.**
+
+Ví dụ: một đường thẳng (bậc 1) cần 2 điểm để xác định. Một parabol (bậc 2) cần 3 điểm. Một đa thức bậc 3 cần 4 điểm.
+
+Reed-Solomon áp dụng tính chất này như sau:
+
+1. Coi **k data shard** là các hệ số của một đa thức bậc k-1. Ví dụ với k=4 và dữ liệu (3, 7, 1, 5):
+
+   **f(x) = 3 + 7x + x² + 5x³**
+
+2. Đa thức này đã "chứa" toàn bộ dữ liệu gốc trong các hệ số. Bây giờ, **evaluate** (tính giá trị) đa thức tại **k + m điểm** khác nhau:
+
+   - f(1), f(2), f(3), f(4) → 4 giá trị từ data
+   - f(5), f(6) → 2 giá trị parity bổ sung
+
+3. Gửi **k + m giá trị** này lên k + m server.
+
+4. Khi mất bất kỳ m giá trị nào, vẫn còn **k giá trị** — đủ để **xác định duy nhất** đa thức bậc k-1 → khôi phục toàn bộ hệ số → khôi phục dữ liệu gốc.
+
+![Reed-Solomon Polynomial](/erasure-coding-reed-solomon.svg)
+
+Đây chính là sức mạnh của Reed-Solomon: nó **đảm bảo về mặt toán học** rằng bất kỳ k trong k+m phần đều đủ để khôi phục, không phụ thuộc vào tổ hợp cụ thể nào bị mất.
+
+### 4.3. Encoding Matrix — Ma trận mã hoá
+
+Trong thực tế, Reed-Solomon encoding được triển khai bằng **phép nhân ma trận** (matrix multiplication — phép tính nhân giữa hai bảng số theo quy tắc hàng nhân cột).
+
+Công thức:
+
+**[encoded] = [encoding_matrix] × [data]**
+
+Trong đó:
+- **data** là vector k phần tử: [d1, d2, d3, d4]
+- **encoding_matrix** là ma trận (k+m) × k
+- **encoded** là vector k+m phần tử: [d1, d2, d3, d4, p1, p2]
+
+Ma trận encoding có cấu trúc đặc biệt:
+
+- **k hàng đầu** là **ma trận đơn vị** (identity matrix — ma trận có 1 trên đường chéo, 0 ở phần còn lại). Điều này đảm bảo k phần tử đầu của output chính là dữ liệu gốc (không bị biến đổi).
+- **m hàng cuối** là các hệ số tính parity, thường được xây dựng từ **ma trận Vandermonde** (Vandermonde matrix — ma trận mà mỗi hàng là luỹ thừa của một giá trị khác nhau).
+
+![Encoding Matrix](/erasure-coding-encoding-matrix.svg)
+
+Ví dụ với cấu hình 4+2:
+
+```
+| 1  0  0  0 |   | d1 |   | d1                          |
+| 0  1  0  0 |   | d2 |   | d2                          |
+| 0  0  1  0 | × | d3 | = | d3                          |
+| 0  0  0  1 |   | d4 |   | d4                          |
+| 1  2 -1  4 |             | 1·d1 + 2·d2 + (-1)·d3 + 4·d4  = p1 |
+|-1  5  1 -3 |             | (-1)·d1 + 5·d2 + 1·d3 + (-3)·d4 = p2 |
+```
+
+Hai hàng cuối tạo ra 2 parity với **công thức khác nhau** — đây chính là lý do hệ thống có thể giải ngược khi mất đồng thời 2 phần: 2 parity = 2 phương trình độc lập = đủ để giải 2 ẩn.
+
+### 4.4. Galois Field GF(2⁸) — Tại sao không dùng số thực?
+
+Ở section 4.1, phép cộng được trình bày như một abstraction đơn giản. Trong thực tế, phép tính không diễn ra trên số nguyên hay số thực thông thường — mà trong một **Galois Field** (trường Galois — hệ thống số hữu hạn được đặt tên theo nhà toán học Évariste Galois).
+
+Tại sao?
+
+- **Số nguyên thường**: phép cộng/nhân có thể **tràn số** (overflow). 200 + 200 = 400 — không fit trong 1 byte (0-255). Khi lưu trữ ở tầng byte, tràn số = mất thông tin = không khôi phục được.
+- **Số thực (floating point)**: bị **mất precision** do làm tròn. Khi erasure coding yêu cầu kết quả **chính xác tuyệt đối** (sai 1 bit = hỏng dữ liệu), floating point không đáp ứng được.
+
+**GF(2⁸)** — Galois Field với 256 phần tử (0 đến 255, vừa đúng 1 byte) — giải quyết cả hai vấn đề:
+
+- **Phép cộng** trong GF(2⁸) thực chất là phép **XOR** (exclusive-or) ở tầng hardware. XOR luôn giữ kết quả trong phạm vi 1 byte: 200 XOR 200 = 0, 255 XOR 1 = 254. Không bao giờ tràn.
+- **Phép nhân** được thực hiện qua **bảng tra cứu** (lookup table) — tính sẵn 256 × 256 = 65,536 kết quả, tra bảng trong O(1).
+- Mọi phần tử (trừ 0) đều có **nghịch đảo** — đảm bảo phép chia luôn thực hiện được, cần thiết cho quá trình decoding.
+
+Bạn không cần hiểu sâu GF(2⁸) để nắm được erasure coding. Chỉ cần nhớ: **mọi phép tính trong erasure coding diễn ra trong một hệ số đặc biệt đảm bảo kết quả luôn chính xác và nằm trong 1 byte**.
+
+### 4.5. Decoding — Khôi phục dữ liệu khi mất shard
+
+Khi có shard bị mất (disk chết, server sập), quá trình khôi phục diễn ra như sau:
+
+**Bước 1**: Xác định shard nào bị mất. Giả sử mất **d2** và **p1** (2 trong 6 shard).
+
+**Bước 2**: Trong encoding matrix 6×4, xoá các hàng tương ứng với shard bị mất (hàng 2 và hàng 5). Còn lại 4 hàng — tạo thành **submatrix 4×4**.
+
+**Bước 3**: **Đảo ngược** (invert) submatrix 4×4 này. Ma trận vuông khả nghịch luôn tồn tại nghịch đảo — và cấu trúc Vandermonde đảm bảo rằng **bất kỳ** k hàng nào cũng tạo thành ma trận khả nghịch.
+
+**Bước 4**: Nhân ma trận nghịch đảo với vector các shard còn sống:
+
+**[d1, d2, d3, d4] = [submatrix]⁻¹ × [d1, d3, d4, p2]**
+
+Kết quả: khôi phục được **d2** (và toàn bộ dữ liệu gốc).
+
+![Decoding Process](/erasure-coding-decoding.svg)
+
+Về mặt tính toán: đảo ngược ma trận k×k có complexity **O(k³)**, nhưng k trong thực tế thường nhỏ (4-20), nên chi phí này chấp nhận được.
+
+### 4.6. Cấu hình thực tế
+
+Các hệ thống storage lớn sử dụng erasure coding với nhiều cấu hình khác nhau, tuỳ theo yêu cầu về durability, performance và chi phí:
+
+| Hệ thống | Cấu hình | Storage Overhead | Chịu được | Ghi chú |
+|---|---|---|---|---|
+| AWS S3 Standard | ~8+3 hoặc tương đương | ~37% | 3 failures | 11 nines durability |
+| HDFS 3.x | 6+3 (Reed-Solomon) | 50% | 3 failures | EC policy mặc định |
+| 3-copy Replication | N/A | 200% | 2 failures | ~6 nines durability |
+
+---
+
+## 5. So sánh Erasure Coding vs Replication
+
+| Tiêu chí | 3-Copy Replication | Erasure Coding (4+2) |
+|---|---|---|
+| Storage overhead | 200% | 50% |
+| Durability (0.81% node failure/năm) | ~6 nines (99.9999%) | ~11 nines (99.999999999%) |
+| Read latency | Thấp (đọc từ bất kỳ bản sao nào) | Cao hơn (đọc k shard, decode) |
+| Write latency | Trung bình (ghi 3 bản) | Cao hơn (encode + ghi k+m shard) |
+| Repair cost (1 failure) | Thấp: copy 1 bản (1× data size) | Cao: đọc k shard, tính toán, ghi 1 shard |
+| Độ phức tạp triển khai | Đơn giản | Phức tạp |
+| Phù hợp nhất cho | Hot data, cần latency thấp | Cold/warm data, cần tối ưu chi phí |
+
+![Replication vs Erasure Coding](/erasure-coding-replication-vs-ec.svg)
+
+Tóm lại: replication thắng ở **tốc độ và đơn giản**, erasure coding thắng ở **chi phí và durability**. Đây là lý do hầu hết hệ thống thực tế dùng **cả hai**: replication cho hot data (dữ liệu truy cập thường xuyên), erasure coding cho cold/warm data (dữ liệu ít truy cập).
+
+---
+
+## 6. Giới hạn của Erasure Coding
+
+Erasure coding không phải "silver bullet" (giải pháp vạn năng). Dưới đây là những trường hợp nó **không** giải quyết được hoặc gây ra vấn đề mới.
+
+### 6.1. CPU cost cao khi encode/decode
+
+Encoding yêu cầu phép nhân ma trận trong Galois Field cho **mỗi byte** dữ liệu. Decoding cần thêm bước đảo ngược ma trận. Điều này tốn CPU đáng kể so với replication (chỉ cần `memcpy` — sao chép vùng nhớ).
+
+Các CPU hiện đại giảm thiểu vấn đề này bằng **SIMD instructions** (Single Instruction Multiple Data — lệnh xử lý nhiều dữ liệu cùng lúc). Thư viện Intel ISA-L (Intelligent Storage Acceleration Library) đạt throughput encoding 2-10 GB/s — đủ nhanh cho hầu hết workload, nhưng vẫn chậm hơn đáng kể so với tốc độ copy bộ nhớ (20+ GB/s).
+
+### 6.2. Repair amplification — "Sửa 1 viên gạch, dỡ cả bức tường"
+
+Khi 1 shard bị mất, hệ thống cần đọc **k shard còn sống** qua mạng để tính lại shard bị mất. Trong cấu hình 10+4, sửa 1 shard = đọc 10 shard — tạo ra **gấp 10 lần** lưu lượng mạng so với lượng dữ liệu cần khôi phục.
+
+Đây gọi là **repair amplification** (khuếch đại khi sửa chữa) — và nó đặc biệt đau đầu ở quy mô lớn, nơi disk chết liên tục và hệ thống phải sửa chữa không ngừng.
+
+### 6.3. Không phù hợp với dữ liệu thay đổi liên tục
+
+Erasure coding hoạt động trên **immutable chunk** (khối dữ liệu không thay đổi). Nếu bạn cần sửa 1 byte trong data, toàn bộ stripe (k data shard + m parity shard) phải được **encode lại** — vì parity phụ thuộc vào tất cả data shard.
+
+Đây là lý do erasure coding được dùng cho **object storage** (lưu trữ đối tượng — nơi dữ liệu được ghi một lần, đọc nhiều lần) như S3, chứ không phải cho **block storage** (lưu trữ khối) hay **database** — nơi dữ liệu thay đổi liên tục.
+
+### 6.4. Tail latency — Chậm bằng shard chậm nhất
+
+Để đọc dữ liệu, hệ thống cần đọc **k shard** song song từ k server/disk khác nhau. Thời gian đọc = thời gian của **shard chậm nhất**. Chỉ cần 1 ổ cứng chậm hoặc 1 đường mạng tắc → toàn bộ request bị chậm.
+
+Với replication, bạn có thể đọc từ bản sao nhanh nhất. Erasure coding không có luxury đó.
+
+Một số hệ thống giảm thiểu bằng **speculative read** (đọc dự phòng): gửi k+1 request thay vì k, dùng k response đầu tiên, bỏ response chậm nhất. Nhưng cách này tốn thêm băng thông mạng.
+
+### 6.5. File nhỏ không hiệu quả
+
+Erasure coding chia data thành k phần. Nếu file nhỏ hơn k phần (ví dụ file 1KB với k=10), mỗi shard chỉ chứa vài chục byte nhưng vẫn phải chịu overhead metadata và quản lý riêng — **overhead trên mỗi byte dữ liệu** trở nên rất lớn.
+
+Giải pháp phổ biến: **gom nhiều file nhỏ** thành một object lớn trước khi áp dụng erasure coding. HDFS và S3 đều làm điều này.
+
+### 6.6. Không thay thế backup
+
+Đây có lẽ là hiểu lầm nguy hiểm nhất: erasure coding bảo vệ dữ liệu trước **hardware failure** (ổ cứng chết, server sập). Nó **KHÔNG** bảo vệ trước:
+
+- **Lỗi logic** (software bug ghi sai dữ liệu) — dữ liệu sai được encode và phân tán đúng quy trình, tất cả shard đều chứa dữ liệu sai.
+- **Xoá nhầm** (accidental delete) — lệnh xoá xoá cả k+m shard.
+- **Ransomware** — mã hoá toàn bộ shard trên tất cả server.
+- **Silent data corruption** (hỏng dữ liệu âm thầm) — nếu không có checksum riêng, shard hỏng vẫn được coi là "hợp lệ".
+
+Erasure coding giải quyết bài toán **durability** (dữ liệu không mất khi phần cứng hỏng), không giải quyết bài toán **recoverability** (khôi phục về trạng thái đúng tại một thời điểm trong quá khứ). **Backup** và **versioning** (lưu nhiều phiên bản) vẫn là bắt buộc.
+
+---
+
+## 7. Kết
+
+Quay lại câu hỏi ban đầu: *"Cắt 60% chi phí storage mà không mất durability?"*
+
+Erasure coding làm được điều đó bằng cách **đánh đổi CPU và độ phức tạp lấy hiệu quả lưu trữ**. Thay vì giữ 3 bản sao giống hệt nhau, nó chia dữ liệu thành các mảnh nhỏ và tạo thêm vài mảnh dư thừa — tiết kiệm hàng trăm petabyte ổ cứng ở quy mô của S3, Azure hay Google Cloud.
+
+Nhưng erasure coding không phải thuốc tiên. Nó phù hợp nhất với dữ liệu **ghi một lần, đọc nhiều lần** (immutable, cold/warm) — không phải database đang active hay file đang được edit liên tục. Và nó **không thay thế backup** — chỉ bảo vệ phần cứng, không bảo vệ logic.
+
+Nếu bạn đang thiết kế một hệ thống lưu trữ, câu hỏi không phải "erasure coding hay replication?" mà là "**phần nào dùng erasure coding, phần nào dùng replication?**" — và hầu hết hệ thống lớn đều trả lời: cả hai.
