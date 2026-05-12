@@ -20,7 +20,7 @@ When a database contains too much "garbage" data (bloat), table scans (sequentia
 
 To understand why a database slows down when bloated, we need to move past the logical row-based mindset (Excel style) and look at how PostgreSQL organizes data physically.
 
-![Database-page-tuple](/database-page.webp)
+<ExcalidrawDiagram src="/database-page.excalidraw" alt="Database page tuple" />
 
 Think of your Database as a giant notebook.
 
@@ -40,7 +40,7 @@ The rule: Databases operate on Pages. To get 1 item (Tuple), you have to lift th
 
 ### MVCC Mechanism and the Formation of "Dead Tuples"
 
-![Database-dead-tuple](/database-dead-tuple.webp)
+<ExcalidrawDiagram src="/database-dead-tuple.excalidraw" alt="Database dead tuple" />
 
 This is the most interesting part. When we execute SQL commands, Postgres behaves differently from what you might intuitively expect:
 
@@ -62,7 +62,7 @@ This is the mechanism of the **MVCC (Multi-Version Concurrency Control)** system
 * **VACUUM:** Scans and marks the space of Dead Tuples as "reusable" for new data. However, it does **not** return the space to the operating system (OS). The physical file size of the table does not shrink.
 * **Autovacuum:** A background daemon that automatically triggers VACUUM.
 
-![Database-fragmentation](/database-fragmentation.webp)
+<ExcalidrawDiagram src="/database-fragmentation.excalidraw" alt="Database fragmentation" />
 
 Even after VACUUM has been performed, data pages that had dead tuples cleaned up now have free space ready for INSERT/UPDATE operations. This improvement is immediately visible as the database stops growing in size.
 

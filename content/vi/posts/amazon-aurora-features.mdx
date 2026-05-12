@@ -82,7 +82,7 @@ Bạn chỉ cần định nghĩa scaling policy (ví dụ: target CPU 60%, min 1
 2. Tự động đăng ký replicas mới vào **Reader Endpoint**
 3. Tự bớt replicas khi load giảm
 
-![Aurora Replicas Auto Scaling](/aurora-auto-scale.png)
+<ExcalidrawDiagram src="/aurora-auto-scale.excalidraw" alt="Aurora Replicas Auto Scaling" />
 
 Nhìn vào diagram: Client gửi write traffic qua **Writer Endpoint** đến primary instance. Read traffic đi qua **Reader Endpoint**, được phân phối đến các replicas. Khi CPU tăng cao, Aurora tự động mở rộng thêm replicas (phần "Endpoint Extended") — tất cả vẫn dùng chung **Shared Storage Volume**.
 
@@ -94,7 +94,7 @@ Trong thực tế, không phải mọi read query đều giống nhau. Một câ
 
 **Custom Endpoints** cho phép bạn gom một **nhóm con** các replicas lại thành một endpoint riêng, phục vụ cho workload cụ thể.
 
-![Aurora Custom Endpoints](/aurora-custom-endpoint.png)
+<ExcalidrawDiagram src="/aurora-custom-endpoint.excalidraw" alt="Aurora Custom Endpoints" />
 
 Diagram cho thấy: Writer Endpoint trỏ đến primary, Reader Endpoint trỏ đến các instance `db.r3.large` cho general reads, và **Custom Endpoint** trỏ đến các instance `db.r5.2xlarge` — dành riêng cho heavy queries như dashboard, reports.
 

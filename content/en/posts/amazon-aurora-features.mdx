@@ -82,7 +82,7 @@ You only need to define a scaling policy (e.g., target CPU 60%, min 1 replica, m
 2. Automatically register new replicas with the **Reader Endpoint**
 3. Automatically remove replicas when load decreases
 
-![Aurora Replicas Auto Scaling](/aurora-auto-scale.png)
+<ExcalidrawDiagram src="/aurora-auto-scale.excalidraw" alt="Aurora Replicas Auto Scaling" />
 
 Looking at the diagram: the client sends write traffic through the **Writer Endpoint** to the primary instance. Read traffic goes through the **Reader Endpoint**, distributed to replicas. When CPU goes high, Aurora automatically expands with more replicas (the "Endpoint Extended" section) — all still using the shared **Shared Storage Volume**.
 
@@ -94,7 +94,7 @@ In practice, not all read queries are the same. A `SELECT * FROM users WHERE id 
 
 **Custom Endpoints** let you group a **subset** of replicas into a separate endpoint, dedicated to a specific workload.
 
-![Aurora Custom Endpoints](/aurora-custom-endpoint.png)
+<ExcalidrawDiagram src="/aurora-custom-endpoint.excalidraw" alt="Aurora Custom Endpoints" />
 
 The diagram shows: the Writer Endpoint points to the primary, the Reader Endpoint points to `db.r3.large` instances for general reads, and the **Custom Endpoint** points to `db.r5.2xlarge` instances — dedicated to heavy queries like dashboards and reports.
 
