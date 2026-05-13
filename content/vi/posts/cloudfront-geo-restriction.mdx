@@ -1,0 +1,104 @@
+---
+title: 'CloudFront Geo Restriction — Chặn traffic theo quốc gia ngay tại Edge'
+date: '2026-05-13'
+tags: ['Devops', 'AWS', 'SAA']
+enableComment: true
+---
+
+# CloudFront Geo Restriction — Chặn traffic theo quốc gia ngay tại Edge
+
+> Bạn có một ứng dụng Knowledge Base tích hợp LLM (Large Language Model — mô hình ngôn ngữ lớn, ví dụ như ChatGPT hay Claude). Một ngày bạn phát hiện hàng loạt tài khoản mới được tạo từ Nga bằng email tạm thời (temp mail), mục đích là sử dụng miễn phí credit LLM của bạn. Lý do? Tại Nga, các dịch vụ LLM bị hạn chế truy cập, nên người dùng tìm cách "đi đường vòng" qua các ứng dụng tích hợp như của bạn.
+
+Vậy làm thế nào để chặn traffic từ một quốc gia cụ thể mà không cần viết thêm một dòng code nào?
+
+Câu trả lời: **CloudFront Geo Restriction**.
+
+---
+
+## 1. CloudFront Geo Restriction là gì?
+
+**Amazon CloudFront** là dịch vụ CDN (Content Delivery Network — mạng phân phối nội dung) của AWS, giúp phân phối nội dung đến người dùng thông qua hệ thống các **Edge Location** (điểm biên) trải khắp thế giới, giúp giảm độ trễ và tăng tốc độ truy cập.
+
+**Geo Restriction** (hay Geographic Restrictions) là tính năng có sẵn trong CloudFront cho phép bạn **chặn hoặc cho phép** truy cập dựa trên quốc gia của người dùng.
+
+Cơ chế hoạt động khá đơn giản:
+
+- Khi một request đến CloudFront, hệ thống sẽ tra cứu **GeoIP Database** (cơ sở dữ liệu ánh xạ địa chỉ IP sang vị trí địa lý) để xác định quốc gia của người gửi request
+- Nếu quốc gia đó nằm trong danh sách chặn → CloudFront trả về **403 Forbidden** ngay tại Edge, request **không bao giờ** đến được Origin Server (máy chủ gốc của bạn)
+- Nếu không bị chặn → request được chuyển tiếp đến Origin Server bình thường
+
+CloudFront hỗ trợ hai chế độ:
+
+- **Allowlist** (Danh sách cho phép): chỉ các quốc gia trong danh sách mới được truy cập, tất cả còn lại bị chặn
+- **Blocklist** (Danh sách chặn): các quốc gia trong danh sách bị chặn, tất cả còn lại được phép truy cập
+
+Các quốc gia được xác định bằng mã **ISO 3166-1 alpha-2** (ví dụ: `RU` cho Nga, `VN` cho Việt Nam, `US` cho Mỹ).
+
+<ExcalidrawDiagram src="/cloudfront-geo-restriction-flow.excalidraw" alt="CloudFront Geo Restriction Request Flow" />
+
+---
+
+## 2. Cách thiết lập Geo Restriction
+
+### Qua AWS Console
+
+1. Mở **CloudFront Console**, chọn Distribution cần cấu hình
+2. Vào tab **Security**
+3. Tại mục **CloudFront geographic restrictions**, nhấn **Edit**
+4. Chọn restriction type là **Block list**
+5. Chọn các quốc gia cần chặn (ví dụ: Russian Federation — `RU`)
+6. Nhấn **Save changes**
+
+Thay đổi sẽ được propagate đến tất cả Edge Location trong vài phút.
+
+### Qua CloudFormation
+
+```yaml
+Resources:
+  MyDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: blacklist
+            Locations:
+              - RU
+```
+
+Hoặc nếu bạn muốn dùng **AWS CLI**:
+
+```bash
+aws cloudfront update-distribution \
+  --id E1EXAMPLE \
+  --distribution-config file://config.json
+```
+
+Trong đó `config.json` chứa cấu hình Distribution với phần `Restrictions` tương tự như trên.
+
+---
+
+## 3. Hạn chế và lựa chọn thay thế
+
+Geo Restriction rất tiện lợi nhưng có một số hạn chế cần lưu ý:
+
+- **Chỉ chặn ở cấp quốc gia**: bạn không thể chặn theo vùng, thành phố hay dải IP cụ thể
+- **Có thể bị bypass bằng VPN**: VPN (Virtual Private Network — mạng riêng ảo) cho phép người dùng ẩn vị trí thật bằng cách định tuyến traffic qua server ở quốc gia khác. Người dùng sử dụng VPN có thể vượt qua Geo Restriction
+- **Trang lỗi mặc định**: CloudFront trả về trang 403 generic. Nếu muốn trang lỗi tùy chỉnh, bạn cần cấu hình **Custom Error Responses** trong Distribution
+
+Nếu cần kiểm soát chi tiết hơn, hãy cân nhắc **AWS WAF** (Web Application Firewall — tường lửa ứng dụng web):
+
+| | Geo Restriction | AWS WAF Geographic Match |
+|---|---|---|
+| Độ chi tiết | Chỉ theo quốc gia | Quốc gia + kết hợp điều kiện khác |
+| Chi phí | Miễn phí (tích hợp sẵn trong CloudFront) | Tính phí theo rule và request |
+| Logic tùy chỉnh | Không | Có (rate limit + geo, IP + geo, bot detection...) |
+| Độ phức tạp | Rất đơn giản | Phức tạp hơn |
+
+**Khuyến nghị**: với bài toán chặn traffic từ một vài quốc gia cụ thể, Geo Restriction là đủ và hoàn toàn miễn phí. Chuyển sang WAF khi bạn cần các rule kết hợp như "chặn Nga **và** rate limit các quốc gia khác".
+
+---
+
+## 4. Kết luận
+
+CloudFront Geo Restriction là một trong những cách đơn giản và hiệu quả nhất để chặn traffic không mong muốn từ các quốc gia cụ thể. Nó miễn phí, chỉ mất vài phút cấu hình, và chặn request ngay tại Edge trước khi chúng tiêu tốn tài nguyên của Origin Server. Với các tình huống phức tạp hơn, hãy xem xét kết hợp thêm AWS WAF để có lớp bảo vệ chi tiết hơn.

@@ -1,0 +1,104 @@
+---
+title: 'CloudFront Geo Restriction — Block Traffic by Country at the Edge'
+date: '2026-05-13'
+tags: ['Devops', 'AWS', 'SAA']
+enableComment: true
+---
+
+# CloudFront Geo Restriction — Block Traffic by Country at the Edge
+
+> You have a Knowledge Base application integrated with an LLM (Large Language Model — a large-scale AI model like ChatGPT or Claude). One day you notice a flood of new accounts created from Russia using temporary emails (temp mail), all burning through your free LLM credits. The reason? In Russia, LLM services are restricted, so users find workarounds through integrated apps like yours.
+
+So how do you block traffic from a specific country without writing a single line of code?
+
+The answer: **CloudFront Geo Restriction**.
+
+---
+
+## 1. What is CloudFront Geo Restriction?
+
+**Amazon CloudFront** is AWS's CDN (Content Delivery Network — a globally distributed network of servers that caches and delivers content closer to users), reducing latency and improving access speed through **Edge Locations** around the world.
+
+**Geo Restriction** (also known as Geographic Restrictions) is a built-in CloudFront feature that lets you **block or allow** access based on the viewer's country.
+
+The mechanism is straightforward:
+
+- When a request reaches CloudFront, the system looks up a **GeoIP Database** (a database that maps IP addresses to geographic locations) to determine the requester's country
+- If that country is on the block list → CloudFront returns a **403 Forbidden** response right at the Edge — the request **never** reaches your Origin Server
+- If not blocked → the request is forwarded to the Origin Server as usual
+
+CloudFront supports two modes:
+
+- **Allowlist**: only countries on the list can access your content; all others are blocked
+- **Blocklist**: countries on the list are blocked; everyone else is allowed
+
+Countries are identified by their **ISO 3166-1 alpha-2** codes (e.g., `RU` for Russia, `VN` for Vietnam, `US` for the United States).
+
+<ExcalidrawDiagram src="/cloudfront-geo-restriction-flow.excalidraw" alt="CloudFront Geo Restriction Request Flow" />
+
+---
+
+## 2. How to Set Up Geo Restriction
+
+### Via AWS Console
+
+1. Open the **CloudFront Console** and select the Distribution you want to configure
+2. Go to the **Security** tab
+3. Under **CloudFront geographic restrictions**, click **Edit**
+4. Set the restriction type to **Block list**
+5. Select the countries to block (e.g., Russian Federation — `RU`)
+6. Click **Save changes**
+
+Changes will propagate to all Edge Locations within a few minutes.
+
+### Via CloudFormation
+
+```yaml
+Resources:
+  MyDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: blacklist
+            Locations:
+              - RU
+```
+
+Or using **AWS CLI**:
+
+```bash
+aws cloudfront update-distribution \
+  --id E1EXAMPLE \
+  --distribution-config file://config.json
+```
+
+Where `config.json` contains the Distribution configuration with the `Restrictions` section as shown above.
+
+---
+
+## 3. Limitations and Alternatives
+
+Geo Restriction is convenient but comes with some caveats:
+
+- **Country-level only**: you cannot block by region, city, or specific IP range
+- **Can be bypassed with a VPN**: a VPN (Virtual Private Network — a service that routes traffic through servers in other countries, masking the real location) allows users to hide their true location and bypass Geo Restriction
+- **Generic error page**: CloudFront returns a default 403 page. For a custom error page, you need to configure **Custom Error Responses** in the Distribution
+
+For more granular control, consider **AWS WAF** (Web Application Firewall — a service that lets you create rules to filter web traffic):
+
+| | Geo Restriction | AWS WAF Geographic Match |
+|---|---|---|
+| Granularity | Country only | Country + combinable with other rules |
+| Cost | Free (included with CloudFront) | Priced per rule and per request |
+| Custom logic | No | Yes (rate limit + geo, IP + geo, bot detection...) |
+| Complexity | Very simple | More complex |
+
+**Recommendation**: for simply blocking traffic from a few specific countries, Geo Restriction is sufficient and completely free. Switch to WAF when you need combined rules like "block Russia **and** rate-limit other countries".
+
+---
+
+## 4. Conclusion
+
+CloudFront Geo Restriction is one of the simplest and most effective first lines of defense against unwanted traffic from specific countries. It's free, takes only minutes to configure, and blocks requests right at the Edge before they consume any resources on your Origin Server. For more advanced scenarios, consider layering AWS WAF on top for more granular protection.
