@@ -1,0 +1,650 @@
+---
+title: 'S3 Presigned URL: Upload và download an toàn mà không cần proxy qua backend'
+date: '2026-05-13'
+tags: ['Devops', 'AWS', 'SAA']
+enableComment: true
+---
+
+# S3 Presigned URL: Upload và download an toàn mà không cần proxy qua backend
+
+> Bạn đang xây một ứng dụng quản lý tài liệu. User upload hợp đồng, hoá đơn (có file 50MB), download bản PDF private, và xem avatar của nhau. Mọi file đều đi qua backend: client gửi file lên server, server stream lên S3, rồi ngược lại khi download. Giờ cao điểm — 200 user upload cùng lúc — backend ngốn 10GB RAM, response time từ 100ms nhảy lên 8 giây, auto-scaling bill nhân ba.
+
+Vấn đề thật sự: **tại sao backend lại phải chạm vào từng byte của file?** Backend chỉ cần làm đúng một việc — **xác thực user và ký một "giấy phép" tạm thời** — rồi để client nói chuyện thẳng với S3.
+
+Đó chính là ý tưởng của **Presigned URL**.
+
+Bài viết này sẽ đi từ khái niệm cơ bản đến kiến trúc thực tế: presigned URL là gì, giải quyết vấn đề gì, và áp dụng vào bài toán thật với **3 luồng** — upload file, download tài liệu, và hiển thị ảnh avatar qua CDN.
+
+---
+
+## 1. Presigned URL là gì?
+
+### 1.1. Bài toán cơ bản
+
+Khi bạn tạo một S3 bucket, mặc định nó hoàn toàn **private** — chỉ có IAM principal (IAM user, IAM role — những thực thể được AWS cấp quyền) mới truy cập được. Browser hay mobile app của user không có AWS credentials, nên không thể gọi thẳng S3 API.
+
+Vậy làm sao để client upload hoặc download file trực tiếp từ S3 mà không cần đi qua backend?
+
+### 1.2. Ý tưởng
+
+Backend đóng vai là giám đốc, ký tên lên 1 biên bản đặc biệt có tên là **presigned URL**. Ai có biên bản này này đều có thể xem và lấy tài nguyên trong kho thông qua thủ kho tên là **S3** nhưng biên bản chỉ có hiệu lực trong ngày.
+
+Nói đơn giản: presigned URL là một **tấm vé vào cửa có thời hạn**. Backend ký vé, client dùng vé để vào thẳng S3, không cần đi qua backend nữa.
+
+### 1.3. Quy trình ký (Signing Process)
+
+Backend sử dụng **AWS Signature Version 4** (SigV4) để ký URL. Quy trình ở mức khái niệm:
+
+1. Backend tập hợp thông tin: HTTP method (GET/POST), bucket name, object key, thời hạn (expires)
+2. Dùng **secret access key** của IAM role để tạo signature
+3. Ghép signature cùng các metadata vào query string của URL
+4. Trả URL hoàn chỉnh cho client
+
+Toàn bộ quá trình ký diễn ra **local trên backend** — không gọi S3 API, no round trip time.
+
+### 1.4. Giải phẫu một presigned URL
+
+Một presigned GET URL trông như thế này:
+
+```
+https://my-bucket.s3.ap-southeast-1.amazonaws.com/documents/user-123/invoice.pdf
+  ?X-Amz-Algorithm=AWS4-HMAC-SHA256
+  &X-Amz-Credential=AKIA.../20260513/ap-southeast-1/s3/aws4_request
+  &X-Amz-Date=20260513T100000Z
+  &X-Amz-Expires=300
+  &X-Amz-SignedHeaders=host
+  &X-Amz-Signature=a1b2c3d4e5...
+```
+
+| Tham số               | Ý nghĩa                                                   |
+| --------------------- | --------------------------------------------------------- |
+| `X-Amz-Algorithm`     | Thuật toán ký — luôn là `AWS4-HMAC-SHA256`                |
+| `X-Amz-Credential`    | IAM access key + scope (ngày/region/service)              |
+| `X-Amz-Date`          | Thời điểm ký URL                                          |
+| `X-Amz-Expires`       | Thời hạn sống (giây). Ví dụ `300` = 5 phút                |
+| `X-Amz-SignedHeaders` | Các HTTP header được bao gồm trong chữ ký                 |
+| `X-Amz-Signature`     | Chữ ký — chuỗi hex được tính từ secret key + request info |
+
+### 1.5. Đặc điểm quan trọng
+
+- **Self-contained**: URL chứa mọi thứ cần thiết — không cần thêm cookie, header, hay AWS credentials
+- **Có thời hạn**: Hết expire → S3 từ chối (trả 403)
+- **Scoped**: Mỗi URL chỉ cho phép đúng một operation trên đúng một object key
+- **Ai có URL đều dùng được**: Vì không cần auth header, nếu URL bị leak thì ai cũng truy cập được → giữ thời hạn ngắn
+
+> **Lưu ý**: Presigned URL **kế thừa quyền** của IAM entity đã ký nó. Nếu IAM role của backend chỉ có quyền `PutObject` vào prefix `uploads/*`, thì presigned URL cũng chỉ có thể upload vào `uploads/*`.
+
+---
+
+## 2. Presigned URL giải quyết vấn đề gì?
+
+### 2.1. Không cần proxy file qua backend
+
+Ở mô hình truyền thống, mỗi file upload/download đều đi qua backend:
+
+```
+Client → Backend (proxy) → S3
+Client ← Backend (proxy) ← S3
+```
+
+Backend phải buffer toàn bộ file trong memory hoặc stream qua, tiêu tốn **CPU, RAM, và bandwidth**. Khi nhiều user upload đồng thời, backend trở thành bottleneck.
+
+Với presigned URL, backend **chỉ ký URL** (thao tác CPU-only, vài milliseconds), rồi client nói chuyện thẳng với S3:
+
+```
+Client → Backend (ký URL, ~5ms) → Client
+Client ←→ S3 (upload/download trực tiếp)
+```
+
+### 2.2. Bucket vẫn hoàn toàn private
+
+Không cần mở public access, không cần thêm bucket policy phức tạp. S3 **Block Public Access** vẫn bật toàn bộ 4 options. Presigned URL là **cánh cửa duy nhất** để vào, và cánh cửa đó có đồng hồ đếm ngược.
+
+### 2.3. Backend là "gatekeeper", không phải "courier"
+
+Backend vẫn kiểm soát hoàn toàn:
+
+- **Xác thực** (Authentication): Verify JWT trước khi ký
+- **Phân quyền** (Authorization): Check user có quyền truy cập resource không
+- **Audit**: Log ai download gì, lúc nào
+
+Nhưng backend **không chạm vào file** — công việc nặng (truyền tải dữ liệu) để S3 lo.
+
+<ExcalidrawDiagram src="/s3-presigned-url-architecture.excalidraw" alt="S3 Presigned URL Architecture" />
+
+---
+
+## 3. Các use case phổ biến
+
+| Use case              | Phương thức                   | Khi nào dùng                                | Ví dụ                            |
+| --------------------- | ----------------------------- | ------------------------------------------- | -------------------------------- |
+| Upload file           | **Presigned POST**            | User upload file từ browser/mobile          | Avatar, hoá đơn, ảnh sản phẩm    |
+| Download file private | **Presigned GET**             | User click nút Download để tải file         | Hợp đồng, báo cáo, file đính kèm |
+| Hiển thị ảnh/asset    | **CloudFront Signed Cookies** | Ảnh hiển thị thường xuyên trong `<img>` tag | Avatar, banner, thumbnail        |
+
+Tại sao 3 use case lại dùng 3 cơ chế khác nhau?
+
+- **Upload**: Presigned POST cho phép **S3 enforce constraints** (giới hạn file size, content-type) — điều mà Presigned PUT không làm được
+- **Download**: Truy cập thưa thớt, có chủ đích (user click Download) — ký URL từng lần là đủ
+- **Hiển thị ảnh**: Một trang có thể render 50 avatar — ký 50 URL riêng lẻ rất tốn kém, và URL thay đổi liên tục phá vỡ browser cache. CloudFront Signed Cookies (một bộ cookie mở khoá nhiều URL) giải quyết cả hai vấn đề
+
+---
+
+## 4. Bài toán thực tế
+
+Để minh hoạ, giả sử bạn đang xây một ứng dụng web có authentication với 3 yêu cầu:
+
+1. **User upload** tài liệu (PDF, hợp đồng) và ảnh (avatar, ảnh sản phẩm)
+2. **User download** tài liệu private — chỉ chủ sở hữu hoặc người được chia sẻ mới tải được
+3. **Hiển thị avatar và banner** trực tiếp trong `<img src="...">` cho mọi user đã đăng nhập
+
+Nguyên tắc thiết kế:
+
+- **S3 bucket hoàn toàn private**: Block Public Access bật toàn bộ
+- **Backend là gatekeeper**: Mọi presigned URL / cookie chỉ được cấp sau khi xác thực
+- **Defense in depth**: Validate ở nhiều lớp — JWT, ownership check, S3 policy condition, key naming convention (quy ước đặt tên object key có chứa userId)
+- **Short-lived credentials**: URL hết hạn sau 5 phút, cookie hết hạn sau 1 giờ
+
+Cấu trúc object key trong S3:
+
+```
+documents/{userId}/{uuid}-{originalFilename}   ← tài liệu private
+images/{userId}/{uuid}-{originalFilename}      ← ảnh upload (ảnh sản phẩm, bài viết)
+avatars/{userId}/{uuid}.{ext}                  ← avatar (qua CloudFront)
+```
+
+Quy ước có `{userId}` trong key giúp phân quyền theo prefix, và backend có thể parse userId từ key để double-check với JWT — đó là một lớp **defense in depth**.
+
+---
+
+## 5. Flow 1: Upload file qua Presigned POST
+
+### 5.1. Tại sao POST mà không phải PUT?
+
+S3 hỗ trợ cả **Presigned PUT** và **Presigned POST**. Với client untrusted (browser), POST là lựa chọn an toàn hơn vì S3 **enforce policy conditions** ngay lúc nhận request:
+
+| Khía cạnh                       | Presigned PUT              | Presigned POST                                          |
+| ------------------------------- | -------------------------- | ------------------------------------------------------- |
+| Giới hạn file size              | Không enforce được tại S3  | `content-length-range` — S3 reject nếu vượt             |
+| Giới hạn content-type           | Phải khớp chính xác khi ký | `starts-with` — cho phép prefix matching (vd: `image/`) |
+| Giới hạn key path               | Key cố định khi ký         | Cho phép prefix linh hoạt                               |
+| Body format                     | Raw bytes                  | `multipart/form-data`                                   |
+| File > 100MB (multipart upload) | Hỗ trợ                     | Không                                                   |
+
+PUT chỉ phù hợp khi source upload là server-side hoặc cần multipart upload cho file rất lớn. Với browser upload thông thường, **luôn dùng POST**.
+
+### 5.2. Sequence diagram
+
+<ExcalidrawDiagram src="/s3-presigned-url-upload-flow.excalidraw" alt="Upload Flow via Presigned POST" />
+
+### 5.3. Backend: Tạo presigned POST
+
+```typescript
+import { S3Client } from '@aws-sdk/client-s3'
+import { createPresignedPost } from '@aws-sdk/s3-presigned-post'
+import crypto from 'crypto'
+import path from 'path'
+
+const s3 = new S3Client({ region: process.env.AWS_REGION })
+
+const PURPOSE_CONFIG = {
+  avatar: { prefix: 'avatars', maxSize: 5 * 1024 * 1024, allowedType: 'image/' },
+  image: { prefix: 'images', maxSize: 10 * 1024 * 1024, allowedType: 'image/' },
+  document: { prefix: 'documents', maxSize: 20 * 1024 * 1024, allowedType: '' },
+}
+
+app.post('/api/uploads/presign', authMiddleware, async (req, res) => {
+  const userId = req.user.id
+
+  const { purpose, fileName, contentType, fileSize } = req.body
+
+  const config = PURPOSE_CONFIG[purpose]
+
+  if (!config) {
+    return res.status(400).json({ error: 'Invalid purpose' })
+  }
+
+  if (fileSize > config.maxSize) {
+    return res.status(400).json({ error: 'File too large' })
+  }
+
+  if (config.allowedType && !contentType.startsWith(config.allowedType)) {
+    return res.status(400).json({ error: 'Invalid content type' })
+  }
+
+  const fileId = crypto.randomUUID()
+  const ext = path.extname(fileName)
+  const key = `${config.prefix}/${userId}/${fileId}${ext}`
+
+  const conditions = [
+    ['content-length-range', 1, config.maxSize],
+    ['eq', '$key', key],
+  ]
+
+  if (config.allowedType) {
+    conditions.push(['starts-with', '$Content-Type', config.allowedType])
+  }
+
+  const { url, fields } = await createPresignedPost(s3, {
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+    Conditions: conditions,
+    Fields: { 'Content-Type': contentType },
+    Expires: 300,
+  })
+
+  await db.uploads.create({
+    fileId,
+    key,
+    userId,
+    purpose,
+    fileName,
+    contentType,
+    fileSize,
+    status: 'pending',
+    createdAt: new Date(),
+  })
+
+  res.json({ url, fields, key, fileId })
+})
+```
+
+Điểm mấu chốt là mảng `conditions`:
+
+- `content-length-range`: S3 reject request nếu file size không đúng với những gì đã mô tả khi presign url
+- `eq $key`: Chỉ cho phép upload đúng key path đã định — client không thể đổi sang key khác
+- `starts-with $Content-Type`: Chỉ cho phép content-type bắt đầu bằng `image/` (cho avatar/image) — client không thể upload file `.exe` giả dạng
+
+### 5.4. Frontend: Upload trực tiếp lên S3
+
+```typescript
+async function uploadFile(file: File, purpose: string) {
+  const presignRes = await fetch('/api/uploads/presign', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${getToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      purpose,
+      fileName: file.name,
+      contentType: file.type,
+      fileSize: file.size,
+    }),
+  })
+
+  if (!presignRes.ok) {
+    throw new Error('Failed to get upload URL')
+  }
+
+  const { url, fields, key, fileId } = await presignRes.json()
+
+  const formData = new FormData()
+  Object.entries(fields).forEach(([k, v]) => formData.append(k, v as string))
+  formData.append('file', file)
+
+  const uploadRes = await fetch(url, { method: 'POST', body: formData })
+
+  if (!uploadRes.ok) {
+    throw new Error('Upload failed')
+  }
+
+  const confirmRes = await fetch('/api/uploads/confirm', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${getToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ fileId, key }),
+  })
+
+  return await confirmRes.json()
+}
+```
+
+> **Lưu ý**: `formData.append('file', file)` phải là **field cuối cùng** trong FormData. S3 yêu cầu file binary nằm sau tất cả các policy fields.
+
+### 5.5. Backend: Xác nhận upload (confirm)
+
+Sau khi client báo upload thành công, backend **không tin lời client** — mà gọi `HeadObject` để verify:
+
+```typescript
+import { HeadObjectCommand } from '@aws-sdk/client-s3'
+
+app.post('/api/uploads/confirm', authMiddleware, async (req, res) => {
+  const { fileId, key } = req.body
+
+  const upload = await db.uploads.findOne({ fileId, userId: req.user.id })
+
+  if (!upload || upload.status !== 'pending') {
+    return res.status(404).json({ error: 'Upload not found' })
+  }
+
+  const head = await s3.send(
+    new HeadObjectCommand({
+      Bucket: process.env.S3_BUCKET,
+      Key: key,
+    })
+  )
+
+  await db.uploads.update(
+    { fileId },
+    {
+      status: 'ready',
+      actualSize: head.ContentLength,
+      actualContentType: head.ContentType,
+    }
+  )
+
+  res.json({ fileId, status: 'ready' })
+})
+```
+
+### 5.6. Xử lý lỗi
+
+| Tình huống                      | S3 trả về                     | Cách xử lý                                  |
+| ------------------------------- | ----------------------------- | ------------------------------------------- |
+| File quá lớn                    | 403 `EntityTooLarge`          | Client thông báo lỗi, yêu cầu file nhỏ hơn  |
+| Sai content-type                | 403 `Policy Condition failed` | Client kiểm tra lại loại file               |
+| URL hết hạn                     | 403 `Policy expired`          | Client xin URL mới từ backend               |
+| Upload thành công, confirm fail | —                             | Lifecycle policy xoá file `pending` sau 24h |
+| Mất kết nối giữa upload         | —                             | Client retry toàn bộ flow (xin URL mới)     |
+
+---
+
+## 6. Flow 2: Download tài liệu qua Presigned GET
+
+### 6.1. Khi nào cần Presigned GET?
+
+Tài liệu private (hợp đồng, báo cáo, file đính kèm) có đặc điểm: truy cập **thưa thớt** và **có chủ đích** — user click nút "Download" một cách rõ ràng. Mỗi lần download đều cần kiểm tra quyền và ghi audit log.
+
+Presigned GET URL phù hợp vì:
+
+- File không đi qua backend → tiết kiệm bandwidth
+- Browser handle download natively (progress bar, resume)
+- S3 trả về với header `Content-Disposition: attachment` để force download
+
+### 6.2. Sequence diagram
+
+<ExcalidrawDiagram src="/s3-presigned-url-download-flow.excalidraw" alt="Download Flow via Presigned GET" />
+
+### 6.3. Backend: Ký presigned GET URL
+
+```typescript
+import { GetObjectCommand } from '@aws-sdk/client-s3'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
+
+app.get('/api/documents/:id/download', authMiddleware, async (req, res) => {
+  const userId = req.user.id
+
+  const doc = await db.documents.findById(req.params.id)
+
+  if (!doc) {
+    return res.status(404).json({ error: 'Document not found' })
+  }
+
+  const expiresIn = 300
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET,
+      Key: doc.s3Key,
+      ResponseContentDisposition: `attachment; filename="${encodeURIComponent(doc.fileName)}"`,
+      ResponseContentType: doc.contentType,
+    }),
+    { expiresIn }
+  )
+
+  await db.auditLogs.create({
+    userId,
+    action: 'document.download',
+    resourceId: doc.id,
+    createdAt: new Date(),
+  })
+
+  res.json({
+    url,
+    expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+    fileName: doc.fileName,
+  })
+})
+```
+
+### 6.4. Frontend: Download
+
+```typescript
+async function downloadDocument(documentId: string) {
+  const res = await fetch(`/api/documents/${documentId}/download`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  })
+
+  if (!res.ok) {
+    throw new Error('Cannot download')
+  }
+
+  const { url } = await res.json()
+
+  window.location.href = url
+}
+```
+
+Vì S3 response có `Content-Disposition: attachment`, browser sẽ tự động hiển thị hộp thoại download — không cần xử lý thêm ở client.
+
+### 6.5. Lưu ý bảo mật
+
+- **Không log full URL** vào application log — URL chứa signature, ai có URL đều download được trong thời hạn
+- **Audit log**: Ghi userId, documentId, timestamp — dùng cho compliance (GDPR, internal audit)
+- **Rate limit**: Giới hạn số lần xin URL mỗi phút per user để chống abuse
+- **Filename sanitization**: Encode tên file trong `Content-Disposition` header để tránh injection
+
+---
+
+## 7. Flow 3: Hiển thị ảnh qua CloudFront Signed Cookies
+
+### 7.1. Tại sao không dùng Presigned GET cho ảnh?
+
+Xem lại tình huống: một trang profile hiển thị 50 avatar của user khác nhau. Nếu dùng presigned GET URL cho mỗi ảnh:
+
+1. **50 API calls** trước khi render trang — mỗi avatar cần xin URL riêng
+2. **Browser cache bị vô hiệu hoá** — mỗi URL có signature khác nhau (vì timestamp khác), browser coi là URL mới → load lại từ đầu
+3. **Không CDN-friendly** — URL thay đổi liên tục, CDN không cache được
+
+### 7.2. Giải pháp: CloudFront Signed Cookies
+
+**CloudFront Signed Cookies** cho phép một bộ 3 cookies cấp quyền truy cập cho **toàn bộ URL pattern** (ví dụ: `https://cdn.app.com/avatars/*`). Sau khi browser có cookies:
+
+- Mọi `<img src="https://cdn.app.com/avatars/...">` đều hoạt động tự động
+- Browser cache ảnh bình thường (URL cố định, không có signature trong path)
+- CloudFront CDN cache ảnh tại edge location gần user nhất
+
+So sánh với các phương án khác:
+
+| Phương án                                     | URL cố định | Browser cache | CDN cache |   Setup    |
+| --------------------------------------------- | :---------: | :-----------: | :-------: | :--------: |
+| Presigned URL nhúng vào `src`                 |      ✗      |       ✗       |     ✗     |  Đơn giản  |
+| Backend proxy (`<img src="/api/avatar/123">`) |      ✓      |       ✓       |     ✗     |  Đơn giản  |
+| Backend redirect (302 → presigned URL)        |      ✓      |       ✗       |     ✗     | Trung bình |
+| **CloudFront Signed Cookies**                 |    **✓**    |     **✓**     |   **✓**   |  Phức tạp  |
+
+### 7.3. Kiến trúc: CloudFront + OAC + S3
+
+**Origin Access Control** (OAC) là cơ chế mới của CloudFront (thay thế OAI cũ), đảm bảo **chỉ CloudFront mới đọc được S3** — user không thể bypass CloudFront để truy cập S3 trực tiếp.
+
+Setup bao gồm:
+
+1. Tạo **CloudFront Key Pair** (RSA 2048-bit) — public key upload lên CloudFront, private key lưu trong Secrets Manager
+2. Tạo **Trusted Key Group** chứa public key
+3. Tạo **CloudFront Distribution** với OAC pointing tới S3 bucket
+4. Cập nhật **S3 bucket policy** chỉ cho phép CloudFront OAC
+5. Cấu hình **DNS**: `cdn.app.com` → CNAME → CloudFront domain
+
+S3 bucket policy cho OAC:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudfront.amazonaws.com" },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-bucket/*",
+      "Condition": {
+        "StringEquals": {
+          "AWS:SourceArn": "arn:aws:cloudfront::ACCOUNT_ID:distribution/DISTRIBUTION_ID"
+        }
+      }
+    }
+  ]
+}
+```
+
+### 7.4. Sequence diagram
+
+<ExcalidrawDiagram src="/s3-presigned-url-cloudfront-cookies.excalidraw" alt="CloudFront Signed Cookies Flow" />
+
+### 7.5. Backend: Tạo Signed Cookies
+
+Gọi endpoint này ngay sau khi login thành công:
+
+```typescript
+import { getSignedCookies } from '@aws-sdk/cloudfront-signer'
+import fs from 'fs'
+
+const PRIVATE_KEY = fs.readFileSync(process.env.CLOUDFRONT_PRIVATE_KEY_PATH, 'utf-8')
+const KEY_PAIR_ID = process.env.CLOUDFRONT_KEY_PAIR_ID
+const CDN_DOMAIN = 'cdn.app.com'
+
+app.post('/api/auth/cdn-cookies', authMiddleware, async (req, res) => {
+  const expiresIn = 60 * 60
+  const expiresAt = Math.floor(Date.now() / 1000) + expiresIn
+
+  const policy = {
+    Statement: [
+      {
+        Resource: `https://${CDN_DOMAIN}/*`,
+        Condition: {
+          DateLessThan: { 'AWS:EpochTime': expiresAt },
+        },
+      },
+    ],
+  }
+
+  const cookies = getSignedCookies({
+    keyPairId: KEY_PAIR_ID,
+    privateKey: PRIVATE_KEY,
+    policy: JSON.stringify(policy),
+  })
+
+  const cookieOptions = {
+    domain: '.app.com',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax' as const,
+    maxAge: expiresIn * 1000,
+  }
+
+  res.cookie('CloudFront-Policy', cookies['CloudFront-Policy'], cookieOptions)
+  res.cookie('CloudFront-Signature', cookies['CloudFront-Signature'], cookieOptions)
+  res.cookie('CloudFront-Key-Pair-Id', cookies['CloudFront-Key-Pair-Id'], cookieOptions)
+
+  res.json({ expiresAt: new Date(expiresAt * 1000).toISOString() })
+})
+```
+
+Lưu ý cookie domain: `.app.com` (có dấu chấm ở đầu) cho phép cookie được gửi tới cả `app.com` (frontend) và `cdn.app.com` (CloudFront). Đây là lý do frontend và CDN cần cùng **parent domain**.
+
+### 7.6. Frontend: Không cần làm gì đặc biệt
+
+Sau khi gọi API set cookies, browser tự động gửi cookies kèm mọi request tới `cdn.app.com`:
+
+```tsx
+async function setupCdnAccess() {
+  await fetch('/api/auth/cdn-cookies', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken()}` },
+    credentials: 'include',
+  })
+}
+
+function Avatar({ userId, fileId }: { userId: string; fileId: string }) {
+  return <img src={`https://cdn.app.com/avatars/${userId}/${fileId}.jpg`} alt="Avatar" loading="lazy" />
+}
+```
+
+URL cố định, browser cache hoạt động bình thường, CDN cache hoạt động — không có gì magic phía client.
+
+### 7.7. Cookie refresh và logout
+
+Cookie chỉ sống 1 giờ. Có 3 chiến lược refresh:
+
+| Chiến lược               | Cách hoạt động                                                                | Ưu/Nhược                                          |
+| ------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------- |
+| **Proactive**            | Lưu `expiresAt`, set timer gọi lại trước khi hết hạn 5 phút                   | UX mượt, nhưng phức tạp (xử lý tab inactive)      |
+| **Reactive**             | Khi `<img>` fail (403), trigger refresh + reload ảnh                          | Đơn giản, nhưng user thấy broken image trong 1-2s |
+| **Hybrid** (khuyến nghị) | Refresh khi app khởi động + mỗi khi focus lại tab. Kết hợp `onError` fallback | Cân bằng giữa UX và độ phức tạp                   |
+
+Khi logout, **phải clear cookies**:
+
+```typescript
+app.post('/api/auth/logout', (req, res) => {
+  const cookieOptions = { domain: '.app.com', path: '/' }
+  res.clearCookie('CloudFront-Policy', cookieOptions)
+  res.clearCookie('CloudFront-Signature', cookieOptions)
+  res.clearCookie('CloudFront-Key-Pair-Id', cookieOptions)
+  res.json({ ok: true })
+})
+```
+
+> **Lưu ý**: Ngay cả khi clear cookie, cookie cũ vẫn hợp lệ tới expire time — CloudFront verify dựa trên signature, không có khái niệm "revoke". Đây là trade-off của signed cookie/URL. Nếu cần revoke ngay lập tức, phải rotate private key (ảnh hưởng tất cả user) hoặc giữ thời hạn cookie rất ngắn (15-30 phút).
+
+### 7.8. So sánh Presigned URL vs Signed Cookies
+
+| Tiêu chí             | Presigned URL                | Signed Cookies                      |
+| -------------------- | ---------------------------- | ----------------------------------- |
+| Phạm vi              | 1 URL = 1 object             | 1 bộ cookie = toàn bộ path pattern  |
+| Browser cache        | Không (URL khác mỗi lần)     | Có (URL cố định)                    |
+| Overhead per request | Ký mỗi URL riêng             | Ký 1 lần, dùng cho mọi request      |
+| Phù hợp cho          | Download file, truy cập thưa | Hiển thị ảnh, truy cập thường xuyên |
+| Cần CDN?             | Không bắt buộc               | Cần CloudFront                      |
+| Quản lý cookie       | Không                        | Cần set/clear/refresh cookies       |
+
+---
+
+## 8. Bảo mật tổng hợp
+
+### 8.1. Defense in depth — nhìn qua 3 flows
+
+| Lớp bảo vệ          | Upload (POST)                       | Download (GET)            | Images (Cookies)            |
+| ------------------- | ----------------------------------- | ------------------------- | --------------------------- |
+| Authentication      | JWT verify                          | JWT verify                | JWT verify                  |
+| Authorization       | Ownership check                     | Ownership + shared access | Role-based (đã login)       |
+| S3 level            | Policy conditions (size, type, key) | —                         | OAC (chỉ CloudFront đọc S3) |
+| Credential lifetime | 5 phút                              | 5 phút                    | 1 giờ                       |
+| Key naming          | `{prefix}/{userId}/{uuid}`          | Verify userId trong key   | Path pattern `/avatars/*`   |
+| Verification        | HeadObject confirm                  | Audit log                 | —                           |
+| Network             | HTTPS bắt buộc                      | HTTPS bắt buộc            | HTTPS + HttpOnly cookies    |
+
+### 8.2. Threat model
+
+| Threat                      | Mitigation                                                                                      |
+| --------------------------- | ----------------------------------------------------------------------------------------------- |
+| Leak presigned URL          | TTL ngắn (5 phút), không log full URL, HTTPS only                                               |
+| Leak CloudFront cookie      | HttpOnly (JS không đọc được), Secure, SameSite, TTL 1h                                          |
+| Upload file malicious       | Content-type validation ở backend + S3 policy. Tuỳ chọn: virus scan async qua S3 event → Lambda |
+| Upload vượt giới hạn size   | `content-length-range` trong POST policy — S3 reject trước khi lưu                              |
+| User A truy cập file User B | Ownership check + key namespace + path-based authorization                                      |
+| Replay attack sau logout    | Chấp nhận window risk (cookie/URL vẫn hợp lệ tới expire). Giữ TTL ngắn                          |
+| Bucket vô tình thành public | Block Public Access ON + CloudWatch alarm khi config thay đổi                                   |
+
+---
+
+## 9. Tổng kết
+
+Kiến trúc 3 luồng sử dụng S3 Presigned URL và CloudFront Signed Cookies giải quyết bài toán upload/download/display tài nguyên mà không cần proxy file qua backend. Những điểm cần nhớ:
+
+1. **Luôn dùng Presigned POST** (không phải PUT) cho upload từ browser — policy conditions là lưới an toàn cuối cùng mà S3 enforce
+2. **Presigned GET cho download có chủ đích** — mỗi lần cần audit, check quyền, rồi ký URL ngắn hạn
+3. **CloudFront Signed Cookies cho ảnh hiển thị thường xuyên** — tiết kiệm chi phí ký, giữ browser cache hoạt động, và tận dụng CDN
+4. **Giữ credential lifetime ngắn**: 5 phút cho URL, 1 giờ cho cookies. Ngắn hơn = ít rủi ro hơn khi bị leak
+5. **Backend là gatekeeper, không phải courier** — nó validate và ký, nhưng không bao giờ chạm vào file. Công việc nặng để S3 và CloudFront lo

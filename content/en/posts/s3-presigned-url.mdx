@@ -1,0 +1,639 @@
+---
+title: 'S3 Presigned URL: Secure Upload and Download Without Proxying Through Backend'
+date: '2026-05-13'
+tags: ['Devops', 'AWS', 'SAA']
+enableComment: true
+---
+
+# S3 Presigned URL: Secure Upload and Download Without Proxying Through Backend
+
+> You're building a document management app. Users upload contracts and invoices (up to 50MB), download private PDFs, and view each other's avatars. Every file passes through your backend: the client sends the file to the server, the server streams it to S3, and vice versa for downloads. During peak hours — 200 users uploading simultaneously — your backend consumes 10GB of RAM, response time jumps from 100ms to 8 seconds, and your auto-scaling bill triples.
+
+The real question: **why does the backend need to touch every byte of the file?** The backend only needs to do one thing — **authenticate the user and sign a temporary "permission slip"** — then let the client talk directly to S3.
+
+That's the idea behind **Presigned URLs**.
+
+This post goes from the basic concept to a real-world architecture: what presigned URLs are, what problems they solve, and how to apply them in practice with **3 flows** — file upload, document download, and avatar display via CDN.
+
+---
+
+## 1. What Is a Presigned URL?
+
+### 1.1. The Core Problem
+
+When you create an S3 bucket, it's completely **private** by default — only IAM principals (IAM users, IAM roles — entities granted permissions by AWS) can access it. A user's browser or mobile app doesn't have AWS credentials, so it can't call S3 APIs directly.
+
+How do you let clients upload or download files directly from S3 without going through the backend?
+
+### 1.2. The Idea
+
+The backend acts as a director, signing a special document called a **presigned URL**. Anyone with this document can view and retrieve resources from the warehouse through the warehouse keeper called **S3** — but the document is only valid for the day.
+
+Simply put: a presigned URL is a **time-limited entry ticket**. The backend signs the ticket, and the client uses it to enter S3 directly, bypassing the backend entirely.
+
+### 1.3. The Signing Process
+
+The backend uses **AWS Signature Version 4** (SigV4) to sign the URL. At a conceptual level:
+
+1. The backend assembles the request info: HTTP method (GET/POST), bucket name, object key, expiration time
+2. Uses the IAM role's **secret access key** to compute a signature
+3. Appends the signature and metadata as query string parameters
+4. Returns the complete URL to the client
+
+The entire signing process happens **locally on the backend** — no S3 API calls, no round trip time.
+
+### 1.4. Anatomy of a Presigned URL
+
+A presigned GET URL looks like this:
+
+```
+https://my-bucket.s3.ap-southeast-1.amazonaws.com/documents/user-123/invoice.pdf
+  ?X-Amz-Algorithm=AWS4-HMAC-SHA256
+  &X-Amz-Credential=AKIA.../20260513/ap-southeast-1/s3/aws4_request
+  &X-Amz-Date=20260513T100000Z
+  &X-Amz-Expires=300
+  &X-Amz-SignedHeaders=host
+  &X-Amz-Signature=a1b2c3d4e5...
+```
+
+| Parameter | Meaning |
+|-----------|---------|
+| `X-Amz-Algorithm` | Signing algorithm — always `AWS4-HMAC-SHA256` |
+| `X-Amz-Credential` | IAM access key + scope (date/region/service) |
+| `X-Amz-Date` | When the URL was signed |
+| `X-Amz-Expires` | Time-to-live in seconds. E.g., `300` = 5 minutes |
+| `X-Amz-SignedHeaders` | HTTP headers included in the signature |
+| `X-Amz-Signature` | The signature — a hex string computed from the secret key + request info |
+
+### 1.5. Key Characteristics
+
+- **Self-contained**: The URL contains everything needed — no cookies, headers, or AWS credentials required
+- **Time-limited**: Once expired, S3 rejects it (returns 403)
+- **Scoped**: Each URL allows exactly one operation on exactly one object key
+- **Anyone with the URL can use it**: Since no auth header is needed, if the URL leaks, anyone can access it — keep the TTL short
+
+> **Note**: A presigned URL **inherits the permissions** of the IAM entity that signed it. If the backend's IAM role only has `PutObject` permission on the `uploads/*` prefix, the presigned URL can only upload to `uploads/*`.
+
+---
+
+## 2. What Problems Does It Solve?
+
+### 2.1. No File Proxying Through Backend
+
+In the traditional model, every file upload/download goes through the backend:
+
+```
+Client → Backend (proxy) → S3
+Client ← Backend (proxy) ← S3
+```
+
+The backend must buffer the entire file in memory or stream it through, consuming **CPU, RAM, and bandwidth**. When many users upload simultaneously, the backend becomes the bottleneck.
+
+With presigned URLs, the backend **only signs the URL** (a CPU-only operation, taking a few milliseconds), then the client talks directly to S3:
+
+```
+Client → Backend (sign URL, ~5ms) → Client
+Client ←→ S3 (direct upload/download)
+```
+
+### 2.2. Bucket Stays Completely Private
+
+No need to enable public access or add complex bucket policies. S3 **Block Public Access** stays ON with all 4 options enabled. The presigned URL is the **only door** in, and that door has a countdown timer.
+
+### 2.3. Backend Is the "Gatekeeper", Not the "Courier"
+
+The backend still has full control:
+- **Authentication**: Verifies JWT before signing
+- **Authorization**: Checks if the user has permission to access the resource
+- **Audit**: Logs who downloaded what, and when
+
+But the backend **never touches the file** — the heavy lifting (data transfer) is handled by S3.
+
+<ExcalidrawDiagram src="/s3-presigned-url-architecture.excalidraw" alt="S3 Presigned URL Architecture" />
+
+---
+
+## 3. Common Use Cases
+
+| Use Case | Method | When to Use | Example |
+|----------|--------|-------------|---------|
+| File upload | **Presigned POST** | User uploads files from browser/mobile | Avatar, invoice, product image |
+| Private file download | **Presigned GET** | User clicks Download button | Contract, report, attachment |
+| Display images/assets | **CloudFront Signed Cookies** | Images displayed frequently in `<img>` tags | Avatar, banner, thumbnail |
+
+Why do these 3 use cases use 3 different mechanisms?
+
+- **Upload**: Presigned POST lets **S3 enforce constraints** (file size limit, content-type) — something Presigned PUT cannot do
+- **Download**: Infrequent, intentional access (user clicks Download) — signing a URL per request is sufficient
+- **Image display**: A page might render 50 avatars — signing 50 individual URLs is expensive, and the constantly changing URLs break browser cache. CloudFront Signed Cookies (one set of cookies unlocking many URLs) solves both problems
+
+---
+
+## 4. A Real-World Scenario
+
+To illustrate, imagine you're building a web application with authentication and 3 requirements:
+
+1. **Users upload** documents (PDF, contracts) and images (avatar, product photos)
+2. **Users download** private documents — only the owner or shared users can download
+3. **Display avatars and banners** directly in `<img src="...">` for all authenticated users
+
+Design principles:
+- **S3 bucket is completely private**: Block Public Access ON for all options
+- **Backend is the gatekeeper**: All presigned URLs / cookies are issued only after authentication
+- **Defense in depth**: Validation at multiple layers — JWT, ownership check, S3 policy conditions, key naming convention (object keys contain userId)
+- **Short-lived credentials**: URLs expire after 5 minutes, cookies expire after 1 hour
+
+S3 object key structure:
+
+```
+documents/{userId}/{uuid}-{originalFilename}   ← private documents
+images/{userId}/{uuid}-{originalFilename}      ← uploaded images (products, posts)
+avatars/{userId}/{uuid}.{ext}                  ← avatars (via CloudFront)
+```
+
+Including `{userId}` in the key enables prefix-based authorization, and the backend can parse userId from the key to double-check against the JWT — that's an extra layer of **defense in depth**.
+
+---
+
+## 5. Flow 1: Upload via Presigned POST
+
+### 5.1. Why POST Instead of PUT?
+
+S3 supports both **Presigned PUT** and **Presigned POST**. For untrusted clients (browsers), POST is the safer choice because S3 **enforces policy conditions** at the time it receives the request:
+
+| Aspect | Presigned PUT | Presigned POST |
+|--------|---------------|----------------|
+| File size limit | Cannot enforce at S3 | `content-length-range` — S3 rejects if exceeded |
+| Content-type restriction | Must match exactly when signing | `starts-with` — allows prefix matching (e.g., `image/`) |
+| Key path restriction | Key is fixed at signing time | Allows flexible prefix |
+| Body format | Raw bytes | `multipart/form-data` |
+| Files > 100MB (multipart upload) | Supported | Not supported |
+
+PUT is only suitable when the upload source is server-side or when you need multipart upload for very large files. For browser uploads, **always use POST**.
+
+### 5.2. Sequence Diagram
+
+<ExcalidrawDiagram src="/s3-presigned-url-upload-flow.excalidraw" alt="Upload Flow via Presigned POST" />
+
+### 5.3. Backend: Create Presigned POST
+
+```typescript
+import { S3Client } from '@aws-sdk/client-s3'
+import { createPresignedPost } from '@aws-sdk/s3-presigned-post'
+import crypto from 'crypto'
+import path from 'path'
+
+const s3 = new S3Client({ region: process.env.AWS_REGION })
+
+const PURPOSE_CONFIG = {
+  avatar: { prefix: 'avatars', maxSize: 5 * 1024 * 1024, allowedType: 'image/' },
+  image: { prefix: 'images', maxSize: 10 * 1024 * 1024, allowedType: 'image/' },
+  document: { prefix: 'documents', maxSize: 20 * 1024 * 1024, allowedType: '' },
+}
+
+app.post('/api/uploads/presign', authMiddleware, async (req, res) => {
+  const userId = req.user.id
+
+  const { purpose, fileName, contentType, fileSize } = req.body
+
+  const config = PURPOSE_CONFIG[purpose]
+
+  if (!config) {
+    return res.status(400).json({ error: 'Invalid purpose' })
+  }
+
+  if (fileSize > config.maxSize) {
+    return res.status(400).json({ error: 'File too large' })
+  }
+
+  if (config.allowedType && !contentType.startsWith(config.allowedType)) {
+    return res.status(400).json({ error: 'Invalid content type' })
+  }
+
+  const fileId = crypto.randomUUID()
+  const ext = path.extname(fileName)
+  const key = `${config.prefix}/${userId}/${fileId}${ext}`
+
+  const conditions = [
+    ['content-length-range', 1, config.maxSize],
+    ['eq', '$key', key],
+  ]
+
+  if (config.allowedType) {
+    conditions.push(['starts-with', '$Content-Type', config.allowedType])
+  }
+
+  const { url, fields } = await createPresignedPost(s3, {
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+    Conditions: conditions,
+    Fields: { 'Content-Type': contentType },
+    Expires: 300,
+  })
+
+  await db.uploads.create({
+    fileId,
+    key,
+    userId,
+    purpose,
+    fileName,
+    contentType,
+    fileSize,
+    status: 'pending',
+    createdAt: new Date(),
+  })
+
+  res.json({ url, fields, key, fileId })
+})
+```
+
+The key part is the `conditions` array:
+- `content-length-range`: S3 rejects the request if file size doesn't match what was described when presigning the URL
+- `eq $key`: Only allows upload to the exact key path specified — the client cannot switch to a different key
+- `starts-with $Content-Type`: Only allows content-types starting with `image/` (for avatar/image) — the client cannot upload an `.exe` disguised as something else
+
+### 5.4. Frontend: Upload Directly to S3
+
+```typescript
+async function uploadFile(file: File, purpose: string) {
+  const presignRes = await fetch('/api/uploads/presign', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${getToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      purpose,
+      fileName: file.name,
+      contentType: file.type,
+      fileSize: file.size,
+    }),
+  })
+
+  if (!presignRes.ok) {
+    throw new Error('Failed to get upload URL')
+  }
+
+  const { url, fields, key, fileId } = await presignRes.json()
+
+  const formData = new FormData()
+  Object.entries(fields).forEach(([k, v]) => formData.append(k, v as string))
+  formData.append('file', file)
+
+  const uploadRes = await fetch(url, { method: 'POST', body: formData })
+
+  if (!uploadRes.ok) {
+    throw new Error('Upload failed')
+  }
+
+  const confirmRes = await fetch('/api/uploads/confirm', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${getToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ fileId, key }),
+  })
+
+  return await confirmRes.json()
+}
+```
+
+> **Note**: `formData.append('file', file)` must be the **last field** in the FormData. S3 requires the file binary to come after all policy fields.
+
+### 5.5. Backend: Confirm Upload
+
+After the client reports a successful upload, the backend **doesn't trust the client** — it calls `HeadObject` to verify:
+
+```typescript
+import { HeadObjectCommand } from '@aws-sdk/client-s3'
+
+app.post('/api/uploads/confirm', authMiddleware, async (req, res) => {
+  const { fileId, key } = req.body
+
+  const upload = await db.uploads.findOne({ fileId, userId: req.user.id })
+
+  if (!upload || upload.status !== 'pending') {
+    return res.status(404).json({ error: 'Upload not found' })
+  }
+
+  const head = await s3.send(
+    new HeadObjectCommand({
+      Bucket: process.env.S3_BUCKET,
+      Key: key,
+    })
+  )
+
+  await db.uploads.update(
+    { fileId },
+    {
+      status: 'ready',
+      actualSize: head.ContentLength,
+      actualContentType: head.ContentType,
+    }
+  )
+
+  res.json({ fileId, status: 'ready' })
+})
+```
+
+### 5.6. Error Handling
+
+| Scenario | S3 Response | How to Handle |
+|----------|-------------|---------------|
+| File too large | 403 `EntityTooLarge` | Client shows error, asks for a smaller file |
+| Wrong content-type | 403 `Policy Condition failed` | Client checks file type |
+| URL expired | 403 `Policy expired` | Client requests a new URL from backend |
+| Upload succeeded, confirm failed | — | Lifecycle policy deletes `pending` files after 24h |
+| Connection lost during upload | — | Client retries the entire flow (requests new URL) |
+
+---
+
+## 6. Flow 2: Download Documents via Presigned GET
+
+### 6.1. When to Use Presigned GET?
+
+Private documents (contracts, reports, attachments) are accessed **infrequently** and **intentionally** — the user explicitly clicks "Download". Each download requires permission checks and audit logging.
+
+Presigned GET URL is suitable because:
+- File doesn't go through backend → saves bandwidth
+- Browser handles download natively (progress bar, resume)
+- S3 returns with `Content-Disposition: attachment` header to force download
+
+### 6.2. Sequence Diagram
+
+<ExcalidrawDiagram src="/s3-presigned-url-download-flow.excalidraw" alt="Download Flow via Presigned GET" />
+
+### 6.3. Backend: Sign Presigned GET URL
+
+```typescript
+import { GetObjectCommand } from '@aws-sdk/client-s3'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
+
+app.get('/api/documents/:id/download', authMiddleware, async (req, res) => {
+  const userId = req.user.id
+
+  const doc = await db.documents.findById(req.params.id)
+
+  if (!doc) {
+    return res.status(404).json({ error: 'Document not found' })
+  }
+
+  const expiresIn = 300
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET,
+      Key: doc.s3Key,
+      ResponseContentDisposition: `attachment; filename="${encodeURIComponent(doc.fileName)}"`,
+      ResponseContentType: doc.contentType,
+    }),
+    { expiresIn }
+  )
+
+  await db.auditLogs.create({
+    userId,
+    action: 'document.download',
+    resourceId: doc.id,
+    createdAt: new Date(),
+  })
+
+  res.json({
+    url,
+    expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+    fileName: doc.fileName,
+  })
+})
+```
+
+### 6.4. Frontend: Download
+
+```typescript
+async function downloadDocument(documentId: string) {
+  const res = await fetch(`/api/documents/${documentId}/download`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  })
+  if (!res.ok) throw new Error('Cannot download')
+
+  const { url } = await res.json()
+  window.location.href = url
+}
+```
+
+Since S3's response includes `Content-Disposition: attachment`, the browser automatically shows the download dialog — no extra client-side handling needed.
+
+### 6.5. Security Notes
+
+- **Don't log the full URL** in application logs — the URL contains the signature, and anyone with the URL can download within the TTL
+- **Audit log**: Record userId, documentId, timestamp — used for compliance (GDPR, internal audit)
+- **Rate limit**: Limit the number of URL requests per minute per user to prevent abuse
+- **Filename sanitization**: Encode the filename in the `Content-Disposition` header to prevent injection
+
+---
+
+## 7. Flow 3: Display Images via CloudFront Signed Cookies
+
+### 7.1. Why Not Use Presigned GET for Images?
+
+Consider the scenario: a profile page displays 50 avatars of different users. If you use presigned GET URLs for each image:
+
+1. **50 API calls** before rendering the page — each avatar needs its own URL
+2. **Browser cache is defeated** — each URL has a different signature (due to different timestamps), so the browser treats it as a new URL → reloads from scratch
+3. **Not CDN-friendly** — constantly changing URLs can't be cached by the CDN
+
+### 7.2. The Solution: CloudFront Signed Cookies
+
+**CloudFront Signed Cookies** allow a set of 3 cookies to grant access to an **entire URL pattern** (e.g., `https://cdn.app.com/avatars/*`). Once the browser has the cookies:
+
+- Every `<img src="https://cdn.app.com/avatars/...">` works automatically
+- Browser caches images normally (fixed URLs, no signature in the path)
+- CloudFront CDN caches images at the edge location closest to the user
+
+Comparison with other approaches:
+
+| Approach | Fixed URL | Browser Cache | CDN Cache | Setup |
+|----------|:---------:|:------------:|:---------:|:-----:|
+| Presigned URL in `src` | ✗ | ✗ | ✗ | Simple |
+| Backend proxy (`<img src="/api/avatar/123">`) | ✓ | ✓ | ✗ | Simple |
+| Backend redirect (302 → presigned URL) | ✓ | ✗ | ✗ | Medium |
+| **CloudFront Signed Cookies** | **✓** | **✓** | **✓** | Complex |
+
+### 7.3. Architecture: CloudFront + OAC + S3
+
+**Origin Access Control** (OAC) is CloudFront's modern mechanism (replacing the older OAI), ensuring **only CloudFront can read from S3** — users cannot bypass CloudFront to access S3 directly.
+
+Setup includes:
+1. Create a **CloudFront Key Pair** (RSA 2048-bit) — upload the public key to CloudFront, store the private key in Secrets Manager
+2. Create a **Trusted Key Group** containing the public key
+3. Create a **CloudFront Distribution** with OAC pointing to the S3 bucket
+4. Update the **S3 bucket policy** to only allow CloudFront OAC
+5. Configure **DNS**: `cdn.app.com` → CNAME → CloudFront domain
+
+S3 bucket policy for OAC:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "cloudfront.amazonaws.com" },
+    "Action": "s3:GetObject",
+    "Resource": "arn:aws:s3:::my-bucket/*",
+    "Condition": {
+      "StringEquals": {
+        "AWS:SourceArn": "arn:aws:cloudfront::ACCOUNT_ID:distribution/DISTRIBUTION_ID"
+      }
+    }
+  }]
+}
+```
+
+### 7.4. Sequence Diagram
+
+<ExcalidrawDiagram src="/s3-presigned-url-cloudfront-cookies.excalidraw" alt="CloudFront Signed Cookies Flow" />
+
+### 7.5. Backend: Create Signed Cookies
+
+Call this endpoint right after successful login:
+
+```typescript
+import { getSignedCookies } from '@aws-sdk/cloudfront-signer'
+import fs from 'fs'
+
+const PRIVATE_KEY = fs.readFileSync(process.env.CLOUDFRONT_PRIVATE_KEY_PATH, 'utf-8')
+const KEY_PAIR_ID = process.env.CLOUDFRONT_KEY_PAIR_ID
+const CDN_DOMAIN = 'cdn.app.com'
+
+app.post('/api/auth/cdn-cookies', authMiddleware, async (req, res) => {
+  const expiresIn = 60 * 60
+  const expiresAt = Math.floor(Date.now() / 1000) + expiresIn
+
+  const policy = {
+    Statement: [
+      {
+        Resource: `https://${CDN_DOMAIN}/*`,
+        Condition: {
+          DateLessThan: { 'AWS:EpochTime': expiresAt },
+        },
+      },
+    ],
+  }
+
+  const cookies = getSignedCookies({
+    keyPairId: KEY_PAIR_ID,
+    privateKey: PRIVATE_KEY,
+    policy: JSON.stringify(policy),
+  })
+
+  const cookieOptions = {
+    domain: '.app.com',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax' as const,
+    maxAge: expiresIn * 1000,
+  }
+
+  res.cookie('CloudFront-Policy', cookies['CloudFront-Policy'], cookieOptions)
+  res.cookie('CloudFront-Signature', cookies['CloudFront-Signature'], cookieOptions)
+  res.cookie('CloudFront-Key-Pair-Id', cookies['CloudFront-Key-Pair-Id'], cookieOptions)
+
+  res.json({ expiresAt: new Date(expiresAt * 1000).toISOString() })
+})
+```
+
+Note the cookie domain: `.app.com` (with leading dot) allows the cookie to be sent to both `app.com` (frontend) and `cdn.app.com` (CloudFront). This is why the frontend and CDN need to share the same **parent domain**.
+
+### 7.6. Frontend: Nothing Special Required
+
+After calling the API to set cookies, the browser automatically sends cookies with every request to `cdn.app.com`:
+
+```tsx
+async function setupCdnAccess() {
+  await fetch('/api/auth/cdn-cookies', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken()}` },
+    credentials: 'include',
+  })
+}
+
+function Avatar({ userId, fileId }: { userId: string; fileId: string }) {
+  return <img src={`https://cdn.app.com/avatars/${userId}/${fileId}.jpg`} alt="Avatar" loading="lazy" />
+}
+```
+
+Fixed URLs, normal browser caching, CDN caching — nothing magical on the client side.
+
+### 7.7. Cookie Refresh and Logout
+
+Cookies only live for 1 hour. There are 3 refresh strategies:
+
+| Strategy | How It Works | Pros/Cons |
+|----------|-------------|-----------|
+| **Proactive** | Store `expiresAt`, set timer to refresh 5 minutes before expiry | Smooth UX, but complex (handle inactive tabs) |
+| **Reactive** | When `<img>` fails (403), trigger refresh + reload image | Simple, but user may see broken image for 1-2s |
+| **Hybrid** (recommended) | Refresh on app startup + every time tab regains focus. Combine with `onError` fallback | Balance between UX and complexity |
+
+On logout, **you must clear the cookies**:
+
+```typescript
+app.post('/api/auth/logout', (req, res) => {
+  const cookieOptions = { domain: '.app.com', path: '/' }
+  res.clearCookie('CloudFront-Policy', cookieOptions)
+  res.clearCookie('CloudFront-Signature', cookieOptions)
+  res.clearCookie('CloudFront-Key-Pair-Id', cookieOptions)
+  res.json({ ok: true })
+})
+```
+
+> **Note**: Even after clearing cookies, the old cookies remain valid until their expiration time — CloudFront verifies based on the signature, there's no concept of "revocation". This is a trade-off of signed cookies/URLs in general. If you need immediate revocation, you must rotate the private key (affecting all users) or keep cookie TTL very short (15-30 minutes).
+
+### 7.8. Presigned URL vs Signed Cookies
+
+| Criteria | Presigned URL | Signed Cookies |
+|----------|--------------|----------------|
+| Scope | 1 URL = 1 object | 1 cookie set = entire path pattern |
+| Browser cache | No (URL changes each time) | Yes (fixed URL) |
+| Per-request overhead | Sign each URL individually | Sign once, works for all requests |
+| Best for | File download, infrequent access | Image display, frequent access |
+| Requires CDN? | Not necessarily | Requires CloudFront |
+| Cookie management | None | Must set/clear/refresh cookies |
+
+---
+
+## 8. Security Overview
+
+### 8.1. Defense in Depth — Across All 3 Flows
+
+| Security Layer | Upload (POST) | Download (GET) | Images (Cookies) |
+|---------------|--------------|----------------|-------------------|
+| Authentication | JWT verify | JWT verify | JWT verify |
+| Authorization | Ownership check | Ownership + shared access | Role-based (authenticated) |
+| S3 level | Policy conditions (size, type, key) | — | OAC (only CloudFront reads S3) |
+| Credential lifetime | 5 minutes | 5 minutes | 1 hour |
+| Key naming | `{prefix}/{userId}/{uuid}` | Verify userId in key | Path pattern `/avatars/*` |
+| Verification | HeadObject confirm | Audit log | — |
+| Network | HTTPS required | HTTPS required | HTTPS + HttpOnly cookies |
+
+### 8.2. Threat Model
+
+| Threat | Mitigation |
+|--------|-----------|
+| Leaked presigned URL | Short TTL (5 min), don't log full URL, HTTPS only |
+| Leaked CloudFront cookie | HttpOnly (JS can't read), Secure, SameSite, 1h TTL |
+| Malicious file upload | Content-type validation at backend + S3 policy. Optional: async virus scan via S3 event → Lambda |
+| Upload exceeds size limit | `content-length-range` in POST policy — S3 rejects before storing |
+| User A accessing User B's file | Ownership check + key namespace + path-based authorization |
+| Replay attack after logout | Accept window risk (cookie/URL valid until expiry). Keep TTL short |
+| Bucket accidentally made public | Block Public Access ON + CloudWatch alarm on config changes |
+
+---
+
+## 9. Summary
+
+The 3-flow architecture using S3 Presigned URLs and CloudFront Signed Cookies solves the problem of uploading/downloading/displaying resources without proxying files through the backend. Key takeaways:
+
+1. **Always use Presigned POST** (not PUT) for browser uploads — policy conditions are the final safety net that S3 enforces
+2. **Presigned GET for intentional downloads** — each time, check permissions, then sign a short-lived URL
+3. **CloudFront Signed Cookies for frequently displayed images** — saves signing overhead, preserves browser cache, and leverages CDN
+4. **Keep credential lifetimes short**: 5 minutes for URLs, 1 hour for cookies. Shorter = less risk if leaked
+5. **Backend is the gatekeeper, not the courier** — it validates and signs, but never touches the file. The heavy lifting is handled by S3 and CloudFront
