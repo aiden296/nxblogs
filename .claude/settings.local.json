@@ -12,7 +12,19 @@
       "WebFetch(domain:emmanuelvalverderamos.substack.com)",
       "WebFetch(domain:learnicious.substack.com)",
       "WebFetch(domain:theexcitedengineer.substack.com)",
-      "WebFetch(domain:corecraft.substack.com)"
+      "WebFetch(domain:corecraft.substack.com)",
+      "mcp__Claude_in_Chrome__javascript_tool",
+      "Bash(curl -L -o /Users/macbookpro/Desktop/Workspace/personal/nextra-blog-starter/.claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons/aws-architecture-icons.excalidrawlib \"https://libraries.excalidraw.com/libraries/childishgirl/aws-architecture-icons.excalidrawlib\")",
+      "Bash(python3 .claude/skills/excalidraw-diagram-generator/scripts/split-excalidraw-library.py .claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons/)",
+      "Bash(rm /Users/macbookpro/Desktop/Workspace/personal/nextra-blog-starter/.claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons/aws-architecture-icons.excalidrawlib)",
+      "Bash(python3 .claude/skills/excalidraw-diagram-generator/scripts/add-icon-to-diagram.py public/alb-lor.excalidraw Instance 565 90 --library-path .claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons --no-use-edit-suffix)",
+      "Bash(python3 .claude/skills/excalidraw-diagram-generator/scripts/add-icon-to-diagram.py public/alb-lor.excalidraw Instance 565 245 --library-path .claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons --no-use-edit-suffix)",
+      "Bash(python3 .claude/skills/excalidraw-diagram-generator/scripts/add-icon-to-diagram.py public/alb-lor.excalidraw Instance 565 330 --library-path .claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons --no-use-edit-suffix)",
+      "mcp__Claude_in_Chrome__navigate",
+      "Bash(python3 .claude/skills/excalidraw-diagram-generator/scripts/add-icon-to-diagram.py public/alb-lor.excalidraw ALB 260 175 --library-path .claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons --no-use-edit-suffix)",
+      "Bash(python3 .claude/skills/excalidraw-diagram-generator/scripts/add-icon-to-diagram.py public/alb-lor.excalidraw Instance 560 85 --library-path .claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons --no-use-edit-suffix)",
+      "Bash(python3 .claude/skills/excalidraw-diagram-generator/scripts/add-icon-to-diagram.py public/alb-lor.excalidraw Instance 560 180 --library-path .claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons --no-use-edit-suffix)",
+      "Bash(python3 .claude/skills/excalidraw-diagram-generator/scripts/add-icon-to-diagram.py public/alb-lor.excalidraw Instance 560 295 --library-path .claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons --no-use-edit-suffix)"
     ]
   }
 }
