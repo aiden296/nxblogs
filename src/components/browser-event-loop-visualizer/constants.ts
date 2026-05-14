@@ -4,7 +4,7 @@ export const PHASE_LABELS: Record<string, string> = {
   'idle': 'Idle',
   'macrotask': 'Macrotask',
   'microtask': 'Microtask',
-  'raf': 'rAF',
+  'raf': 'requestAnimationFrame',
   'render': 'Render',
   'idle-callback': 'Idle Callback',
 }

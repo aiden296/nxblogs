@@ -5,7 +5,7 @@ import type { EventLoopPhase } from './types'
 const PHASES: { id: EventLoopPhase; label: string; color: string; activeColor: string }[] = [
   { id: 'macrotask', label: '1. Macrotask', color: 'border-blue-500/20', activeColor: 'border-blue-500 bg-blue-500/15 text-blue-700 dark:text-blue-300' },
   { id: 'microtask', label: '2. Microtasks', color: 'border-purple-500/20', activeColor: 'border-purple-500 bg-purple-500/15 text-purple-700 dark:text-purple-300' },
-  { id: 'raf', label: '3. rAF', color: 'border-green-500/20', activeColor: 'border-green-500 bg-green-500/15 text-green-700 dark:text-green-300' },
+  { id: 'raf', label: '3. requestAnimationFrame', color: 'border-green-500/20', activeColor: 'border-green-500 bg-green-500/15 text-green-700 dark:text-green-300' },
   { id: 'render', label: '4. Render', color: 'border-rose-500/20', activeColor: 'border-rose-500 bg-rose-500/15 text-rose-700 dark:text-rose-300' },
   { id: 'idle-callback', label: '5. Idle', color: 'border-gray-500/20', activeColor: 'border-gray-500 bg-gray-500/15 text-gray-700 dark:text-gray-300' },
 ]

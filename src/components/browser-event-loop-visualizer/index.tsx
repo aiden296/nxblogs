@@ -143,7 +143,7 @@ export function BrowserEventLoopVisualizer() {
           variant="microtask"
           isActive={step.phase === 'microtask'}
         />
-        <QueuePanel title="rAF Queue" items={step.rafQueue} variant="raf" isActive={step.phase === 'raf'} />
+        <QueuePanel title="requestAnimationFrame Queue" items={step.rafQueue} variant="raf" isActive={step.phase === 'raf'} />
       </div>
 
       <ConsolePanel output={step.consoleOutput} />
