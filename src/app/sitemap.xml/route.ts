@@ -90,36 +90,42 @@ export async function GET() {
 
   const TOOL_ROUTES = ['/tools/browser-event-loop-visualizer', '/tools/nodejs-event-loop-visualizer']
 
-  const localizedUrls = Array.from(routeTimestamps.entries())
-    .filter(([route]) => !route.startsWith('/tools'))
-    .flatMap(([route, lastModified]) => {
-      const alternates = LOCALES.map(
+  const contentRoutes = Array.from(routeTimestamps.entries()).filter(([route]) => !route.startsWith('/tools'))
+
+  const buildAlternates = (route: string) =>
+    [
+      `    <xhtml:link rel="alternate" hreflang="x-default" href="${escapeXml(`${BASE_URL}${route}`)}" />`,
+      ...LOCALES.map(
         (locale) =>
           `    <xhtml:link rel="alternate" hreflang="${locale}" href="${escapeXml(`${BASE_URL}/${locale}${route}`)}" />`
-      ).join('\n')
+      ),
+    ].join('\n')
 
-      return LOCALES.map(
-        (locale) => `  <url>
-    <loc>${escapeXml(`${BASE_URL}/${locale}${route}`)}</loc>
-${alternates}
+  const buildEntry = (loc: string, lastModified: string, priority: string, alternates?: string) => {
+    const altBlock = alternates ? `\n${alternates}` : ''
+    return `  <url>
+    <loc>${escapeXml(loc)}</loc>${altBlock}
     <lastmod>${lastModified}</lastmod>
     <changefreq>weekly</changefreq>
-    <priority>${route === '/' ? '1.0' : '0.8'}</priority>
+    <priority>${priority}</priority>
   </url>`
-      )
-    })
-    .join('\n')
+  }
 
-  const toolUrls = TOOL_ROUTES.map(
-    (route) => `  <url>
-    <loc>${escapeXml(`${BASE_URL}${route}`)}</loc>
-    <lastmod>${new Date().toISOString()}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>`
-  ).join('\n')
+  const localizedUrls = contentRoutes.flatMap(([route, lastModified]) => {
+    const alternates = buildAlternates(route)
+    const priority = route === '/' ? '1.0' : '0.8'
 
-  const urls = [localizedUrls, toolUrls].filter(Boolean).join('\n')
+    return [
+      buildEntry(`${BASE_URL}${route}`, lastModified, priority, alternates),
+      ...LOCALES.map((locale) => buildEntry(`${BASE_URL}/${locale}${route}`, lastModified, priority, alternates)),
+    ]
+  })
+
+  const toolUrls = TOOL_ROUTES.map((route) =>
+    buildEntry(`${BASE_URL}${route}`, new Date().toISOString(), '0.8')
+  )
+
+  const urls = [...localizedUrls, ...toolUrls].join('\n')
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href="/sitemap.xsl"?>
