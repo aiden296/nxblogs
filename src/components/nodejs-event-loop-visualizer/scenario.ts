@@ -40,8 +40,8 @@ export const scenario: Scenario = {
   ],
   steps: [
     {
-      title: 'HTTP Request den Node.js',
-      desc: 'Client gui GET /api/user/42. Request duoc OS kernel nhan va bao cho libuv thong qua epoll/kqueue. Event loop dang o Poll phase, nhan duoc event va tao callback.',
+      title: 'HTTP Request arrives',
+      desc: 'Client sends GET /api/user/42. The OS kernel receives the request and notifies libuv via epoll/kqueue. The event loop is in Poll phase, picks up the event and creates a callback.',
       activePhase: null,
       highlightLines: ['listen'],
       callStack: [],
@@ -50,8 +50,8 @@ export const scenario: Scenario = {
       badge: { text: '1', color: '#22c55e' },
     },
     {
-      title: 'Poll Phase: Xu ly I/O callback',
-      desc: 'Event loop dang o Poll phase. Lay callback tu poll queue va day vao Call Stack. Luc nay route handler bat dau chay DONG BO.',
+      title: 'Poll Phase: Process I/O callback',
+      desc: 'Event loop is in Poll phase. It dequeues the callback and pushes it onto the Call Stack. The route handler starts executing SYNCHRONOUSLY.',
       activePhase: 'poll',
       highlightLines: ['handler-start', 'handler-log'],
       callStack: ['http.onRequest()', 'routeHandler(req, reply)'],
@@ -61,7 +61,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Sync: Schedule nextTick',
-      desc: 'Code dong bo goi process.nextTick(). Callback KHONG chay ngay, ma duoc push vao nextTick queue. Day la microtask co priority cao nhat.',
+      desc: 'Synchronous code calls process.nextTick(). The callback does NOT run immediately — it is pushed onto the nextTick queue. This is the highest-priority microtask.',
       activePhase: 'poll',
       highlightLines: ['nexttick-schedule', 'nexttick-body', 'nexttick-end'],
       callStack: ['routeHandler()', 'process.nextTick()'],
@@ -71,7 +71,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Sync: Schedule DB query (I/O)',
-      desc: 'db.query() gui SQL query xuong. Viec nay duoc delegate cho Thread Pool cua libuv (vi disk/network I/O). Main thread KHONG bi block, tiep tuc chay code dong bo.',
+      desc: 'db.query() sends the SQL query. This is delegated to the libuv Thread Pool (for disk/network I/O). The main thread is NOT blocked and continues executing synchronous code.',
       activePhase: 'poll',
       highlightLines: ['db-query', 'db-sql', 'db-param', 'db-end'],
       callStack: ['routeHandler()', 'db.query()'],
@@ -81,7 +81,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Sync: Schedule setTimeout',
-      desc: 'setTimeout(fn, 5000) dang ky 1 timer. Callback chua chay - no se duoc them vao Timer queue khi het 5s. Timer duoc quan ly boi libuv dung min-heap.',
+      desc: 'setTimeout(fn, 5000) registers a timer. The callback does not run yet — it will be added to the Timer queue after 5s. Timers are managed by libuv using a min-heap.',
       activePhase: 'poll',
       highlightLines: ['timer-schedule', 'timer-body', 'timer-end'],
       callStack: ['routeHandler()', 'setTimeout()'],
@@ -91,7 +91,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Sync: await userPromise',
-      desc: 'Gap await -> routeHandler() bi PAUSE (thoat khoi call stack). Control tra ve event loop. Nhung truoc do, tat ca MICROTASKS phai duoc drain truoc.',
+      desc: 'Hits await — routeHandler() is PAUSED (exits the call stack). Control returns to the event loop. But first, all MICROTASKS must be drained.',
       activePhase: 'poll',
       highlightLines: ['await-db'],
       callStack: [],
@@ -101,7 +101,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Microtasks: Drain nextTick queue',
-      desc: 'Truoc khi chuyen phase, event loop DRAIN het nextTick queue. nextTick co priority cao hon Promise. Callback "validate session" duoc day len call stack va thuc thi.',
+      desc: 'Before transitioning phases, the event loop DRAINS the entire nextTick queue. nextTick has higher priority than Promise. The "validate session" callback is pushed onto the call stack and executed.',
       activePhase: null,
       activeMicrotask: 'nexttick',
       highlightLines: ['nexttick-body'],
@@ -113,7 +113,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Microtasks: Check Promise queue',
-      desc: 'Sau khi nextTick drain het, event loop check Promise queue. Hien tai Promise queue rong (DB query chua xong). Event loop tiep tuc vong lap.',
+      desc: 'After nextTick is drained, the event loop checks the Promise queue. Currently empty (DB query is still running). The event loop continues its cycle.',
       activePhase: null,
       activeMicrotask: 'promise',
       highlightLines: [],
@@ -124,7 +124,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Check Phase: setImmediate queue',
-      desc: 'Event loop chuyen sang Check phase. Hien tai khong co setImmediate nao duoc schedule, nen phase nay bi skip.',
+      desc: 'Event loop moves to Check phase. No setImmediate callbacks have been scheduled yet, so this phase is skipped.',
       activePhase: 'check',
       highlightLines: [],
       callStack: [],
@@ -134,7 +134,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Close Callbacks Phase',
-      desc: 'Phase cuoi cung. Khong co socket close event nao. Skip va bat dau VONG LAP MOI cua event loop.',
+      desc: 'Last phase of the cycle. No socket close events to process. Skipped — a NEW LOOP ITERATION begins.',
       activePhase: 'close',
       highlightLines: [],
       callStack: [],
@@ -143,18 +143,18 @@ export const scenario: Scenario = {
       badge: { text: '10', color: '#8b5cf6' },
     },
     {
-      title: 'Timers Phase (vong lap moi)',
-      desc: 'Vong lap moi bat dau tu Timers phase. setTimeout(5000ms) chua het han (moi chi vao ms dau tien). Khong co timer nao can xu ly, event loop chuyen sang phase tiep theo.',
+      title: 'Timers Phase (new iteration)',
+      desc: 'New loop iteration starts at Timers phase. setTimeout(5000ms) has not expired yet (only a few ms in). No timers to process, event loop moves to the next phase.',
       activePhase: 'timers',
       highlightLines: [],
       callStack: [],
-      queues: { timer: ['timeout (5000ms) - chua het han'] },
+      queues: { timer: ['timeout (5000ms) - not expired'] },
       threadPool: ['SQL: SELECT * FROM users ...'],
       badge: { text: '11', color: '#f59e0b' },
     },
     {
       title: 'Pending Callbacks Phase',
-      desc: 'Phase nay xu ly cac system-level callbacks nhu TCP errors (ECONNREFUSED). Hien tai khong co pending callback nao. Day la phase it gap nhat trong thuc te.',
+      desc: 'This phase handles system-level callbacks like TCP errors (ECONNREFUSED). No pending callbacks at the moment. This is the least commonly triggered phase in practice.',
       activePhase: 'pending',
       highlightLines: [],
       callStack: [],
@@ -164,7 +164,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Idle/Prepare Phase',
-      desc: 'Day la internal phase cua libuv, dung de chuan bi cho Poll phase (tinh toan poll timeout, setup watchers). Khong co JS callback nao chay o day - hoan toan la viec cua libuv internal.',
+      desc: 'This is an internal libuv phase used to prepare for Poll phase (calculate poll timeout, set up watchers). No JS callbacks run here — entirely libuv internals.',
       activePhase: 'idle',
       highlightLines: [],
       callStack: [],
@@ -173,8 +173,8 @@ export const scenario: Scenario = {
       badge: { text: '13', color: '#6b7280' },
     },
     {
-      title: 'Poll Phase: Cho I/O',
-      desc: 'Event loop quay lai Poll phase. Khong co callback nao trong queue. Vi con timer pending (5s) va I/O (DB query), event loop se BLOCK o day cho den khi co I/O event hoac timer het han.',
+      title: 'Poll Phase: Waiting for I/O',
+      desc: 'Event loop returns to Poll phase. No callbacks in the queue. Since there are pending timers (5s) and I/O (DB query), the event loop BLOCKS here until an I/O event arrives or a timer expires.',
       activePhase: 'poll',
       highlightLines: [],
       callStack: [],
@@ -183,8 +183,8 @@ export const scenario: Scenario = {
       badge: { text: '14', color: '#3b82f6' },
     },
     {
-      title: 'DB Query hoan thanh! (Thread Pool -> Poll Queue)',
-      desc: 'Thread pool hoan thanh SQL query. Ket qua duoc day vao poll queue duoi dang callback. Event loop (dang block o poll) lap tuc nhan duoc event nay.',
+      title: 'DB Query complete! (Thread Pool → Poll Queue)',
+      desc: 'Thread pool finishes the SQL query. The result is pushed into the poll queue as a callback. The event loop (blocking in poll) immediately picks up this event.',
       activePhase: 'poll',
       highlightLines: ['db-query'],
       callStack: [],
@@ -193,8 +193,8 @@ export const scenario: Scenario = {
       badge: { text: '15', color: '#3b82f6' },
     },
     {
-      title: 'Poll: Xu ly DB callback -> Promise resolve',
-      desc: 'DB callback chay, resolve Promise cua userPromise. Viec nay day 1 microtask vao Promise queue (de resume async function). await userPromise se duoc "unblock".',
+      title: 'Poll: Process DB callback → Promise resolve',
+      desc: 'DB callback runs and resolves the userPromise. This pushes a microtask into the Promise queue (to resume the async function). await userPromise will be "unblocked".',
       activePhase: 'poll',
       highlightLines: ['db-query', 'db-end'],
       callStack: ['db.queryCallback()', 'promise.resolve(userData)'],
@@ -204,7 +204,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Microtasks: Check nextTick queue',
-      desc: 'Sau moi macrotask callback, event loop drain microtasks. nextTick luon duoc check TRUOC Promise. Hien tai nextTick queue rong (khong co ai goi process.nextTick() trong DB callback).',
+      desc: 'After each macrotask callback, the event loop drains microtasks. nextTick is always checked BEFORE Promise. Currently the nextTick queue is empty (no process.nextTick() was called in the DB callback).',
       activePhase: null,
       activeMicrotask: 'nexttick',
       highlightLines: [],
@@ -216,7 +216,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Microtasks: Resume async handler',
-      desc: 'nextTick rong, chuyen sang Promise queue. Tim thay "resume routeHandler()". Async function tiep tuc tu sau dong await.',
+      desc: 'nextTick is empty, moves to Promise queue. Finds "resume routeHandler()". The async function continues from after the await statement.',
       activePhase: null,
       activeMicrotask: 'promise',
       highlightLines: ['await-db'],
@@ -228,7 +228,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Sync: Schedule setImmediate',
-      desc: 'Code tiep tuc dong bo. setImmediate(fn) day callback vao Check queue. No se chay o Check phase (ngay sau Poll phase hien tai).',
+      desc: 'Code continues synchronously. setImmediate(fn) pushes the callback into the Check queue. It will run in Check phase (right after the current Poll phase).',
       activePhase: null,
       highlightLines: ['immediate-schedule', 'immediate-body', 'immediate-end'],
       callStack: ['routeHandler()', 'setImmediate()'],
@@ -238,7 +238,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Sync: clearTimeout + Send response',
-      desc: 'clearTimeout() huy bo timer 5s (vi request da thanh cong). reply.send() gui HTTP response ve client. routeHandler() hoan thanh va thoat khoi call stack.',
+      desc: 'clearTimeout() cancels the 5s timer (request succeeded in time). reply.send() sends the HTTP response back to the client. routeHandler() completes and exits the call stack.',
       activePhase: null,
       highlightLines: ['clear-timeout', 'send-response'],
       executedLines: ['timer-schedule', 'timer-body', 'timer-end'],
@@ -249,7 +249,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Check Phase: setImmediate callback',
-      desc: 'Event loop chuyen sang Check phase. Tim thay "cache update" callback trong queue. Day len call stack va thuc thi.',
+      desc: 'Event loop moves to Check phase. Finds the "cache update" callback in the queue. Pushes it onto the call stack and executes it.',
       activePhase: 'check',
       highlightLines: ['immediate-body'],
       executedLines: ['immediate-schedule', 'immediate-end', 'clear-timeout', 'send-response'],
@@ -260,7 +260,7 @@ export const scenario: Scenario = {
     },
     {
       title: 'Close Callbacks Phase',
-      desc: 'Phase cuoi cua vong lap. Khong co socket.on("close") nao duoc trigger trong request nay. Queue rong, event loop hoan thanh vong lap va quay ve Poll phase.',
+      desc: 'Last phase of the loop. No socket.on("close") was triggered during this request. Queue is empty, event loop completes the iteration and returns to Poll phase.',
       activePhase: 'close',
       highlightLines: [],
       executedLines: ['immediate-schedule', 'immediate-body', 'immediate-end', 'clear-timeout', 'send-response'],
@@ -270,8 +270,8 @@ export const scenario: Scenario = {
       badge: { text: '22', color: '#8b5cf6' },
     },
     {
-      title: 'Hoan thanh! Event loop tiep tuc',
-      desc: 'Tat ca queues rong, khong con timer nao. Event loop quay ve Poll phase va BLOCK cho request tiep theo. Toan bo request chi chay tren 1 SINGLE THREAD, khong bao gio block!',
+      title: 'Complete! Event loop continues',
+      desc: 'All queues are empty, no timers remaining. The event loop returns to Poll phase and BLOCKS waiting for the next request. The entire request ran on a SINGLE THREAD, never blocking!',
       activePhase: 'poll',
       highlightLines: [],
       callStack: [],

@@ -173,8 +173,8 @@ export function NodejsEventLoopVisualizer() {
           <div className="absolute bottom-4 left-6 right-6">
             <StepDescription
               badge={step?.badge || { text: '0', color: '#3b82f6' }}
-              title={step?.title || 'Chon "Next" de bat dau'}
-              desc={step?.desc || 'Di qua tung buoc xu ly cua 1 HTTP request trong Node.js event loop'}
+              title={step?.title || 'Press "Next" to start'}
+              desc={step?.desc || 'Walk through each step of an HTTP request lifecycle in the Node.js event loop'}
             />
           </div>
         </div>

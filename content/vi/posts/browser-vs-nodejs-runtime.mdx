@@ -104,7 +104,7 @@ Node.js dùng thư viện C có tên **libuv** để quản lý event loop. Thay
 1. **Timers**: Thực thi callbacks từ `setTimeout` và `setInterval` đã hết hạn
 2. **Pending Callbacks**: Xử lý I/O callbacks bị hoãn từ vòng trước (ví dụ: lỗi TCP)
 3. **Idle/Prepare**: Dùng nội bộ bởi libuv
-4. **Poll**: Phase quan trọng nhất — lấy I/O events mới từ OS và thực thi callbacks. Event loop dành phần lớn thời gian ở đây, chờ I/O hoàn thành
+4. **Poll**: Phase quan trọng nhất — libuv gọi `epoll_wait()` (Linux) hoặc `kevent()` (macOS) để hỏi OS "có file descriptor nào ready chưa?", sau đó thực thi callbacks tương ứng (incoming TCP connections, file read xong, DNS resolve, database response, ...). Event loop dành phần lớn thời gian ở đây, block chờ cho đến khi có I/O event hoặc timer hết hạn
 5. **Check**: Thực thi callbacks từ `setImmediate()`
 6. **Close Callbacks**: Xử lý events đóng kết nối (`socket.on('close')`)
 

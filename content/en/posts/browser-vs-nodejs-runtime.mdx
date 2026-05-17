@@ -101,7 +101,7 @@ Node.js uses a C library called **libuv** to manage the event loop. Instead of a
 1. **Timers**: Execute expired `setTimeout` and `setInterval` callbacks
 2. **Pending Callbacks**: Process deferred I/O callbacks from the previous cycle (e.g., TCP errors)
 3. **Idle/Prepare**: Used internally by libuv
-4. **Poll**: The most important phase — retrieves new I/O events from the OS and executes callbacks. The event loop spends most of its time here, waiting for I/O to complete
+4. **Poll**: The most important phase — libuv calls `epoll_wait()` (Linux) or `kevent()` (macOS) to ask the OS "are any file descriptors ready?", then executes the corresponding callbacks (incoming TCP connections, file reads completed, DNS resolved, database responses, ...). The event loop spends most of its time here, blocking until an I/O event arrives or a timer expires
 5. **Check**: Execute `setImmediate()` callbacks
 6. **Close Callbacks**: Handle connection close events (`socket.on('close')`)
 
