@@ -1,16 +1,10 @@
+import type { CodeLine, StepBadge } from '@/components/event-loop-shared'
+
+export type { CodeLine, StepBadge }
+
 export type PhaseId = 'timers' | 'pending' | 'idle' | 'poll' | 'check' | 'close'
 
 export type MicrotaskId = 'nexttick' | 'promise'
-
-export type CodeLine = {
-  text: string
-  id: string
-}
-
-export type StepBadge = {
-  text: string
-  color: string
-}
 
 export type Step = {
   title: string

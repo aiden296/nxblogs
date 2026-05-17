@@ -1,14 +1,16 @@
 'use client'
 
+import { QueuesPanel as SharedQueuesPanel } from '@/components/event-loop-shared'
+import type { QueueDef, ExtraSection } from '@/components/event-loop-shared'
 import { QUEUE_COLORS, QUEUE_DOT_COLORS } from './constants'
 
-const QUEUE_DEFS = [
-  { id: 'nexttick', label: 'nextTick Queue' },
-  { id: 'promise', label: 'Promise Queue' },
-  { id: 'timer', label: 'Timer Queue' },
-  { id: 'poll', label: 'Poll Queue (I/O)' },
-  { id: 'check', label: 'Check Queue' },
-  { id: 'close', label: 'Close Queue' },
+const QUEUE_DEFS: QueueDef[] = [
+  { id: 'nexttick', label: 'nextTick Queue', dotColor: QUEUE_DOT_COLORS.nexttick, colorClass: QUEUE_COLORS.nexttick },
+  { id: 'promise', label: 'Promise Queue', dotColor: QUEUE_DOT_COLORS.promise, colorClass: QUEUE_COLORS.promise },
+  { id: 'timer', label: 'Timer Queue', dotColor: QUEUE_DOT_COLORS.timer, colorClass: QUEUE_COLORS.timer },
+  { id: 'poll', label: 'Poll Queue (I/O)', dotColor: QUEUE_DOT_COLORS.poll, colorClass: QUEUE_COLORS.poll },
+  { id: 'check', label: 'Check Queue', dotColor: QUEUE_DOT_COLORS.check, colorClass: QUEUE_COLORS.check },
+  { id: 'close', label: 'Close Queue', dotColor: QUEUE_DOT_COLORS.close, colorClass: QUEUE_COLORS.close },
 ]
 
 export function QueuesPanel({
@@ -18,56 +20,21 @@ export function QueuesPanel({
   queues: Partial<Record<string, string[]>>
   threadPool: string[]
 }) {
+  const extra: ExtraSection = {
+    label: 'Thread Pool (libuv)',
+    dotColor: '#f97316',
+    items: threadPool,
+    emptyText: 'idle',
+    itemColorClass: 'border-orange-800 text-orange-300',
+    position: 'after',
+  }
+
   return (
-    <>
-      <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Task Queues</h3>
-
-      {QUEUE_DEFS.map((def) => {
-        const items = queues[def.id] || []
-        return (
-          <div key={def.id}>
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="w-2.5 h-2.5 rounded-full" style={{ background: QUEUE_DOT_COLORS[def.id] }} />
-              <span className="text-xs font-semibold text-slate-400">{def.label}</span>
-            </div>
-            <div className="min-h-[32px] bg-slate-900 rounded-lg border border-slate-800 p-2 flex flex-col gap-1">
-              {items.length === 0 ? (
-                <span className="text-xs text-slate-600 italic">empty</span>
-              ) : (
-                items.map((item, i) => (
-                  <div
-                    key={`${item}-${i}`}
-                    className={`font-mono text-xs px-2 py-1 rounded border bg-slate-950 animate-[queuePush_0.3s_ease-out] ${QUEUE_COLORS[def.id] || 'border-slate-700 text-slate-300'}`}
-                  >
-                    {item}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )
-      })}
-
-      <div className="mt-2 pt-3 border-t border-slate-800">
-        <div className="flex items-center gap-2 mb-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-orange-500" />
-          <span className="text-xs font-semibold text-slate-400">Thread Pool (libuv)</span>
-        </div>
-        <div className="min-h-[32px] bg-slate-900 rounded-lg border border-slate-800 p-2 flex flex-col gap-1">
-          {threadPool.length === 0 ? (
-            <span className="text-xs text-slate-600 italic">idle</span>
-          ) : (
-            threadPool.map((item, i) => (
-              <div
-                key={`${item}-${i}`}
-                className="font-mono text-xs px-2 py-1 rounded border border-orange-800 text-orange-300 bg-slate-950 animate-[queuePush_0.3s_ease-out]"
-              >
-                {item}
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    </>
+    <SharedQueuesPanel
+      title="Task Queues"
+      queues={queues}
+      queueDefs={QUEUE_DEFS}
+      extraSection={extra}
+    />
   )
 }

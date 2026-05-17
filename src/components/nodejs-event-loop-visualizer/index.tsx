@@ -4,11 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { scenario } from './scenario'
 import { STEP_DELAY_MS } from './constants'
 import { EventLoopDiagram } from './event-loop-diagram'
-import { CodePanel } from './code-panel'
-import { CallStackPanel } from './call-stack-panel'
+import { CodePanel, CallStackPanel, StepDescription, StepControls } from '@/components/event-loop-shared'
 import { QueuesPanel } from './queues-panel'
-import { StepDescription } from './step-description'
-import { StepControls } from './step-controls'
 import type { PhaseId } from './types'
 
 export function NodejsEventLoopVisualizer() {

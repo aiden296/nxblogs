@@ -1,152 +1,199 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { scenario } from './scenario'
 import { STEP_DELAY_MS } from './constants'
-import { scenarios } from './scenarios'
-import { CodePanel } from './code-panel'
-import { QueuePanel } from './queue-panel'
-import { EventLoopPhases } from './event-loop-phases'
-import { ConsolePanel } from './console-panel'
-import type { Scenario, Step } from './types'
+import { EventLoopDiagram } from './event-loop-diagram'
+import { CodePanel, CallStackPanel, StepDescription, StepControls } from '@/components/event-loop-shared'
+import { QueuesPanel } from './queues-panel'
+import type { PhaseId } from './types'
 
 export function BrowserEventLoopVisualizer() {
-  const [scenario, setScenario] = useState<Scenario>(scenarios[0])
-  const [stepIdx, setStepIdx] = useState(0)
+  const [currentStep, setCurrentStep] = useState(-1)
   const [playing, setPlaying] = useState(false)
+  const autoRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const steps = scenario.steps
-  const step: Step = steps[stepIdx]
+  const step = currentStep >= 0 ? steps[currentStep] : null
+
+  const executedLineIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (let i = 0; i <= currentStep; i++) {
+      steps[i]?.executedLines?.forEach((id) => ids.add(id))
+    }
+    return ids
+  }, [currentStep, steps])
+
+  const donePhases = useMemo(() => {
+    const phases = new Set<PhaseId>()
+    for (let i = 0; i < currentStep; i++) {
+      const p = steps[i]?.activePhase
+      if (p) phases.add(p)
+    }
+    return phases
+  }, [currentStep, steps])
+
+  const nextStep = useCallback(() => {
+    setCurrentStep((prev) => {
+      if (prev < steps.length - 1) return prev + 1
+      return prev
+    })
+  }, [steps.length])
+
+  const prevStep = useCallback(() => {
+    setCurrentStep((prev) => Math.max(0, prev - 1))
+  }, [])
+
+  const resetSteps = useCallback(() => {
+    setCurrentStep(-1)
+    setPlaying(false)
+  }, [])
+
+  const stopAuto = useCallback(() => {
+    if (autoRef.current) {
+      clearInterval(autoRef.current)
+      autoRef.current = null
+    }
+    setPlaying(false)
+  }, [])
+
+  const toggleAuto = useCallback(() => {
+    if (playing) {
+      stopAuto()
+    } else {
+      setPlaying(true)
+    }
+  }, [playing, stopAuto])
 
   useEffect(() => {
     if (!playing) {
+      if (autoRef.current) {
+        clearInterval(autoRef.current)
+        autoRef.current = null
+      }
       return
     }
 
-    if (stepIdx >= steps.length - 1) {
-      setPlaying(false)
-      return
-    }
-
-    const timer = setTimeout(() => {
-      setStepIdx((i) => i + 1)
+    autoRef.current = setInterval(() => {
+      setCurrentStep((prev) => {
+        if (prev >= steps.length - 1) {
+          stopAuto()
+          return prev
+        }
+        return prev + 1
+      })
     }, STEP_DELAY_MS)
 
     return () => {
-      clearTimeout(timer)
+      if (autoRef.current) {
+        clearInterval(autoRef.current)
+        autoRef.current = null
+      }
     }
-  }, [playing, stepIdx, steps.length])
+  }, [playing, steps.length, stopAuto])
 
-  function handleScenarioChange(id: string) {
-    const next = scenarios.find((s) => s.id === id)
-
-    if (!next) {
-      return
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'ArrowRight' || e.key === ' ') {
+        e.preventDefault()
+        nextStep()
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        prevStep()
+      }
+      if (e.key === 'r' || e.key === 'R') {
+        resetSteps()
+      }
+      if (e.key === 'Escape') {
+        stopAuto()
+      }
     }
 
-    setScenario(next)
-    setStepIdx(0)
-    setPlaying(false)
-  }
-
-  function handleReset() {
-    setStepIdx(0)
-    setPlaying(false)
-  }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [nextStep, prevStep, resetSteps, stopAuto])
 
   return (
-    <div className="not-prose my-8 space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={scenario.id}
-          onChange={(e) => handleScenarioChange(e.target.value)}
-          className="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
-        >
-          {scenarios.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.title}
-            </option>
-          ))}
-        </select>
-        <button
-          onClick={handleReset}
-          className="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-muted-foreground transition hover:bg-muted"
-        >
-          Reset
-        </button>
-      </div>
+    <div className="h-screen flex flex-col bg-slate-950 text-slate-200">
+      <style>{`
+        @keyframes queuePush {
+          from { opacity: 0; transform: translateX(-12px) scale(0.9); }
+          to { opacity: 1; transform: translateX(0) scale(1); }
+        }
+        @keyframes stackPush {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes pulse-ring {
+          0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
+          70% { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+        }
+      `}</style>
 
-      <CodePanel code={scenario.code} highlightLines={step.highlightLines} />
-
-      <div className="rounded-lg border border-border bg-muted/30 p-3">
-        <div className="mb-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-          <span className="font-mono">
-            Step {stepIdx + 1} / {steps.length}
+      <header className="flex items-center justify-between px-6 py-3 border-b border-slate-800 bg-slate-900/80 shrink-0">
+        <div className="flex items-center gap-3">
+          <h1 className="text-lg font-bold text-white">Browser Event Loop</h1>
+        </div>
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-slate-500">Step</span>
+          <span className="font-mono text-white font-bold">
+            {currentStep + 1} / {steps.length}
           </span>
-          <div className="h-1 flex-1 overflow-hidden rounded-full bg-border">
-            <div
-              className="h-full bg-primary transition-all duration-300"
-              style={{ width: `${((stepIdx + 1) / steps.length) * 100}%` }}
+        </div>
+      </header>
+
+      <div className="flex-1 flex overflow-hidden">
+        <div className="w-95 shrink-0 border-r border-slate-800 flex flex-col">
+          <div className="flex-1 overflow-y-auto p-4">
+            <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Interactive Script</h3>
+            <CodePanel
+              codeLines={scenario.codeLines}
+              highlightLines={step?.highlightLines || []}
+              executedLineIds={executedLineIds}
+            />
+          </div>
+
+          <div className="h-48 shrink-0 border-t border-slate-800 p-4">
+            <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Call Stack</h3>
+            <CallStackPanel items={step?.callStack || []} />
+          </div>
+        </div>
+
+        <div className="flex-1 flex flex-col items-center justify-center relative p-6">
+          <div className="relative w-full max-w-120">
+            <EventLoopDiagram
+              activePhase={step?.activePhase || null}
+              donePhases={donePhases}
+            />
+          </div>
+
+          <div className="absolute bottom-4 left-6 right-6">
+            <StepDescription
+              badge={step?.badge || { text: '0', color: '#3b82f6' }}
+              title={step?.title || 'Press "Next" to start'}
+              desc={step?.desc || 'Walk through a click → fetch → DOM update flow in the browser event loop'}
             />
           </div>
         </div>
-        <p className="mt-2 text-sm leading-relaxed">{step.description}</p>
-        <div className="mt-3 flex items-center gap-1.5">
-          <button
-            onClick={() => {
-              setPlaying(false)
-              setStepIdx((i) => Math.max(0, i - 1))
-            }}
-            disabled={stepIdx === 0}
-            className="rounded-md border border-border bg-background px-3 py-1.5 text-xs disabled:opacity-30"
-          >
-            ← Prev
-          </button>
-          <button
-            onClick={() => setPlaying((p) => !p)}
-            disabled={stepIdx >= steps.length - 1 && !playing}
-            className="flex-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-30"
-          >
-            {playing ? 'Pause' : 'Play'}
-          </button>
-          <button
-            onClick={() => {
-              setPlaying(false)
-              setStepIdx((i) => Math.min(steps.length - 1, i + 1))
-            }}
-            disabled={stepIdx >= steps.length - 1}
-            className="rounded-md border border-border bg-background px-3 py-1.5 text-xs disabled:opacity-30"
-          >
-            Next →
-          </button>
+
+        <div className="w-70 shrink-0 border-l border-slate-800 flex flex-col p-4 gap-4 overflow-y-auto">
+          <QueuesPanel queues={step?.queues || {}} webAPIs={step?.webAPIs || []} />
         </div>
       </div>
 
-      <EventLoopPhases currentPhase={step.phase} />
-
-      <div className="flex gap-2 overflow-x-auto">
-        <QueuePanel
-          title="Call Stack"
-          items={step.callStack}
-          variant="callstack"
-          isActive={step.callStack.length > 0}
+      <footer className="shrink-0 border-t border-slate-800 bg-slate-900/80 px-6 py-3">
+        <StepControls
+          currentStep={currentStep}
+          totalSteps={steps.length}
+          playing={playing}
+          onPrev={prevStep}
+          onNext={nextStep}
+          onReset={resetSteps}
+          onToggleAuto={toggleAuto}
         />
-        <QueuePanel title="Web APIs" items={step.webAPIs} variant="webapi" isActive={step.webAPIs.length > 0} />
-        <QueuePanel
-          title="Task Queue"
-          items={step.taskQueue}
-          variant="task"
-          isActive={step.phase === 'macrotask'}
-        />
-        <QueuePanel
-          title="Microtask Queue"
-          items={step.microtaskQueue}
-          variant="microtask"
-          isActive={step.phase === 'microtask'}
-        />
-        <QueuePanel title="requestAnimationFrame Queue" items={step.rafQueue} variant="raf" isActive={step.phase === 'raf'} />
-      </div>
-
-      <ConsolePanel output={step.consoleOutput} />
+      </footer>
     </div>
   )
 }

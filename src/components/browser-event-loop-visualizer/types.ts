@@ -1,32 +1,24 @@
-export type EventLoopPhase =
-  | 'idle'
-  | 'macrotask'
-  | 'microtask'
-  | 'raf'
-  | 'render'
-  | 'idle-callback'
+import type { CodeLine, StepBadge } from '@/components/event-loop-shared'
 
-export type QueueItem = {
-  id: string
-  label: string
-  color?: string
-}
+export type { CodeLine, StepBadge }
+
+export type PhaseId = 'macrotask' | 'microtask' | 'raf' | 'render' | 'idle'
 
 export type Step = {
-  description: string
-  highlightLines: number[]
-  callStack: QueueItem[]
-  taskQueue: QueueItem[]
-  microtaskQueue: QueueItem[]
-  rafQueue: QueueItem[]
-  phase: EventLoopPhase
-  consoleOutput: string[]
-  webAPIs: QueueItem[]
+  title: string
+  desc: string
+  activePhase: PhaseId | null
+  highlightLines: string[]
+  executedLines?: string[]
+  callStack: string[]
+  queues: Partial<Record<string, string[]>>
+  webAPIs: string[]
+  badge: StepBadge
 }
 
 export type Scenario = {
   id: string
   title: string
-  code: string
+  codeLines: CodeLine[]
   steps: Step[]
 }
