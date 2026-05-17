@@ -72,19 +72,18 @@ const parsePageMapItems = (items: PageMapItem[]): SitemapEntry[] => {
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const baseUrl = 'https://stopjustcoding.com'
+  const defaultLocale = 'en'
 
-  const allRoutes = new Set<string>()
-  const latestModified = new Map<string, string>()
+  const routeTimestamps = new Map<string, string>()
 
   for (const locale of LOCALES) {
     try {
       const pageMap = await getPageMap(`/${locale}`)
       const entries = parsePageMapItems(pageMap)
       for (const entry of entries) {
-        allRoutes.add(entry.url)
-        const existing = latestModified.get(entry.url)
+        const existing = routeTimestamps.get(entry.url)
         if (!existing || entry.lastModified > existing) {
-          latestModified.set(entry.url, entry.lastModified)
+          routeTimestamps.set(entry.url, entry.lastModified)
         }
       }
     } catch {
@@ -92,20 +91,13 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     }
   }
 
-  return Array.from(allRoutes).map((route) => {
-    const pathWithoutLocale = route.replace(/^\/(en|vi)/, '')
-
-    return {
-      url: `${baseUrl}${route}`,
-      lastModified: latestModified.get(route)!,
-      changeFrequency: 'weekly' as const,
-      priority: route === '/' ? 1 : 0.8,
-      alternates: {
-        languages: {
-          en: `${baseUrl}/en${pathWithoutLocale}`,
-          vi: `${baseUrl}/vi${pathWithoutLocale}`,
-        },
-      },
-    }
-  })
+  return Array.from(routeTimestamps.entries()).map(([route, lastModified]) => ({
+    url: `${baseUrl}/${defaultLocale}${route}`,
+    lastModified,
+    changeFrequency: 'weekly' as const,
+    priority: route === '/' ? 1 : 0.8,
+    alternates: {
+      languages: Object.fromEntries(LOCALES.map((locale) => [locale, `${baseUrl}/${locale}${route}`])),
+    },
+  }))
 }
