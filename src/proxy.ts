@@ -6,7 +6,7 @@ const DEFAULT_LOCALE = 'en'
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  if (/\.\w+$/.test(pathname)) {
+  if (/\.\w+$/.test(pathname) || pathname.startsWith('/tools')) {
     return NextResponse.next()
   }
 

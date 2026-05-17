@@ -6,7 +6,6 @@ import { Avatar } from '@/components/avatar'
 import { RedisSortedSetSimulator } from '@/components/redis-sorted-set-simulator'
 import { ExcalidrawDiagram } from '@/components/excalidraw-diagram'
 import { BrowserEventLoopVisualizer } from '@/components/browser-event-loop-visualizer'
-import { NodejsEventLoopVisualizer } from '@/components/nodejs-event-loop-visualizer'
 
 const blogComponents = getBlogMDXComponents({
   h1: ({ children }) => <h1 className="custom-h1">{children}</h1>,
@@ -34,6 +33,5 @@ export function useMDXComponents() {
     RedisSortedSetSimulator: RedisSortedSetSimulator,
     ExcalidrawDiagram: ExcalidrawDiagram,
     BrowserEventLoopVisualizer: BrowserEventLoopVisualizer,
-    NodejsEventLoopVisualizer: NodejsEventLoopVisualizer,
   }
 }
