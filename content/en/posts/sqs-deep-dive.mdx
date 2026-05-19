@@ -2,7 +2,7 @@
 title: 'Amazon SQS Deep Dive: The Distributed Message Queue Handling Millions of Messages Daily'
 date: '2026-05-19'
 tags: ['Devops', 'AWS', 'SAA']
-description: 'Deep dive into Amazon SQS — the distributed architecture underneath, Standard vs FIFO queue, message lifecycle, visibility timeout, long polling, Dead Letter Queue, and real-world patterns: Auto Scaling Group integration, SQS as database write buffer.'
+description: 'Deep dive into Amazon SQS — the distributed architecture underneath, Standard vs FIFO queue, message lifecycle, visibility timeout, long polling, Dead Letter Queue, SNS + SQS fan-out pattern, and real-world patterns: Auto Scaling Group integration, SQS as database write buffer.'
 enableComment: true
 ---
 
@@ -358,6 +358,63 @@ The consequence: if the DLQ's `maxReceiveCount` is low (e.g., 3), messages may b
 
 ---
 
+## 11. SNS + SQS: Fan-Out Pattern
+
+The previous patterns (ASG, buffer, Lambda) all handle a single flow: producer sends message → one group of consumers processes it. But in practice, a single event often needs to be processed by **multiple independent services** simultaneously.
+
+For example: when an order is placed, the system needs to simultaneously check for fraud (Fraud Service), handle shipping (Shipping Service), send confirmation emails (Notification Service), and update analytics. If the Buying Service sends messages directly to each service, you create **tight coupling** — every time you add a new service, you have to modify the Buying Service code.
+
+The **fan-out pattern** solves this by combining **SNS (Simple Notification Service)** — a pub/sub (publish-subscribe) service that sends a single message to multiple subscribers at once — with **SQS** to ensure each subscriber receives and processes messages reliably.
+
+### Architecture
+
+<ExcalidrawDiagram src="/sqs-sns-fan-out.excalidraw" alt="SNS + SQS Fan-Out Pattern — Buying Service sends one message to SNS Topic, fans out to multiple SQS queues" />
+
+How it works:
+
+1. **Buying Service** sends **a single message** to an **SNS Topic** — publish once.
+2. SNS automatically **fans out** — copies the message and pushes it to **all SQS queues** subscribed to that topic.
+3. Each SQS queue operates **completely independently** — Fraud Service polls from its own queue, Shipping Service polls from its own queue. One service being slow or failing doesn't affect the others.
+
+### Why Combine SNS + SQS Instead of Just SNS?
+
+SNS alone is **push-based** — when SNS sends a message to a subscriber, if the subscriber is down or unable to process at that moment, **the message is lost**. SNS doesn't store messages.
+
+Combining SQS behind each subscriber completely solves this:
+
+- **Persistence** — messages are safely stored in SQS until the consumer processes and deletes them.
+- **Delayed processing** — each consumer processes at its own pace, not forced by the publish rate. Fraud Service might take 5 seconds per message while Shipping Service takes only 100ms — no problem.
+- **Retry + DLQ** — failed messages automatically return to the queue, combined with Dead Letter Queue for poison messages — all mechanisms discussed in previous sections.
+- **Decoupled scaling** — each subscriber scales independently based on its own queue depth.
+
+### Adding New Subscribers
+
+This is the most powerful benefit of fan-out: **adding new subscribers without changing the producer**. When you need to add an Analytics Service to track orders, just create a new SQS queue, subscribe it to the same SNS topic — done. The Buying Service doesn't know and doesn't need to know how many subscribers are listening.
+
+This is the **Open-Closed Principle** applied at the infrastructure level — the system is open for extension (adding subscribers) but closed for modification (no changes to the producer).
+
+### Important Configuration: SQS Access Policy
+
+For SNS to send messages to an SQS queue, the queue needs a **resource-based access policy** allowing the SNS service principal to perform the `sqs:SendMessage` action. Without this policy, SNS cannot write to the queue and messages will be silently dropped.
+
+> **Best practice**: always restrict the SQS access policy with an `aws:SourceArn` condition pointing to the specific SNS topic — avoid allowing any SNS topic to write to your queue. This is especially important in multi-team environments where multiple SNS topics exist within the same AWS account.
+
+### Cross-Region Delivery
+
+SNS supports **cross-region delivery** — an SNS topic in Region A can fan out messages to SQS queues in Region B or Region C. This is useful for multi-region architectures where you want to replicate events to other regions for local processing, reducing latency for end users.
+
+### Practical Application: S3 Events Fan-Out
+
+A common use case for the fan-out pattern is handling **S3 event notifications**. S3 has an important limitation: for the same combination of **event type** (e.g., `s3:ObjectCreated:*`) and **prefix** (e.g., `images/`), you can only create **one S3 Event notification rule**.
+
+This means if you want three different services to react when a file is uploaded to `images/` — you cannot create three separate S3 event rules.
+
+<ExcalidrawDiagram src="/sqs-s3-fan-out.excalidraw" alt="S3 Events Fan-Out — S3 sends event to SNS Topic, fans out to multiple SQS queues and Lambda" />
+
+The solution: configure S3 to send event notifications to **a single SNS Topic**. SNS then fans out to multiple SQS queues and/or Lambda functions. Each downstream service receives its own copy of the event and processes independently — one service creates thumbnails, another extracts metadata, a third indexes into a search engine.
+
+---
+
 ## Summary
 
 SQS looks simple from the outside — send message, receive message, delete message. But underneath is a carefully designed distributed system with many deliberate trade-offs:
@@ -369,5 +426,6 @@ SQS looks simple from the outside — send message, receive message, delete mess
 - **ASG Integration** — queue depth is a more accurate scaling signal than CPU for queue-based workloads.
 - **Buffer Pattern** — SQS serves as a shock absorber between fast producers and capacity-limited databases, allowing the two tiers to scale independently.
 - **Lambda Integration** — AWS manages polling and scaling automatically, but be careful with concurrency limits and their impact on DLQ receive counts.
+- **Fan-Out Pattern** — combining SNS + SQS to fan out a single event to multiple independent subscribers, with persistence, retry, and the ability to add subscribers without changing the producer.
 
-SQS is the right choice when you need a **simple, fully managed, infinitely scalable task queue** to decouple components in your system. If you need **event streaming** with replay and long-term retention → Kafka. If you need **fan-out** of a single event to multiple subscribers → SNS. If you need **complex routing** based on event content → EventBridge. Each tool has its place — SQS excels at simplicity and reliability.
+SQS is the right choice when you need a **simple, fully managed, infinitely scalable task queue** to decouple components in your system. If you need **event streaming** with replay and long-term retention → Kafka. If you need **fan-out** of a single event to multiple subscribers → combine SNS + SQS as discussed in section 11. If you need **complex routing** based on event content → EventBridge. Each tool has its place — SQS excels at simplicity and reliability.

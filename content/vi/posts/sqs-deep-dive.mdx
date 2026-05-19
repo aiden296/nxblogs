@@ -2,7 +2,7 @@
 title: 'Amazon SQS Deep Dive: Hàng đợi tin nhắn phân tán xử lý hàng triệu messages mỗi ngày'
 date: '2026-05-19'
 tags: ['Devops', 'AWS', 'SAA']
-description: 'Deep dive Amazon SQS — kiến trúc phân tán bên dưới, Standard vs FIFO queue, message lifecycle, visibility timeout, long polling, Dead Letter Queue, và patterns thực tế: Auto Scaling Group integration, SQS as database write buffer.'
+description: 'Deep dive Amazon SQS — kiến trúc phân tán bên dưới, Standard vs FIFO queue, message lifecycle, visibility timeout, long polling, Dead Letter Queue, SNS + SQS fan-out pattern, và patterns thực tế: Auto Scaling Group integration, SQS as database write buffer.'
 enableComment: true
 ---
 
@@ -358,6 +358,63 @@ Hệ quả: nếu `maxReceiveCount` của DLQ thấp (ví dụ 3), message có t
 
 ---
 
+## 11. SNS + SQS: Fan-Out Pattern
+
+Các pattern trước (ASG, buffer, Lambda) đều xử lý một luồng duy nhất: producer gửi message → một nhóm consumer xử lý. Nhưng trong thực tế, một sự kiện thường cần được xử lý bởi **nhiều service độc lập** cùng lúc.
+
+Ví dụ: khi một đơn hàng được tạo, hệ thống cần đồng thời kiểm tra gian lận (Fraud Service), xử lý vận chuyển (Shipping Service), gửi email xác nhận (Notification Service), và cập nhật analytics. Nếu Buying Service gửi message trực tiếp đến từng service, bạn tạo ra **tight coupling** — mỗi khi thêm một service mới, phải sửa code ở Buying Service.
+
+**Fan-out pattern** giải quyết vấn đề này bằng cách kết hợp **SNS (Simple Notification Service)** — một dịch vụ pub/sub (publish-subscribe) cho phép gửi một message đến nhiều subscriber cùng lúc — với **SQS** để đảm bảo mỗi subscriber nhận và xử lý message một cách đáng tin cậy.
+
+### Kiến trúc
+
+<ExcalidrawDiagram src="/sqs-sns-fan-out.excalidraw" alt="SNS + SQS Fan-Out Pattern — Buying Service gửi một message đến SNS Topic, fan-out đến nhiều SQS queues" />
+
+Luồng hoạt động:
+
+1. **Buying Service** gửi **một message duy nhất** đến **SNS Topic** — chỉ cần publish một lần.
+2. SNS tự động **fan-out** — sao chép message và đẩy đến **tất cả SQS queues** đã subscribe vào topic đó.
+3. Mỗi SQS queue hoạt động **hoàn toàn độc lập** — Fraud Service poll từ queue riêng, Shipping Service poll từ queue riêng. Một service chậm hoặc lỗi không ảnh hưởng đến các service khác.
+
+### Tại sao kết hợp SNS + SQS thay vì chỉ dùng SNS?
+
+SNS đơn thuần là **push-based** — khi SNS gửi message đến subscriber, nếu subscriber đang down hoặc không thể xử lý tại thời điểm đó, **message sẽ bị mất**. SNS không lưu trữ message.
+
+Kết hợp SQS ở phía sau mỗi subscriber giải quyết hoàn toàn vấn đề này:
+
+- **Persistence** — message được lưu trữ an toàn trong SQS cho đến khi consumer xử lý xong và xoá.
+- **Delayed processing** — mỗi consumer xử lý theo tốc độ riêng, không bị ép bởi tốc độ publish. Fraud Service có thể mất 5 giây/message trong khi Shipping Service chỉ mất 100ms — không sao cả.
+- **Retry + DLQ** — message thất bại tự động quay lại queue, kết hợp Dead Letter Queue cho poison messages — tất cả cơ chế đã thảo luận ở các phần trước.
+- **Decoupled scaling** — mỗi subscriber scale độc lập dựa trên queue depth của riêng nó.
+
+### Mở rộng subscriber
+
+Đây là lợi ích mạnh nhất của fan-out: **thêm subscriber mới mà không cần thay đổi producer**. Khi cần thêm Analytics Service để theo dõi đơn hàng, bạn chỉ cần tạo một SQS queue mới, subscribe vào cùng SNS topic — xong. Buying Service không biết và không cần biết có bao nhiêu subscriber đang lắng nghe.
+
+Đây chính là **Open-Closed Principle** áp dụng ở tầng infrastructure — hệ thống mở cho mở rộng (thêm subscriber) nhưng đóng cho thay đổi (không sửa producer).
+
+### Cấu hình quan trọng: SQS Access Policy
+
+Để SNS có thể gửi message vào SQS queue, queue cần có **resource-based access policy** cho phép SNS service principal thực hiện action `sqs:SendMessage`. Nếu thiếu policy này, SNS sẽ không thể ghi vào queue và message sẽ bị drop âm thầm.
+
+> **Best practice**: luôn restrict SQS access policy bằng condition `aws:SourceArn` trỏ đến SNS topic cụ thể — tránh cho phép mọi SNS topic ghi vào queue. Điều này đặc biệt quan trọng trong môi trường multi-team, nơi nhiều SNS topic tồn tại trong cùng một AWS account.
+
+### Cross-Region Delivery
+
+SNS hỗ trợ **cross-region delivery** — một SNS topic ở Region A có thể fan-out message đến SQS queues ở Region B hoặc Region C. Điều này hữu ích cho các kiến trúc multi-region, nơi bạn muốn replicate events sang các region khác để xử lý locally, giảm latency cho end user.
+
+### Ứng dụng thực tế: S3 Events Fan-Out
+
+Một use case phổ biến của fan-out pattern là xử lý **S3 event notifications**. S3 có một giới hạn quan trọng: với cùng một tổ hợp **event type** (ví dụ `s3:ObjectCreated:*`) và **prefix** (ví dụ `images/`), bạn chỉ được tạo **một S3 Event notification rule duy nhất**.
+
+Nghĩa là nếu bạn muốn ba service khác nhau cùng react khi một file được upload lên `images/` — bạn không thể tạo ba S3 event rules riêng biệt.
+
+<ExcalidrawDiagram src="/sqs-s3-fan-out.excalidraw" alt="S3 Events Fan-Out — S3 gửi event đến SNS Topic, fan-out đến nhiều SQS queues và Lambda" />
+
+Giải pháp: cấu hình S3 gửi event notification đến **một SNS Topic duy nhất**. SNS sau đó fan-out đến nhiều SQS queues và/hoặc Lambda functions. Mỗi downstream service nhận bản sao riêng của event và xử lý độc lập — một service tạo thumbnail, service khác extract metadata, service thứ ba index vào search engine.
+
+---
+
 ## Tổng kết
 
 SQS trông đơn giản từ bên ngoài — gửi message, nhận message, xoá message. Nhưng bên dưới là một hệ thống phân tán được thiết kế cẩn thận với nhiều trade-off có chủ đích:
@@ -369,5 +426,6 @@ SQS trông đơn giản từ bên ngoài — gửi message, nhận message, xoá
 - **ASG Integration** — queue depth là tín hiệu scaling chính xác hơn CPU cho workload queue-based.
 - **Buffer Pattern** — SQS là bộ giảm xóc giữa fast producers và capacity-limited databases, cho phép hai tầng scale độc lập.
 - **Lambda Integration** — AWS quản lý polling và scaling tự động, nhưng cần cẩn thận với concurrency limits và ảnh hưởng đến DLQ receive count.
+- **Fan-Out Pattern** — kết hợp SNS + SQS để fan-out một event đến nhiều subscriber độc lập, với persistence, retry, và khả năng mở rộng subscriber mà không cần thay đổi producer.
 
-SQS là lựa chọn đúng khi bạn cần một **task queue đơn giản, fully managed, scale vô hạn** để decouple các thành phần trong hệ thống. Nếu bạn cần **event streaming** với replay và retention dài hạn → Kafka. Nếu cần **fan-out** một event đến nhiều subscriber → SNS. Nếu cần **routing phức tạp** dựa trên event content → EventBridge. Mỗi công cụ có vị trí riêng — SQS giỏi nhất ở sự đơn giản và đáng tin cậy.
+SQS là lựa chọn đúng khi bạn cần một **task queue đơn giản, fully managed, scale vô hạn** để decouple các thành phần trong hệ thống. Nếu bạn cần **event streaming** với replay và retention dài hạn → Kafka. Nếu cần **fan-out** một event đến nhiều subscriber → kết hợp SNS + SQS như đã thảo luận ở phần 11. Nếu cần **routing phức tạp** dựa trên event content → EventBridge. Mỗi công cụ có vị trí riêng — SQS giỏi nhất ở sự đơn giản và đáng tin cậy.
