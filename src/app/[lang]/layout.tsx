@@ -3,6 +3,7 @@ import 'nextra-theme-blog/style.css'
 import '@/styles/globals.css'
 import CustomFooter from '@/components/custom-footer'
 import CustomHeader from '@/components/custom-header'
+import { Analytics } from '@vercel/analytics/next'
 import { BackToTop } from '@/components/back-to-top'
 import { LocaleSync } from '@/components/locale-sync'
 import { Metadata } from 'next'
@@ -55,6 +56,7 @@ export default async function LocaleLayout({ children, params }: Props) {
         </Layout>
         <BackToTop />
         <LocaleSync />
+        <Analytics />
       </body>
     </html>
   )
