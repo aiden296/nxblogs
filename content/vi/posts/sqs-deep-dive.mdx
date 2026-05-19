@@ -1,0 +1,373 @@
+---
+title: 'Amazon SQS Deep Dive: Hàng đợi tin nhắn phân tán xử lý hàng triệu messages mỗi ngày'
+date: '2026-05-19'
+tags: ['Devops', 'AWS', 'SAA']
+description: 'Deep dive Amazon SQS — kiến trúc phân tán bên dưới, Standard vs FIFO queue, message lifecycle, visibility timeout, long polling, Dead Letter Queue, và patterns thực tế: Auto Scaling Group integration, SQS as database write buffer.'
+enableComment: true
+---
+
+# Amazon SQS Deep Dive: Hàng đợi tin nhắn phân tán xử lý hàng triệu messages mỗi ngày
+
+Bạn đang vận hành một hệ thống e-commerce. Mọi thứ hoạt động ổn định với vài nghìn requests mỗi phút — cho đến ngày flash sale. Lượng traffic tăng gấp 20 lần trong vòng vài giây. Hàng nghìn đơn hàng đổ về cùng lúc, mỗi đơn đều cần ghi xuống database. Connection pool cạn kiệt, queries xếp hàng chờ, timeout cascades, và rồi database sụp. Khách hàng thấy lỗi 500, team dev thức đêm rollback, business mất doanh thu.
+
+Vấn đề cốt lõi ở đây không phải database yếu — mà là kiến trúc **tight coupling**. Application ghi thẳng xuống database, nên tốc độ ghi bị giới hạn bởi khả năng xử lý của database. Traffic tăng đột biến → database nghẽn → cả hệ thống đổ theo.
+
+Giải pháp? Đặt một **hàng đợi tin nhắn (message queue)** ở giữa. Thay vì ghi thẳng xuống database, application chỉ cần "ném" request vào hàng đợi. Phía bên kia, các worker lấy message ra và ghi xuống database với tốc độ mà database chịu được. Hàng đợi đóng vai trò như một **bộ giảm xóc** — hấp thụ traffic đột biến và giải phóng từ từ, đều đặn.
+
+Đây chính là bài toán mà **Amazon SQS (Simple Queue Service)** giải quyết. Một hàng đợi tin nhắn **fully managed**, không cần provisioning, không cần lo capacity planning. Bạn gửi message vào, consumer lấy ra. AWS lo toàn bộ phần availability, durability, và scaling phía dưới.
+
+Bài viết này sẽ đi sâu vào kiến trúc bên trong của SQS — từ cách message được lưu trữ và replicate trên nhiều server phân tán, sự khác biệt giữa Standard Queue và FIFO Queue (và tại sao Standard Queue deliver message không theo thứ tự), visibility timeout, long polling, Dead Letter Queue, cho đến các patterns thực tế như tích hợp Auto Scaling Group và dùng SQS làm buffer cho database writes.
+
+<ExcalidrawDiagram src="/sqs-overview.excalidraw" alt="Amazon SQS Overview — Producers, Queue, Consumers" />
+
+---
+
+## 1. SQS là gì?
+
+**Amazon SQS (Simple Queue Service)** là một dịch vụ **message queue fully managed** của AWS — cho phép các ứng dụng gửi, lưu trữ, và nhận message giữa các thành phần phần mềm với bất kỳ khối lượng nào, mà không lo mất message hay cần các service khác phải online cùng lúc.
+
+Nói đơn giản, SQS hoạt động như một **hộp thư bưu điện**. Người gửi (producer) bỏ thư vào hộp, người nhận (consumer) đến lấy thư khi sẵn sàng. Người gửi không cần biết người nhận là ai, đang ở đâu, hay có đang online hay không — thư vẫn nằm an toàn trong hộp cho đến khi được lấy.
+
+Một vài đặc điểm quan trọng:
+
+- **Fully managed** — không cần provisioning server, không cần lo patching, monitoring hay capacity planning. AWS quản lý toàn bộ infrastructure.
+- **Tính phí theo request** — mỗi API call (SendMessage, ReceiveMessage, DeleteMessage...) đều tính phí. Đơn vị tính là **request**, trong đó 1 request = **64KB**. Nếu bạn gửi một message 256KB, nó tính là **4 requests**. SQS không tính phí dựa trên dung lượng lưu trữ hay số lượng message.
+- **Scale gần như vô hạn** — Standard Queue có thể xử lý số lượng message gần như không giới hạn mỗi giây.
+- **Lưu trữ message lên đến 14 ngày** — mặc định 4 ngày, có thể cấu hình tối đa 14 ngày.
+- **Kích thước message tối đa 256KB** — nếu cần gửi payload lớn hơn, dùng pattern **claim check**: lưu payload lên S3, gửi S3 URL qua SQS.
+
+SQS có hai loại queue: **Standard Queue** và **FIFO Queue**. Chúng ta sẽ đi sâu vào sự khác biệt ở phần tiếp theo.
+
+| Tiêu chí         | SQS                                              | Kafka                                     | RabbitMQ                               |
+| ---------------- | ------------------------------------------------ | ----------------------------------------- | -------------------------------------- |
+| Delivery model   | Pull — consumer chủ động poll message            | Pull — consumer chủ động kéo từ partition | Push — broker đẩy message đến consumer |
+| Ordering         | Best-effort (Standard) / Strict per group (FIFO) | Strict per partition                      | Strict per queue                       |
+| Retention        | Tối đa 14 ngày                                   | Tuỳ cấu hình (ngày/dung lượng)            | Cho đến khi consume                    |
+| Throughput       | Gần như vô hạn (Standard)                        | Rất cao (~1M+ msg/s)                      | Trung bình (~50K msg/s)                |
+| Management       | Fully managed                                    | Self-managed hoặc Amazon MSK              | Self-managed                           |
+| Primary use case | Task queue, decoupling, buffer                   | Event streaming, log aggregation          | Task queue, request-reply              |
+
+---
+
+## 2. Kiến trúc bên trong — "How Things Appear" vs "How Things Actually Are"
+
+Khi bạn nhìn vào SQS từ bên ngoài, mọi thứ trông rất đơn giản: một hàng đợi, message vào từ đầu này, ra từ đầu kia, theo thứ tự FIFO (First In, First Out). Đây là **"How Things Appear"** — cái mà bạn thấy.
+
+Nhưng bên dưới lớp vỏ đơn giản đó là một hệ thống phân tán phức tạp. Đây là **"How Things Actually Are"**.
+
+### 2.1. Kiến trúc 3 tầng
+
+SQS được xây dựng trên ba tầng chính:
+
+**Frontend Layer** — tầng tiếp nhận request. Load balancer phân phối request đến các frontend server, nơi thực hiện authentication (xác thực qua IAM), validation (kiểm tra kích thước message, queue tồn tại hay không), và routing request xuống tầng storage.
+
+**Backend Storage Layer** — trái tim của SQS. Đây là một **distributed key-value store** — hệ thống lưu trữ phân tán dạng key-value. Message được lưu dưới dạng cặp key-value, trong đó key được tạo từ queue ID và message metadata, value là message body (tối đa 256KB) cùng các attributes. Điểm quan trọng: message được **shard** (phân mảnh) trên nhiều storage node dựa theo queue ID để cân bằng tải.
+
+**Coordination Layer** — tầng điều phối, sử dụng cơ chế **distributed consensus** (tương tự Paxos hoặc Raft) để đảm bảo tính nhất quán giữa các node. Với Standard Queue, tầng này hoạt động ở mức tối thiểu để ưu tiên throughput. Với FIFO Queue, tầng này hoạt động chặt chẽ hơn để đảm bảo thứ tự và exactly-once delivery.
+
+### 2.2. Message được lưu trữ như thế nào?
+
+Khi producer gửi một message vào SQS, điều xảy ra phía sau là:
+
+1. Frontend server nhận request, xác thực, validate.
+2. Message được **replicate đồng bộ (synchronous replication)** lên nhiều storage node nằm ở **nhiều Availability Zone (AZ)** khác nhau.
+3. SQS sử dụng cơ chế **quorum-based writes** — ghi được coi là thành công khi **M trong N replicas** xác nhận đã lưu. Điều này đảm bảo message tồn tại ngay cả khi một AZ gặp sự cố.
+4. Chỉ sau khi đủ quorum, SQS mới trả về response thành công cho producer.
+
+Nhờ cơ chế này, SQS đạt độ bền dữ liệu cực cao — AWS công bố **11 nines durability (99.999999999%)**. Message của bạn gần như không thể mất.
+
+### 2.3. Tại sao Standard Queue deliver message không theo thứ tự?
+
+Đây là câu hỏi mà nhiều người thắc mắc: "SQS là queue, queue thì phải FIFO chứ? Tại sao message lại đến không theo thứ tự?"
+
+Câu trả lời nằm ở kiến trúc phân tán bên dưới.
+
+Khi bạn gửi message A, rồi B, rồi C vào một Standard Queue — chúng không nằm trên cùng một server. SQS shard message trên **nhiều storage node** khác nhau để cân bằng tải. Message A có thể nằm ở node 1, B ở node 3, C ở node 2.
+
+Khi consumer gọi `ReceiveMessage`, SQS không scan toàn bộ các node. Thay vào đó, nó **kết nối ngẫu nhiên đến một vài node** và trả về bất kỳ message nào tìm thấy ở đó. Nếu nó hit vào node 3 trước → bạn nhận B trước A.
+
+<ExcalidrawDiagram
+  src="/sqs-standard-vs-fifo.excalidraw"
+  alt="SQS Standard Queue — How Things Appear vs How Things Actually Are"
+/>
+
+Đây không phải bug — đây là **trade-off có chủ đích**, đây cũng là lý do AWS gọi nó là **best-effort ordering**. Bằng cách không enforce ordering, SQS có thể phân tán message trên nhiều node hơn, phục vụ request từ bất kỳ node nào, và đạt được throughput gần như vô hạn. Nếu phải enforce ordering, SQS sẽ cần coordinate giữa các node — tốn thời gian, giảm throughput, giới hạn scale.
+
+### 2.4. FIFO Queue — đánh đổi throughput lấy ordering
+
+Ở phần trước, ta thấy Standard Queue mất ordering vì message bị phân tán ngẫu nhiên trên nhiều node. FIFO Queue giải quyết vấn đề này bằng cách đảm bảo **tất cả message cùng một Message Group ID luôn được route về cùng một partition** (cùng một storage node hoặc nhóm node).
+
+Khi producer gửi message với `MessageGroupId = "order-123"`, SQS sử dụng giá trị này để **hash và xác định partition đích** — tương tự cách Kafka dùng partition key. Mọi message với cùng group ID đều đến cùng một partition, nơi SQS gán cho chúng **sequence number** tăng dần. Nhờ tất cả nằm trên cùng partition, việc duy trì thứ tự trở thành bài toán local — không cần distributed coordination phức tạp giữa nhiều node.
+
+Khi consumer gọi `ReceiveMessage`, SQS trả về message **theo đúng thứ tự sequence number** trong mỗi Message Group. Và quan trọng: **chỉ một consumer có thể xử lý message từ một Message Group tại một thời điểm**. Nếu message #1 của group "order-123" đang in-flight (chưa được delete), SQS sẽ không deliver message #2 của cùng group đó cho bất kỳ consumer nào — đảm bảo không có hai consumer xử lý song song cùng một group.
+
+Đây chính là lý do FIFO Queue có throughput thấp hơn nhiều so với Standard Queue. Mỗi Message Group ID thực chất là một **bottleneck có chủ đích** — message bị buộc vào một partition duy nhất thay vì được phân tán tự do. Càng ít Message Group ID, càng ít partition được sử dụng, throughput càng thấp. Ngược lại, nếu bạn dùng nhiều Message Group ID khác nhau (ví dụ: mỗi order một group), SQS có thể xử lý song song nhiều group trên nhiều partition — đây là cách để scale FIFO Queue hiệu quả.
+
+Đánh đổi là rõ ràng:
+
+| Tiêu chí      | Standard Queue                   | FIFO Queue                                                 |
+| ------------- | -------------------------------- | ---------------------------------------------------------- |
+| Throughput    | Gần như vô hạn                   | 300 msg/s (3,000 với high throughput, 30,000 với batching) |
+| Ordering      | Best-effort                      | Strict per Message Group ID                                |
+| Delivery      | At-least-once (có thể duplicate) | Exactly-once processing                                    |
+| Deduplication | Không có                         | 5-phút rolling window                                      |
+| Tên queue     | Tự do                            | Phải kết thúc bằng `.fifo`                                 |
+
+FIFO Queue còn có cơ chế **deduplication** tích hợp: mỗi message có thể kèm theo `MessageDeduplicationId`. Trong vòng **5 phút** (non-configurable), nếu SQS nhận được message có cùng dedup ID, nó sẽ bỏ qua message trùng nhưng vẫn trả về response thành công. Bạn có thể tự cung cấp dedup ID, hoặc để SQS tính hash SHA-256 từ message body — nhưng best practice là **tự cung cấp** để kiểm soát rõ ràng logic dedup.
+
+---
+
+## 3. Message Lifecycle
+
+Hiểu vòng đời của một message trong SQS là nền tảng để hiểu các concept phía sau như visibility timeout hay Dead Letter Queue.
+
+Một message đi qua các giai đoạn sau:
+
+<ExcalidrawDiagram src="/sqs-message-lifecycle.excalidraw" alt="SQS Message Lifecycle" />
+
+**Bước 1 — SendMessage**: Producer gửi message. SQS replicate đồng bộ lên nhiều node, trả về `MessageId` khi đủ quorum.
+
+**Bước 2 — Stored**: Message nằm trong queue ở trạng thái **visible** — sẵn sàng để bất kỳ consumer nào poll.
+
+**Bước 3 — ReceiveMessage**: Consumer poll message. SQS trả về message kèm một **receipt handle** — đây là "vé" mà consumer cần giữ để thao tác tiếp (xoá hoặc gia hạn timeout).
+
+**Bước 4 — In-flight**: Message chuyển sang trạng thái **invisible** — các consumer khác không nhìn thấy message này nữa. Đây chính là **visibility timeout** đang hoạt động.
+
+**Bước 5 — Kết thúc**: Có hai kịch bản:
+
+- Consumer xử lý xong → gọi `DeleteMessage` với receipt handle → message bị xoá vĩnh viễn.
+- Consumer crash hoặc xử lý quá chậm → visibility timeout hết hạn → message **quay lại trạng thái visible** → consumer khác có thể poll lại.
+
+Mỗi lần message được receive mà không được delete, SQS tăng **receive count** (số lần nhận) của message lên 1. Con số này rất quan trọng — nó quyết định khi nào message bị đẩy vào Dead Letter Queue, điều mà chúng ta sẽ nói ở phần 6.
+
+---
+
+## 4. Visibility Timeout
+
+**Visibility timeout** là khoảng thời gian mà một message trở nên "vô hình" đối với các consumer khác sau khi được receive. Mục đích là ngăn nhiều consumer cùng xử lý một message — tránh duplicate processing.
+
+Hãy hình dung như thế này: bạn đi thư viện, lấy một cuốn sách khỏi kệ để đọc. Trong lúc bạn đọc (visibility timeout), không ai khác thấy cuốn sách đó trên kệ. Nếu bạn đọc xong và trả lại (delete message), cuốn sách biến mất khỏi hệ thống. Nhưng nếu bạn giữ quá lâu mà không trả — thư viện sẽ đặt lại cuốn sách lên kệ (message visible trở lại) để người khác có thể lấy.
+
+### Cấu hình
+
+- **Mặc định**: 30 giây
+- **Phạm vi**: 0 giây đến 12 giờ
+- Có thể set ở **queue level** (áp dụng cho tất cả message) hoặc **per-message** (khi gọi `ReceiveMessage`)
+
+### Khi nào visibility timeout quá ngắn?
+
+Consumer chưa xử lý xong, nhưng timeout đã hết → message visible trở lại → consumer khác poll và xử lý → **duplicate processing**. Đây là lý do phổ biến nhất gây ra duplicate trong SQS.
+
+### Khi nào visibility timeout quá dài?
+
+Consumer crash giữa chừng → message bị "kẹt" ở trạng thái invisible → phải chờ hết timeout mới retry được → **tăng latency** cho message đó.
+
+### ChangeMessageVisibility
+
+Nếu consumer nhận ra mình cần thêm thời gian để xử lý, nó có thể gọi API `ChangeMessageVisibility` để **gia hạn timeout** mà không cần release message. Điều này rất hữu ích cho các task có thời gian xử lý không đồng đều — ví dụ process video, resize ảnh, hoặc gọi external API chậm.
+
+> **Best practice**: đặt visibility timeout bằng khoảng **6 lần** thời gian xử lý trung bình. Ví dụ: consumer mất trung bình 10 giây để xử lý → set timeout 60 giây. Điều này cho phép đủ buffer cho trường hợp chậm bất thường, nhưng không quá lâu nếu consumer thật sự crash.
+
+---
+
+## 5. Long Polling vs Short Polling
+
+Khi consumer gọi `ReceiveMessage`, có hai cách SQS trả về kết quả: **short polling** và **long polling**.
+
+**Short polling** — SQS trả về kết quả **ngay lập tức**, kể cả khi không có message nào. Nếu queue đang trống, bạn nhận response rỗng. Consumer phải poll liên tục theo interval để kiểm tra message mới.
+
+**Long polling** — SQS **chờ** trong khoảng thời gian `WaitTimeSeconds` (tối đa 20 giây) cho đến khi có message, rồi mới trả về. Nếu hết thời gian chờ mà vẫn không có message, nó mới trả về response rỗng.
+
+Nếu bạn nghĩ long polling là vô ích — "chỉ cần poll liên tục thì trước sau cũng nhận được message thôi" — bạn đã sai. Long polling mang lại ba lợi ích quan trọng:
+
+### 5.1. Giảm chi phí API
+
+SQS tính phí theo **request**, không phải theo số lượng hay dung lượng message. Mỗi lần gọi `ReceiveMessage` đều tốn tiền — kể cả khi response rỗng. Với short polling, nếu queue trống mà consumer poll mỗi 1 giây → **86,400 requests/ngày** chỉ để nhận... không gì cả. Với long polling (`WaitTimeSeconds=20`), con số giảm xuống còn **4,320 requests/ngày** — giảm **95% chi phí** cho empty responses.
+
+### 5.2. Giảm latency
+
+Với short polling, nếu message đến ngay sau khi consumer vừa poll xong → consumer phải **chờ đến lần poll tiếp theo** mới nhận được. Khoảng delay này phụ thuộc vào polling interval.
+
+Với long polling, consumer đang "chờ sẵn" ở phía SQS. Khi message đến, nó được **delivery thẳng đến consumer ngay lập tức** — không cần chờ lần poll tiếp theo.
+
+### 5.3. Tránh tín hiệu giả "queue empty"
+
+Đây là lợi ích ít người biết nhưng cực kỳ quan trọng, liên quan trực tiếp đến kiến trúc phân tán mà chúng ta đã nói ở phần 2.
+
+Nhớ lại: SQS lưu message trên **nhiều storage node** phân tán. Với short polling, SQS chỉ **query một vài node ngẫu nhiên** và trả về kết quả. Nếu message nằm trên node mà short polling không hit tới → bạn nhận được response "queue empty" — nhưng thực tế **message vẫn đang nằm đó**, chỉ là ở node khác.
+
+Với long polling, SQS **query toàn bộ các node** trước khi trả về kết quả. Điều này loại bỏ hoàn toàn tín hiệu giả "queue empty".
+
+| Tiêu chí               | Short Polling                 | Long Polling                        |
+| ---------------------- | ----------------------------- | ----------------------------------- |
+| `WaitTimeSeconds`      | 0 (mặc định)                  | 1–20 giây                           |
+| Empty responses        | Rất nhiều                     | Rất ít                              |
+| Chi phí                | Cao (nhiều requests)          | Thấp hơn đáng kể                    |
+| Latency                | Cao (phụ thuộc poll interval) | Thấp (delivery ngay khi có message) |
+| Coverage các SQS nodes | Một vài node ngẫu nhiên       | Toàn bộ nodes                       |
+
+> **Best practice**: gần như luôn luôn nên dùng long polling. Set `ReceiveMessageWaitTimeSeconds=20` ở queue level để enable globally cho toàn bộ consumer.
+
+---
+
+## 6. Dead Letter Queue (DLQ)
+
+Có những message "hư hỏng" — dữ liệu sai format, consumer có bug, external dependency down. Message được receive, xử lý thất bại, quay lại queue, được receive lại, thất bại lại... lặp đi lặp lại mãi mãi, tiêu tốn processing resources mà không bao giờ thành công. Đây gọi là **poison message**.
+
+**Dead Letter Queue (DLQ)** là giải pháp: một SQS queue riêng biệt, nơi các poison message bị "đày" đến sau khi thất bại quá nhiều lần.
+
+### Cách hoạt động
+
+Khi cấu hình DLQ, bạn set **`maxReceiveCount`** — số lần tối đa một message được receive trước khi bị chuyển sang DLQ. Ví dụ `maxReceiveCount=3`:
+
+- Message được receive lần 1 → xử lý thất bại → quay lại queue
+- Message được receive lần 2 → xử lý thất bại → quay lại queue
+- Message được receive lần 3 → xử lý thất bại → **SQS tự động chuyển message sang DLQ**
+
+<ExcalidrawDiagram
+  src="/sqs-dlq-flow.excalidraw"
+  alt="Dead Letter Queue Flow — Failed messages move to DLQ after maxReceiveCount, triggering CloudWatch Alarm for admin monitoring"
+/>
+
+DLQ bản chất cũng chỉ là một SQS queue bình thường — bạn tạo một queue, rồi cấu hình nó là DLQ target cho queue gốc.
+
+### Xử lý message trong DLQ
+
+Message nằm trong DLQ thường được dùng để:
+
+- **Debugging** — xem message gì gây lỗi, tại sao consumer không xử lý được
+- **Alerting** — set CloudWatch alarm trên metric `ApproximateNumberOfMessagesVisible` của DLQ. DLQ tăng = có gì đó đang sai
+- **Reprocessing** — sau khi fix bug, dùng tính năng **Redrive to source** của AWS để đẩy message từ DLQ **ngược lại queue gốc** để xử lý lại
+
+### Lưu ý quan trọng về retention
+
+Thời gian retention của message trong DLQ được tính từ lúc message **lần đầu tiên được gửi vào queue gốc**, không phải từ lúc nó vào DLQ. Ví dụ: retention là 14 ngày, message nằm trong queue gốc 13 ngày mới bị đẩy sang DLQ → nó chỉ còn **1 ngày** trong DLQ trước khi bị xoá tự động.
+
+> **Best practice**: luôn set retention của DLQ **bằng hoặc dài hơn** retention của queue gốc để có đủ thời gian debug và reprocess.
+
+---
+
+## 7. Redrive Allow Policy
+
+Mặc định, bất kỳ queue nào cũng có thể cấu hình sử dụng bất kỳ queue khác làm DLQ. Điều này tạo ra vấn đề **governance** — bạn không muốn queue của team khác tự ý đẩy failed messages vào queue của bạn.
+
+**Redrive Allow Policy** kiểm soát **queue nào được phép sử dụng queue này làm DLQ**. Có ba chế độ:
+
+**`allowAll`** (mặc định) — bất kỳ queue nào trong cùng account và region đều có thể dùng queue này làm DLQ.
+
+**`denyAll`** — không queue nào được phép dùng queue này làm DLQ.
+
+**`byQueue`** — chỉ các queue được chỉ định rõ mới được phép.
+
+```json
+{
+  "redrivePermission": "byQueue",
+  "sourceQueueArns": [
+    "arn:aws:sqs:ap-southeast-1:123456789:order-processing-queue",
+    "arn:aws:sqs:ap-southeast-1:123456789:payment-queue"
+  ]
+}
+```
+
+> **Best practice**: trong production, luôn dùng `byQueue` để kiểm soát rõ ràng queue nào được redirect failed messages đến DLQ của bạn.
+
+---
+
+## 8. SQS với Auto Scaling Group (ASG)
+
+Một trong những patterns mạnh mẽ nhất của SQS là kết hợp với **Auto Scaling Group (ASG)** — tự động scale số lượng EC2 consumer instances dựa trên **độ sâu của queue (queue depth)**.
+
+### Kiến trúc
+
+<ExcalidrawDiagram src="/sqs-asg-scaling.excalidraw" alt="SQS with Auto Scaling Group — Queue-based Scaling" />
+
+Luồng hoạt động:
+
+1. Message liên tục được gửi vào SQS queue.
+2. **CloudWatch** monitor metric `ApproximateNumberOfMessagesVisible` — số message đang chờ trong queue.
+3. Khi metric vượt ngưỡng (ví dụ > 1,000 messages), **CloudWatch Alarm** chuyển sang trạng thái ALARM.
+4. Alarm trigger **ASG scaling policy** → ASG launch thêm EC2 instances.
+5. Các instance mới bắt đầu poll SQS, xử lý message → queue depth giảm.
+6. Khi queue depth xuống dưới ngưỡng → alarm về OK → ASG **scale in**, terminate bớt instances.
+
+### Tại sao dùng queue depth thay vì CPU?
+
+Với hầu hết các workload queue-based, **CPU không phản ánh đúng workload thực tế**. Consumer có thể đang I/O bound (chờ database, chờ external API) — CPU thấp nhưng hàng ngàn message đang xếp hàng chờ. Scale theo CPU sẽ không trigger, dù hệ thống đang quá tải.
+
+Queue depth phản ánh trực tiếp **backlog thực tế** — bao nhiêu công việc đang chờ xử lý. Đây là metric chính xác hơn cho quyết định scale.
+
+### Custom metric: backlog per instance
+
+Thay vì dùng raw queue depth, bạn có thể tạo custom metric chính xác hơn:
+
+```
+backlog_per_instance = ApproximateNumberOfMessages / số_instances_hiện_tại
+```
+
+Metric này cho biết mỗi instance đang "gánh" bao nhiêu message. Ví dụ: 10,000 messages với 5 instances → mỗi instance gánh 2,000 messages. Scale khi `backlog_per_instance` vượt ngưỡng cho phép sẽ đưa ra quyết định **tỷ lệ thuận** hơn so với raw queue depth.
+
+---
+
+## 9. SQS làm buffer cho database writes
+
+Đây là pattern mà chúng ta đã nhắc đến ở phần mở đầu — dùng SQS như một **bộ giảm xóc** giữa application tier và database, giải quyết bài toán database bị nghẽn khi traffic tăng đột biến.
+
+### Kiến trúc
+
+<ExcalidrawDiagram
+  src="/sqs-buffer-database-writes.excalidraw"
+  alt="SQS as Buffer for Database Writes — Decoupling Pattern"
+/>
+
+Luồng hoạt động:
+
+1. **Request** từ client đến EC2 instances (nhóm **Enqueue**). Các instance này validate request, tạo message, và gọi `SendMessage` đẩy vào SQS.
+2. **SQS queue** hấp thụ toàn bộ traffic — bất kể đột biến hay đều đặn. SQS scale gần như vô hạn, nên không bao giờ bị nghẽn ở tầng này.
+3. EC2 instances (nhóm **Dequeue**) poll message từ SQS bằng `ReceiveMessages`, rồi **insert** vào database với tốc độ mà database chịu được.
+4. Cả hai nhóm EC2 đều có **Auto Scaling** độc lập — nhóm Enqueue scale theo request traffic, nhóm Dequeue scale theo queue depth (pattern ở phần 8).
+
+### Tại sao pattern này hiệu quả?
+
+SQS đóng vai trò **decoupling** — tách biệt tầng nhận request và tầng ghi database. Hai tầng scale **độc lập** với nhau:
+
+- Nhóm Enqueue scale thoải mái theo traffic — gửi message vào SQS rất nhanh và rẻ.
+- Nhóm Dequeue scale theo khả năng của database — không bao giờ đẩy quá sức database.
+- SQS ở giữa là "vô hạn" — hấp thụ mọi traffic spike mà không đổ.
+
+### Trade-off
+
+Writes trở thành **eventually consistent** — có độ trễ giữa lúc request đến và lúc dữ liệu thực sự được ghi vào database. Điều này chấp nhận được cho nhiều use case: analytics, logging, notifications, order processing. Nhưng **không phù hợp** cho các trường hợp cần xác nhận đồng bộ rằng dữ liệu đã được ghi — ví dụ kiểm tra số dư tài khoản trước khi cho phép giao dịch.
+
+---
+
+## 10. SQS với Lambda
+
+Ngoài EC2, **AWS Lambda** là consumer phổ biến nhất cho SQS. Khi cấu hình Lambda trigger từ SQS, AWS tự động quản lý việc polling và scaling.
+
+### Cách Lambda poll SQS
+
+Khi bạn tạo SQS event source mapping cho Lambda, AWS tạo một **thread pool** (mặc định **5 threads**). Mỗi thread **độc lập long-poll SQS** và lấy message theo batch (tối đa 10 messages/batch). Hệ thống tự động tăng giảm số threads dựa trên lượng message trong queue và concurrency limit.
+
+### Failure scenario cần lưu ý
+
+Nếu Lambda **reserved concurrency** bị cạn kiệt (ví dụ set reserved concurrency = 10, nhưng đã có 10 Lambda instances đang chạy), các threads còn lại sẽ **đẩy batch message trở lại queue**. Hành động này **tăng receive count** của mỗi message lên 1.
+
+Hệ quả: nếu `maxReceiveCount` của DLQ thấp (ví dụ 3), message có thể bị đẩy vào DLQ **sớm hơn dự kiến** — không phải vì xử lý thất bại, mà vì concurrency không đủ. Đây là một gotcha phổ biến khi dùng Lambda với SQS.
+
+> **Best practice**: khi dùng Lambda với SQS, set `maxReceiveCount` đủ cao để account cho cả trường hợp throttling, không chỉ processing failure. Và monitor metric `NumberOfMessagesReceived` so với `NumberOfMessagesDeleted` — nếu chênh lệch lớn, có khả năng Lambda đang bị throttle.
+
+---
+
+## Tổng kết
+
+SQS trông đơn giản từ bên ngoài — gửi message, nhận message, xoá message. Nhưng bên dưới là một hệ thống phân tán được thiết kế cẩn thận với nhiều trade-off có chủ đích:
+
+- **Standard Queue vs FIFO Queue** — throughput gần vô hạn bằng cách phân tán message trên nhiều node và bỏ ordering guarantee, hoặc đánh đổi throughput để có strict ordering per Message Group ID.
+- **Visibility Timeout** — cơ chế ngăn duplicate processing, quản lý bằng distributed timer system, tunable per-message.
+- **Long Polling** — giảm chi phí, giảm latency, và loại bỏ tín hiệu giả "queue empty" bằng cách query toàn bộ storage nodes thay vì chỉ một vài.
+- **Dead Letter Queue + Redrive Allow Policy** — safety net cho poison messages, với governance controls kiểm soát ai được phép redirect failed messages đến DLQ.
+- **ASG Integration** — queue depth là tín hiệu scaling chính xác hơn CPU cho workload queue-based.
+- **Buffer Pattern** — SQS là bộ giảm xóc giữa fast producers và capacity-limited databases, cho phép hai tầng scale độc lập.
+- **Lambda Integration** — AWS quản lý polling và scaling tự động, nhưng cần cẩn thận với concurrency limits và ảnh hưởng đến DLQ receive count.
+
+SQS là lựa chọn đúng khi bạn cần một **task queue đơn giản, fully managed, scale vô hạn** để decouple các thành phần trong hệ thống. Nếu bạn cần **event streaming** với replay và retention dài hạn → Kafka. Nếu cần **fan-out** một event đến nhiều subscriber → SNS. Nếu cần **routing phức tạp** dựa trên event content → EventBridge. Mỗi công cụ có vị trí riêng — SQS giỏi nhất ở sự đơn giản và đáng tin cậy.
