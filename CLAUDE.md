@@ -81,6 +81,12 @@ When creating AWS architecture diagrams, follow the official AWS reference archi
 - **Service naming**: Use official AWS service names (e.g., "Amazon DynamoDB" not "DynamoDB", "AWS Lambda" not "Lambda") — but only in text labels that describe purpose, not as duplicate icon names
 - **AWS icon library**: Icons are available at `.claude/skills/excalidraw-diagram-generator/libraries/aws-architecture-icons/`. Use the `add-icon-to-diagram.py` script. Only pass `--label` when the label describes a role/purpose (e.g., `--label "Private Bucket"`), NOT to repeat the service name
 
+# Blog Writing
+
+- Use the `blog-writer` skill to write blog posts (invoke via `/blog-writer`)
+- Workflow: Input Gathering → Research & Outline → Vietnamese Writing → English Translation → Dual-Perspective Review
+- Code examples in blog posts must always use Node.js + TypeScript
+
 # Git Conventions
 
 - Conventional commits: `feat:`, `fix:`, `refactor:`

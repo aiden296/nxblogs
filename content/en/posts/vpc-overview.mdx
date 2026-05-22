@@ -1,0 +1,281 @@
+---
+title: 'AWS VPC: Understanding VPC Through the Lens of a Packet'
+date: '2026-05-22'
+tags: ['AWS', 'Networking', 'SAA', 'Devops']
+description: 'Follow 3 packet journeys inside a VPC: inbound from internet through ALB to EC2 in a private subnet, EC2 calling S3 via VPC Endpoint, and EC2 calling a third-party API via NAT Gateway.'
+enableComment: true
+---
+
+# AWS VPC: Understanding VPC Through the Lens of a Packet
+
+You've just deployed an e-commerce API on AWS. Following best practices, the EC2 instance sits in a **private subnet** — there's no direct path from the internet in. An **Application Load Balancer** (ALB — a load balancer that operates at the application layer) sits in the **public subnet**, receives requests from clients, and forwards them to EC2.
+
+Within a single request, 3 network journeys happen inside the VPC:
+
+1. **Client → EC2**: a request from the internet passes through IGW, ALB in the public subnet, then reaches EC2 in the private subnet
+2. **EC2 → S3**: EC2 needs to fetch a file from S3 — routed through a VPC Gateway Endpoint, never touching the internet
+3. **EC2 → Stripe**: EC2 calls an external payment API — routed through NAT Gateway then out to the internet
+
+This article follows all 3 journeys, introducing each VPC component as the packet passes through it.
+
+Concrete assumptions:
+
+| Entity                      | IP                                            |
+| --------------------------- | --------------------------------------------- |
+| Client (Hanoi)              | `203.0.113.5`                                 |
+| ALB (public subnet)         | Private: `10.0.1.20`, Public: `54.250.10.100` |
+| NAT Gateway (public subnet) | Private: `10.0.1.100`, EIP: `52.194.20.88`    |
+| EC2 (private subnet)        | `10.0.2.50`                                   |
+| VPC CIDR                    | `10.0.0.0/16`                                 |
+| Public Subnet               | `10.0.1.0/24`                                 |
+| Private Subnet              | `10.0.2.0/24`                                 |
+
+<ExcalidrawDiagram
+  src="/vpc-request-journey-overview.excalidraw"
+  alt="VPC Architecture Overview — 3 flows: inbound through ALB, EC2 to S3 via Endpoint, EC2 to internet via NAT Gateway"
+/>
+
+---
+
+## 1. VPC — The City
+
+Before the packet touches any component, it needs to know where it's going. **VPC** (Virtual Private Cloud) is that boundary.
+
+A VPC is an **isolated IP address space** that you define within AWS. When creating a VPC, you choose a [CIDR](/en/posts/what-is-cidr) block — for example `10.0.0.0/16` — giving you 65,536 IP addresses to work with. A VPC is scoped at the **Region** level, meaning it spans all Availability Zones within that Region.
+
+Think of a VPC as a **private city**: you're given a plot of land (CIDR block), on which you design streets (subnets), install gates (gateways), and set up security systems (Security Groups).
+
+The VPC itself **doesn't process packets**. It's just a logical container — all actual processing happens at the components inside. But without a VPC, nothing exists.
+
+> An interesting detail: when [EC2](/en/posts/learn-ec2-part-1) boots up, the operating system receives its IP through **DHCP** (Dynamic Host Configuration Protocol — a protocol that automatically assigns network configuration to devices). But in reality, the IP was already picked by AWS **before the OS boots** — when creating the ENI, the control plane selects an IP from the subnet and saves it to the database. DHCP is merely the channel that **delivers** that IP to the OS, not the one that assigns it.
+
+---
+
+## 2. Subnet — The Neighborhood
+
+Inside the VPC city, you need to plan **neighborhoods** — that's what **Subnets** are. Each subnet divides the VPC's [CIDR](/en/posts/what-is-cidr) into smaller ranges, each tied to exactly **one Availability Zone**.
+
+In our architecture:
+
+- `10.0.1.0/24` → **Public Subnet** in AZ `ap-southeast-1a` — where ALB and NAT Gateway live
+- `10.0.2.0/24` → **Private Subnet** in AZ `ap-southeast-1a` — where EC2 lives
+
+An important point: **a subnet is not inherently public or private**. That characteristic is entirely determined by the **route table** attached to it:
+
+- Route table has `0.0.0.0/0 → igw-xxx` → **public** subnet (traffic exits to internet via IGW)
+- Route table has `0.0.0.0/0 → nat-xxx` → **private** subnet (traffic exits to internet via NAT Gateway)
+- Route table has no default route → **isolated** subnet (no internet access)
+
+This is exactly why EC2 in the private subnet can't be accessed directly from the internet — its route table has no route from IGW in.
+
+Within each `/24` subnet (256 IPs), AWS **reserves 5 IPs** that cannot be used:
+
+| IP     | Purpose                                                       |
+| ------ | ------------------------------------------------------------- |
+| `.0`   | Network address                                               |
+| `.1`   | VPC router (virtual gateway)                                  |
+| `.2`   | DNS server (alias for VPC CIDR + 2)                           |
+| `.3`   | Reserved for future use                                       |
+| `.255` | Broadcast (VPC doesn't support broadcast, but still reserved) |
+
+So a `/24` subnet actually has **251 usable IPs**.
+
+---
+
+## Flow 1: Internet → ALB → EC2
+
+Now let's follow the first journey: a client in Hanoi sends an HTTPS request to the API. The packet must travel from the internet, through the public subnet, then into EC2 in the private subnet.
+
+### 3. Internet Gateway — The City Gate
+
+The packet from client `203.0.113.5` with destination `54.250.10.100` (ALB's public IP) has arrived at the AWS edge network. The first component it encounters is the **Internet Gateway** (IGW — the gateway connecting VPC to the internet).
+
+IGW does exactly **2 things**, nothing more:
+
+1. **1-to-1 NAT**: translates public IP to private IP (inbound), and vice versa (outbound)
+2. **Forward packet**: moves the packet across the boundary between the internet and VPC
+
+At this hop, IGW looks up its internal mapping table and translates:
+
+```
+dst: 54.250.10.100 (ALB public IP) → dst: 10.0.1.20 (ALB private IP)
+```
+
+After the IGW, the packet now carries `dst: 10.0.1.20`. From this point on, **public IP no longer exists** inside the VPC — all internal communication uses private IPs. This is a commonly misunderstood point: public IPs only "live" at the IGW layer; inside the VPC, no one sees them.
+
+IGW is stateless — no filtering, no caching, no load balancing. A VPC can only attach one IGW.
+
+<ExcalidrawDiagram
+  src="/vpc-igw-nat-translation.excalidraw"
+  alt="Internet Gateway — NAT 1:1 translation from ALB public IP to ALB private IP"
+/>
+
+### 4. Route Table — The Road Signs
+
+The packet now has `dst: 10.0.1.20`, but the VPC has many subnets — where does the packet go? The **Route Table** answers that question.
+
+A Route Table is a **configuration table** containing rules in the format `destination CIDR → target`. Every subnet must be associated with exactly one route table. When a packet needs forwarding, the VPC networking layer reads the route table and looks up using **longest prefix match** — the rule with the most specific CIDR (longest prefix) matching the destination IP wins.
+
+In this architecture, the 2 subnets have 2 different route tables:
+
+**Public Subnet Route Table:**
+
+| Destination   | Target    | Meaning                      |
+| ------------- | --------- | ---------------------------- |
+| `10.0.0.0/16` | `local`   | Internal VPC traffic         |
+| `0.0.0.0/0`   | `igw-xxx` | All other traffic → Internet |
+
+**Private Subnet Route Table:**
+
+| Destination               | Target     | Meaning                         |
+| ------------------------- | ---------- | ------------------------------- |
+| `10.0.0.0/16`             | `local`    | Internal VPC traffic            |
+| `pl-xxx` (S3 prefix list) | `vpce-xxx` | Traffic to S3 → VPC Endpoint    |
+| `0.0.0.0/0`               | `nat-xxx`  | All other traffic → NAT Gateway |
+
+The packet with `dst: 10.0.1.20` matches rule `10.0.0.0/16 → local` → the packet is forwarded to ALB in the public subnet.
+
+Note: the route table **doesn't process packets** — it's just config. The actual forwarding happens on the Nitro card (AWS-designed SmartNIC hardware attached to each physical host) when it reads the config from the route table.
+
+<ExcalidrawDiagram
+  src="/vpc-route-table-lookup.excalidraw"
+  alt="Route Table — Public subnet and private subnet route tables with different default routes"
+/>
+
+### 5. ALB receives request, forwards to EC2
+
+The packet arrives at ALB in the public subnet. ALB **terminates the connection** from the client — meaning the TCP connection from the client ends here. ALB processes the request then creates a **completely new connection** to EC2 in the private subnet.
+
+<ExcalidrawDiagram src="/vpc-alb-routing-to-private-subnet.excalidraw" alt="VPC alb routing to private subnet" />
+
+The new packet created by ALB:
+
+```
+src: 10.0.1.20 (ALB private IP)
+dst: 10.0.2.50 (EC2 private IP)
+```
+
+The original client IP (`203.0.113.5`) is attached by ALB to the HTTP header `X-Forwarded-For` so EC2 knows who the real sender is.
+
+This packet needs to travel from the public subnet to the private subnet. Route table lookup: `dst: 10.0.2.50` matches `10.0.0.0/16 → local` — internal VPC traffic, forwarded across the subnet boundary.
+
+### 6. Flow 1 Summary
+
+Summary of transformations at each hop:
+
+| #   | Component       | src IP                      | dst IP                        | Action                   |
+| --- | --------------- | --------------------------- | ----------------------------- | ------------------------ |
+| 1   | **IGW**         | `203.0.113.5`               | `54.250.10.100` → `10.0.1.20` | 1:1 NAT                  |
+| 2   | **Route Table** | `203.0.113.5`               | `10.0.1.20`                   | `local` → ALB            |
+| 3   | **ALB**         | `203.0.113.5` → `10.0.1.20` | `10.0.1.20` → `10.0.2.50`     | New connection           |
+| 4   | **Route Table** | `10.0.1.20`                 | `10.0.2.50`                   | `local` → private subnet |
+| 5   | **SG**          | `10.0.1.20`                 | `10.0.2.50`                   | Stateful check (ref SG)  |
+| 6   | **EC2**         | `10.0.1.20`                 | `10.0.2.50`                   | App receives request     |
+
+---
+
+## Flow 2: EC2 → S3 — The Internal Shortcut
+
+EC2 receives the client request, now it needs to fetch an image file from an **S3 bucket**. Following the private subnet's route table, traffic to the internet would go through NAT Gateway → IGW → Internet → S3. But S3 is also an AWS service — why go through the internet when it's both slower and costs NAT Gateway fees?
+
+### 8. VPC Gateway Endpoint — No Internet, No Cost
+
+**VPC Endpoint** solves exactly this problem. For S3 and DynamoDB, AWS provides a **Gateway Endpoint** — an **abstract target in the route table**, with no ENI and no IP.
+
+When you create a Gateway Endpoint for S3, AWS automatically adds a route to the route table:
+
+| Destination               | Target     |
+| ------------------------- | ---------- |
+| `pl-xxx` (S3 prefix list) | `vpce-xxx` |
+
+Flow when EC2 calls S3:
+
+1. EC2 creates HTTPS request to s3.amazonaws.com `src 10.0.2.50`, `dst 52.219.40.5` (S3's IP)
+2. Route Table (private subnet) matches with rule pl-s3 → vpce-s3-xxx. Forward through AWS Backbone Network (no internet)
+3. S3 receives request, src is still 10.0.2.50 (NOT NATed)
+
+Key characteristics of Gateway Endpoint:
+
+- **No ENI**, no IP — it's just a rule in the route table
+- **No NAT** on source IP — S3 sees the request from `10.0.2.50` (EC2's private IP). This allows bucket policies to restrict by VPC Endpoint (`aws:sourceVpce`)
+- **Completely free** — no hourly cost, no data transfer cost
+
+> Besides Gateway Endpoint (only for S3 and DynamoDB), AWS also offers **Interface Endpoint** (PrivateLink) for most other services (SSM, SQS, Secrets Manager, ECR, ...). Interface Endpoint creates a **real ENI** in your subnet with a private IP, has a Security Group, but **costs money** per hour + per GB.
+
+<ExcalidrawDiagram
+  src="/vpc-ec2-routing-to-s3.excalidraw"
+  alt="VPC Gateway Endpoint — EC2 to S3 through AWS backbone, no internet, no NAT"
+/>
+
+---
+
+## Flow 3: EC2 → Stripe — Out to Internet via NAT Gateway
+
+EC2 finishes processing the request, now it needs to call `api.stripe.com` to charge a credit card. Stripe is a third-party service outside AWS — the packet must reach the internet. But EC2 is in a private subnet with no route to IGW. How?
+
+### 9. NAT Gateway — The Internet Exit for Private Subnets
+
+**NAT Gateway** (Network Address Translation Gateway) sits in the **public subnet**, has an Elastic IP, and allows resources in private subnets to **send** requests to the internet but **blocks** the internet from sending requests in.
+
+Why is NAT Gateway needed? Every service in a private subnet only has a **private IP** — no Elastic IP. The internet has no route to private IPs, so these services **cannot communicate with the internet directly**. NAT Gateway, sitting in the public subnet with an EIP, acts as a **representative** for private subnet services: it receives their packets, replaces the source IP with its own EIP, and sends them out to the internet on their behalf.
+
+But a NAT Gateway has only one EIP — how can it represent dozens or hundreds of services simultaneously? The answer lies in **ports**. NAT Gateway uses a technique called **PAT** (Port Address Translation): each connection from the private subnet is assigned a **unique port** on the EIP. For example, EC2 `10.0.2.50` sends a request → NAT Gateway assigns port `40001`, EC2 `10.0.2.51` sends a request → assigned port `40002`. When a response comes back to the EIP on port `40001`, NAT Gateway checks its mapping table, knows this port belongs to `10.0.2.50`, and forwards the response to the correct service.
+
+The specific flow:
+
+1. EC2 (10.0.2.50) creates packet `src 10.0.2.50`, `dst 3.4.5.6`
+2. Route Table (private subnet) matches 3.4.5.6 with rule `0.0.0.0/0 → nat-xxx`. Forward to NAT Gateway
+3. After passing through NAT Gateway (public subnet, private IP: 10.0.1.100), `src 10.0.2.50` → `src 10.0.1.100`. Saves connection to tracking table (remembers 10.0.2.50 for reverse translation)
+4. Route Table (public subnet) matches 3.4.5.6 with rule `0.0.0.0/0 → igw-xxx`. Forward to IGW
+5. After passing through Internet Gateway, it translates NAT Gateway's private IP to its EIP: `src 10.0.1.100` → `src 52.194.20.88`
+6. Internet — Stripe sees request from 52.194.20.88
+
+Note the **2 NAT translations** on the way out:
+
+| Hop         | Before            | After               | NAT Type                             |
+| ----------- | ----------------- | ------------------- | ------------------------------------ |
+| NAT Gateway | src: `10.0.2.50`  | src: `10.0.1.100`   | Many-to-1 (multiple EC2s share 1 IP) |
+| IGW         | src: `10.0.1.100` | src: `52.194.20.88` | 1-to-1 (EIP mapping)                 |
+
+Quick comparison — IGW vs NAT Gateway:
+
+|                      | IGW                                    | NAT Gateway                                  |
+| -------------------- | -------------------------------------- | -------------------------------------------- |
+| Location             | VPC boundary                           | Public subnet                                |
+| NAT type             | 1-to-1 (each EIP maps to 1 private IP) | Many-to-1 (multiple private IPs share 1 EIP) |
+| Direction            | Bidirectional (in + out)               | One-way (out only)                           |
+| Has ENI?             | No                                     | Yes                                          |
+| Requires Elastic IP? | No (attached to resource)              | Yes (required at creation)                   |
+| Cost                 | Free                                   | Per hour + per GB data                       |
+
+<ExcalidrawDiagram
+  src="/vpc-nat-gateway-outbound.excalidraw"
+  alt="NAT Gateway — EC2 in private subnet to Stripe via NAT Gateway and IGW, showing double NAT"
+/>
+
+---
+
+## Summary
+
+Through 3 journeys, you've encountered every major VPC component — not through a list, but through their actual work:
+
+| Component          | Encountered in Flow | Core Job                                       |
+| ------------------ | ------------------- | ---------------------------------------------- |
+| **VPC**            | All                 | Isolated address space                         |
+| **Subnet**         | All                 | Divide VPC into zones, tied to AZ              |
+| **Route Table**    | All                 | Config table: destination → target             |
+| **IGW**            | Flow 1, 3           | 1:1 NAT + forward across internet boundary     |
+| **ALB**            | Flow 1              | Terminate connection, forward to backend       |
+| **ENI**            | Flow 1              | Virtual network card, holds IP + SG            |
+| **Security Group** | Flow 1              | Stateful firewall at ENI level                 |
+| **VPC Endpoint**   | Flow 2              | Internal shortcut to AWS services, no internet |
+| **NAT Gateway**    | Flow 3              | Source NAT for private subnet to internet      |
+
+When debugging connectivity, think through the packet's journey:
+
+- **Client can't get in?** → Is IGW attached? Does ALB's SG allow port 443?
+- **ALB can't forward to EC2?** → Does EC2's SG reference ALB's SG?
+- **EC2 can't reach S3?** → Is Gateway Endpoint created? Does the route table have a rule for S3 prefix list?
+- **EC2 can't reach third-party API?** → Is NAT Gateway created? Does private subnet's route table have `0.0.0.0/0 → nat-xxx`?
+
+You can use **VPC Reachability Analyzer** — an AWS tool that lets you select source and destination, then automatically analyzes the path and tells you exactly where the packet is being blocked.

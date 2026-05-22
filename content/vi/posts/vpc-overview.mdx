@@ -1,0 +1,281 @@
+---
+title: 'AWS VPC: Hiểu VPC qua lăng kính của một Packet'
+date: '2026-05-22'
+tags: ['AWS', 'Networking', 'SAA', 'Devops']
+description: 'Theo dấu 3 hành trình của packet bên trong VPC: inbound từ internet qua ALB đến EC2 ở private subnet, EC2 gọi S3 qua VPC Endpoint, và EC2 gọi third-party qua NAT Gateway.'
+enableComment: true
+---
+
+# AWS VPC: Hiểu VPC qua lăng kính của một Packet
+
+Bạn vừa deploy một API e-commerce lên AWS. Theo best practice, EC2 được đặt trong **private subnet** — không có đường đi trực tiếp từ internet vào. Một **Application Load Balancer** (ALB — bộ cân bằng tải ứng dụng) ngồi ở **public subnet** đón request từ client rồi forward vào EC2.
+
+Trong một request duy nhất, 3 hành trình mạng xảy ra bên trong VPC:
+
+1. **Client → EC2**: request từ internet đi qua IGW, ALB ở public subnet, rồi vào EC2 ở private subnet
+2. **EC2 → Stripe**: EC2 gọi API thanh toán bên ngoài — đi qua NAT Gateway rồi ra internet
+3. **EC2 → S3**: EC2 cần lấy file từ S3 — đi qua VPC Gateway Endpoint, không ra internet
+
+Bài viết này sẽ theo dấu cả 3 hành trình, giới thiệu từng component VPC khi packet đi qua nó.
+
+Giả định cụ thể:
+
+| Entity                      | IP                                             |
+| --------------------------- | ---------------------------------------------- |
+| Client (Hanoi)              | `1.2.3.4`                                      |
+| ALB (public subnet)         | Private: `10.0.1.10`, Public IP: `52.10.10.10` |
+| NAT Gateway (public subnet) | Private: `10.0.1.20`, Public IP: `52.20.20.20` |
+| EC2 (private subnet)        | `10.0.2.50`                                    |
+| VPC CIDR                    | `10.0.0.0/16`                                  |
+| Public Subnet CIDR          | `10.0.1.0/24`                                  |
+| Private Subnet CIDR         | `10.0.2.0/24`                                  |
+
+<ExcalidrawDiagram
+  src="/vpc-request-journey-overview.excalidraw"
+  alt="VPC Architecture Overview — 3 flows: inbound through ALB, EC2 to S3 via Endpoint, EC2 to internet via NAT Gateway"
+/>
+
+---
+
+## 1. VPC — Khu đô thị
+
+Trước khi packet chạm bất kỳ component nào, nó cần biết mình đang đi vào đâu. **VPC** (Virtual Private Cloud — mạng riêng ảo) chính là ranh giới đó.
+
+VPC là một **không gian địa chỉ IP cô lập** mà bạn tự định nghĩa trong AWS. Khi tạo VPC, bạn chọn một [CIDR](/vi/posts/what-is-cidr) block — ví dụ `10.0.0.0/16` — và từ đó bạn có 65,536 địa chỉ IP để sử dụng. VPC scope ở cấp **Region**, nghĩa là nó trải rộng trên tất cả Availability Zones trong Region đó.
+
+Hãy tưởng tượng VPC là một **khu đô thị private**: bạn được cấp một lô đất (CIDR block), trên đó bạn quy hoạch các khu phố (subnet), kéo đường giao thông (route table), gắn cổng ra/vào (gateway), và lắp hệ thống bảo vệ (Security Group).
+
+Bản thân VPC **không xử lý packet**. Nó chỉ là container logic — mọi xử lý thực sự diễn ra ở các component bên trong. Nhưng không có VPC, không có gì tồn tại.
+
+> Một chi tiết thú vị: khi [EC2](/vi/posts/learn-ec2-part-1) boot lên, hệ điều hành bên trong nhận IP thông qua **DHCP** (Dynamic Host Configuration Protocol — giao thức tự động cấp phát cấu hình mạng cho thiết bị). Thực tế IP đã được AWS pick sẵn từ **trước khi OS boot** — khi tạo ENI, control plane chọn IP từ subnet rồi lưu vào database. Khi đó, EC2 không biết đến địa chỉ này và cần sử dụng DHCP protocol để xác nhận IP đó.
+
+---
+
+## 2. Subnet — Khu phố
+
+Trong khu đô thị VPC, bạn cần quy hoạch các **khu phố** — đó chính là **Subnet** (mạng con). Mỗi subnet chia [CIDR](/vi/posts/what-is-cidr) của VPC thành dải nhỏ hơn, gắn với đúng **một Availability Zone**.
+
+Trong kiến trúc của chúng ta:
+
+- `10.0.1.0/24` → **Public Subnet** ở AZ `ap-southeast-1a` — nơi ALB và NAT Gateway sống
+- `10.0.2.0/24` → **Private Subnet** ở AZ `ap-southeast-1a` — nơi EC2 sống
+
+Một điều quan trọng: **subnet không bẩm sinh là public hay private**. Tính chất đó hoàn toàn do **route table** gắn vào nó quyết định:
+
+- Route table có `0.0.0.0/0 → igw-xxx` → **public** subnet (traffic đi ra internet qua IGW)
+- Route table có `0.0.0.0/0 → nat-xxx` → **private** subnet (traffic ra internet qua NAT Gateway)
+- Route table không có default route → **isolated** subnet (không ra internet được)
+
+Đây chính là lý do EC2 ở private subnet không thể bị internet access trực tiếp — route table của nó không có đường đi từ IGW vào.
+
+Trong mỗi subnet `/24` (256 IP), AWS **giữ lại 5 IP** không dùng được:
+
+| IP     | Mục đích                                                  |
+| ------ | --------------------------------------------------------- |
+| `.0`   | Network address                                           |
+| `.1`   | VPC router (gateway ảo)                                   |
+| `.2`   | DNS server (alias cho VPC CIDR + 2)                       |
+| `.3`   | Reserved cho tương lai                                    |
+| `.255` | Broadcast (VPC không hỗ trợ broadcast, nhưng vẫn reserve) |
+
+Vậy khi subnet của bạn cần 255 IP, thì CIDR `/24` là không đủ, bạn sẽ cần cấp phát thêm
+
+---
+
+## Flow 1: Internet → ALB → EC2
+
+Bây giờ chúng ta bắt đầu theo dấu hành trình đầu tiên: client ở Hanoi gửi HTTPS request đến API. Packet phải đi từ internet, qua public subnet, rồi vào EC2 ở private subnet.
+
+### 3. Internet Gateway — Cổng thành phố
+
+Packet từ client `1.2.3.4` với destination `52.10.10.10` (public IP của ALB) đã đến edge network của AWS. Component đầu tiên nó gặp là **Internet Gateway** (IGW — cổng kết nối VPC với internet).
+
+IGW làm đúng **2 việc**, không hơn:
+
+1. **NAT 1-to-1**: dịch public IP sang private IP (chiều vào), và ngược lại (chiều ra)
+2. **Forward packet**: chuyển packet qua biên giới giữa internet và VPC
+
+Tại hop này, IGW tra bảng mapping nội bộ và dịch:
+
+```
+dst: 52.10.10.10 (ALB public IP) → dst: 10.0.1.10 (ALB private IP)
+```
+
+Sau IGW, packet mang `dst: 10.0.1.10`. Từ thời điểm này, **public IP không còn tồn tại** bên trong VPC — mọi giao tiếp nội bộ đều qua private IP. Đây là điểm nhiều người hiểu sai: public IP chỉ "sống" ở tầng IGW, bên trong VPC không ai thấy nó.
+
+IGW là stateless — không filter, không cache, không load balance. Một VPC chỉ gắn được một IGW.
+
+<ExcalidrawDiagram
+  src="/vpc-igw-nat-translation.excalidraw"
+  alt="Internet Gateway — NAT 1:1 translation from ALB public IP to ALB private IP"
+/>
+
+### 4. Route Table — Bảng chỉ đường
+
+Packet giờ có `dst: 10.0.1.10`, nhưng VPC có nhiều subnet — packet đi đâu? **Route Table** (bảng định tuyến) trả lời câu hỏi đó.
+
+Route Table là một **bảng config** chứa các rule dạng `destination CIDR → target`. Mỗi subnet bắt buộc phải associate với đúng một route table. Khi packet cần forward, VPC networking layer tra theo **longest prefix match** — rule nào có CIDR cụ thể nhất (prefix dài nhất) match destination IP sẽ thắng.
+
+Trong kiến trúc này, 2 subnet có 2 route table khác nhau:
+
+**Public Subnet Route Table:**
+
+| Destination   | Target    | Ý nghĩa                     |
+| ------------- | --------- | --------------------------- |
+| `10.0.0.0/16` | `local`   | Traffic nội bộ VPC          |
+| `0.0.0.0/0`   | `igw-xxx` | Mọi traffic khác → Internet |
+
+**Private Subnet Route Table:**
+
+| Destination               | Target     | Ý nghĩa                        |
+| ------------------------- | ---------- | ------------------------------ |
+| `10.0.0.0/16`             | `local`    | Traffic nội bộ VPC             |
+| `pl-xxx` (S3 prefix list) | `vpce-xxx` | Traffic đến S3 → VPC Endpoint  |
+| `0.0.0.0/0`               | `nat-xxx`  | Mọi traffic khác → NAT Gateway |
+
+Packet với `dst: 10.0.1.10` match rule `10.0.0.0/16 → local` → packet được forward đến ALB trong public subnet.
+
+Lưu ý: route table **không xử lý packet** — nó chỉ là config. Thực tế việc forward diễn ra ở Nitro card (phần cứng SmartNIC mà AWS gắn vào mỗi host vật lý, ví dụ như IGW, ALB, EC2, ...) khi đọc config từ route table.
+
+<ExcalidrawDiagram
+  src="/vpc-route-table-lookup.excalidraw"
+  alt="Route Table — Public subnet and private subnet route tables with different default routes"
+/>
+
+### 5. ALB nhận request, forward đến EC2
+
+Packet đến ALB ở public subnet. ALB **terminate connection** của client — nghĩa là TCP connection từ client kết thúc ở đây. ALB xử lý request rồi tạo **một connection hoàn toàn mới** đến EC2 ở private subnet.
+
+<ExcalidrawDiagram src="/vpc-alb-routing-to-private-subnet.excalidraw" alt="VPC alb routing to private subnet" />
+
+Packet mới do ALB tạo ra:
+
+```
+src: 10.0.1.10 (ALB private IP)
+dst: 10.0.2.50 (EC2 private IP)
+```
+
+Client IP ban đầu (`1.2.3.4`) được ALB gắn vào HTTP header `X-Forwarded-For` để EC2 biết ai là người gửi thật.
+
+Packet này cần đi từ public subnet sang private subnet. Route table tra: `dst: 10.0.2.50` match `10.0.0.0/16 → local` — traffic nội bộ VPC, forward qua ranh giới subnet.
+
+### 6. Tổng kết Flow 1
+
+Tổng kết transformation tại mỗi hop:
+
+| #   | Component       | src IP                  | dst IP                      | Hành động                |
+| --- | --------------- | ----------------------- | --------------------------- | ------------------------ |
+| 1   | **IGW**         | `1.2.3.4`               | `52.10.10.10` → `10.0.1.10` | NAT 1:1                  |
+| 2   | **Route Table** | `1.2.3.4`               | `10.0.1.10`                 | `local` → ALB            |
+| 3   | **ALB**         | `1.2.3.4` → `10.0.1.10` | `10.0.1.10` → `10.0.2.50`   | New connection           |
+| 4   | **Route Table** | `10.0.1.10`             | `10.0.2.50`                 | `local` → private subnet |
+| 5   | **SG**          | `10.0.1.10`             | `10.0.2.50`                 | Stateful check (ref SG)  |
+| 6   | **EC2**         | `10.0.1.10`             | `10.0.2.50`                 | App nhận request         |
+
+---
+
+## Flow 2: EC2 → S3 — Đường tắt nội bộ
+
+EC2 nhận request từ client, giờ cần lấy một file ảnh từ **S3 bucket**. Theo route table của private subnet, traffic đến internet sẽ đi qua NAT Gateway → IGW → Internet → S3. Nhưng S3 cũng là service AWS — tại sao phải đi vòng qua internet, vừa chậm vừa tốn tiền NAT Gateway?
+
+### 8. VPC Gateway Endpoint — Không qua internet, không tốn tiền
+
+**VPC Endpoint** (điểm kết nối nội bộ VPC) giải quyết đúng vấn đề này. Với S3 và DynamoDB, AWS cung cấp **Gateway Endpoint** — một **target trừu tượng trong route table**, không có ENI, không có IP.
+
+Khi bạn tạo Gateway Endpoint cho S3, AWS tự thêm route vào route table:
+
+| Destination               | Target     |
+| ------------------------- | ---------- |
+| `pl-xxx` (S3 prefix list) | `vpce-xxx` |
+
+Flow khi EC2 gọi S3:
+
+1. EC2 tạo HTTPS request đến s3.amazonaws.com `src 10.0.2.50`, `dst 52.219.40.5` (IP của S3)
+2. Route Table (private subnet) match với rule pl-s3 → vpce-s3-xxx. Forward qua AWS Backbone Network (không ra internet)
+3. S3 nhận request, src vẫn là 10.0.2.50 (KHÔNG bị NAT)
+
+Điểm đặc biệt của Gateway Endpoint:
+
+- **Không có ENI**, không có IP — nó chỉ là một rule trong route table
+- **Không NAT** source IP — S3 thấy request đến từ `10.0.2.50` (private IP của EC2). Điều này cho phép bucket policy restrict theo VPC Endpoint (`aws:sourceVpce`)
+- **Hoàn toàn miễn phí** — không tính theo giờ, không tính theo GB
+
+> Ngoài Gateway Endpoint (chỉ cho S3 và DynamoDB), AWS còn có **Interface Endpoint** (PrivateLink) cho hầu hết service khác (SSM, SQS, Secrets Manager, ECR, ...). Interface Endpoint tạo một **ENI thật** trong subnet với private IP, có Security Group, nhưng **tốn tiền** theo giờ + GB.
+
+<ExcalidrawDiagram
+  src="/vpc-ec2-routing-to-s3.excalidraw"
+  alt="VPC Gateway Endpoint — EC2 to S3 through AWS backbone, no internet, no NAT"
+/>
+
+---
+
+## Flow 3: EC2 → Stripe — Ra internet qua NAT Gateway
+
+EC2 xử lý xong request, giờ cần gọi `api.stripe.com` để charge credit card. Stripe là third-party service nằm ngoài AWS — packet phải ra internet. Nhưng EC2 ở private subnet, không có route đến IGW. Làm sao?
+
+### 9. NAT Gateway — Cổng ra internet cho private subnet
+
+**NAT Gateway** (Network Address Translation Gateway — cổng dịch địa chỉ mạng) nằm ở **public subnet**, có Elastic IP, cho phép resource ở private subnet **gửi** request ra internet nhưng **chặn** internet gửi request vào.
+
+Tại sao cần NAT Gateway? Toàn bộ service trong private subnet chỉ có **private IP**, không có Elastic IP — mà internet không biết route đến private IP, nên chúng **không thể giao tiếp trực tiếp với internet**. NAT Gateway nằm ở public subnet, có EIP, đóng vai trò **đại diện** cho các service trong private subnet: nó nhận packet từ chúng, thay source IP bằng EIP của mình, rồi gửi ra internet thay.
+
+Nhưng một NAT Gateway chỉ có một EIP — làm sao đại diện cho hàng chục, hàng trăm service cùng lúc? Câu trả lời nằm ở **port**. NAT Gateway sử dụng kỹ thuật **PAT** (Port Address Translation — dịch địa chỉ theo port): mỗi connection từ private subnet được gán một **port riêng** trên EIP. Ví dụ, EC2 `10.0.2.50` gửi request → NAT Gateway gán port `40001`, EC2 `10.0.2.51` gửi request → gán port `40002`. Khi response trả về EIP trên port `40001`, NAT Gateway tra bảng mapping, biết port này thuộc về `10.0.2.50` và chuyển response về đúng service.
+
+Flow cụ thể:
+
+1. EC2 (10.0.2.50) tạo packet `src 10.0.2.50`, `dst 3.4.5.6`
+2. Route Table (private subnet) match 3.4.5.6 với rule `0.0.0.0/0 → nat-xxx`. Forward đến NAT Gateway
+3. Sau khi đi qua NAT Gateway (public subnet, private IP: 10.0.1.20), `src 10.0.2.50` → `src 10.0.1.20`. Lưu connection vào tracking table (nhớ 10.0.2.50 để dịch ngược)
+4. Route Table (public subnet) match 3.4.5.6 với rule 0.0.0.0/0 → igw-xxx. Forward đến IGW
+5. Sau khi đi qua Internet Gateway, nó sẽ dịch private IP thành EIP của NAT Gateway `src 10.0.1.20` → `src 52.20.20.20`
+6. Internet Stripe thấy request từ 52.20.20.20
+
+Chú ý **2 lần NAT** xảy ra trên đường đi:
+
+| Hop         | Trước            | Sau                | Loại NAT                         |
+| ----------- | ---------------- | ------------------ | -------------------------------- |
+| NAT Gateway | src: `10.0.2.50` | src: `10.0.1.20`   | Many-to-1 (nhiều EC2 share 1 IP) |
+| IGW         | src: `10.0.1.20` | src: `52.20.20.20` | 1-to-1 (EIP mapping)             |
+
+So sánh nhanh IGW vs NAT Gateway:
+
+|                 | IGW                               | NAT Gateway                              |
+| --------------- | --------------------------------- | ---------------------------------------- |
+| Vị trí          | Biên giới VPC                     | Public subnet                            |
+| NAT loại        | 1-to-1 (mỗi EIP map 1 private IP) | Many-to-1 (nhiều private IP share 1 EIP) |
+| Chiều           | Hai chiều (in + out)              | Một chiều (chỉ out)                      |
+| Có ENI?         | Không                             | Có                                       |
+| Cần Elastic IP? | Không (gắn vào resource)          | Có (bắt buộc khi tạo)                    |
+| Chi phí         | Miễn phí                          | Tính theo giờ + GB data                  |
+
+<ExcalidrawDiagram
+  src="/vpc-nat-gateway-outbound.excalidraw"
+  alt="NAT Gateway — EC2 in private subnet to Stripe via NAT Gateway and IGW, showing double NAT"
+/>
+
+---
+
+## Tổng kết
+
+Qua 3 hành trình, bạn đã gặp tất cả component chính trong VPC — không phải qua danh sách, mà qua chính công việc thực tế của chúng:
+
+| Component          | Bạn gặp ở Flow | Công việc thuần tuý                           |
+| ------------------ | -------------- | --------------------------------------------- |
+| **VPC**            | Tất cả         | Không gian địa chỉ cô lập                     |
+| **Subnet**         | Tất cả         | Chia VPC thành các vùng, gắn theo AZ          |
+| **Route Table**    | Tất cả         | Bảng config: destination → target             |
+| **IGW**            | Flow 1, 3      | NAT 1:1 + forward qua biên giới internet      |
+| **ALB**            | Flow 1         | Terminate connection, forward đến backend     |
+| **ENI**            | Flow 1         | Card mạng ảo, giữ IP + SG                     |
+| **Security Group** | Flow 1         | Stateful firewall ở ENI level                 |
+| **VPC Endpoint**   | Flow 2         | Đường tắt đến AWS service, không qua internet |
+| **NAT Gateway**    | Flow 3         | Source NAT cho private subnet ra internet     |
+
+Khi debug connectivity, hãy nghĩ theo hành trình của packet:
+
+- **Client không vào được?** → IGW attached chưa? ALB SG có mở port 443 không?
+- **ALB không forward được đến EC2?** → EC2 SG có reference ALB SG không?
+- **EC2 không gọi được S3?** → Gateway Endpoint đã tạo chưa? Route table có rule cho S3 prefix list không?
+- **EC2 không gọi được third-party API?** → NAT Gateway tạo chưa? Route table private subnet có `0.0.0.0/0 → nat-xxx` không?
+
+Bạn có thể dùng **VPC Reachability Analyzer** — một tool của AWS cho phép bạn chọn source và destination, rồi nó tự phân tích path và chỉ ra chính xác packet bị chặn ở đâu.
