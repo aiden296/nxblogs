@@ -1,0 +1,232 @@
+---
+title: 'NAT Instance vs NAT Gateway: Self-Managed or Let AWS Handle It?'
+date: '2026-05-23'
+tags: ['AWS', 'Networking', 'SAA', 'Devops']
+description: 'A detailed comparison of NAT Instance and NAT Gateway — how NAT Instance works under the hood, why Source/Destination Check must be disabled, and a comparison table to help you pick the right one.'
+enableComment: true
+---
+
+# NAT Instance vs NAT Gateway: Self-Managed or Let AWS Handle It?
+
+You're reviewing this month's AWS bill. The **NAT Gateway** line item stands out — $0.045/hour plus $0.045/GB of data processed. With dev/staging environments running 24/7, NAT Gateway costs can reach hundreds of dollars per month just for EC2 instances in private subnets to download packages or call external APIs.
+
+A colleague suggests: _"Why not use a NAT Instance for dev? Run it on a `t3.micro` — costs just a few bucks."_
+
+NAT Instance — sounds familiar but you've never set one up. It's also NAT, but runs on EC2 instead of using a managed service. So how does it work? Why do you need to disable Source/Destination Check? And when should you use it instead of NAT Gateway?
+
+> This post assumes you already understand the basics of VPC, subnets, and route tables. If not, read [AWS VPC: Understanding VPC Through a Packet's Journey](/en/posts/vpc-overview) first.
+
+<ExcalidrawDiagram
+  src="/nat-instance-vs-nat-gateway-overview.excalidraw"
+  alt="NAT Instance vs NAT Gateway — Side-by-side architecture comparison showing packet flow from private subnet to internet"
+/>
+
+---
+
+## 1. What Is NAT? (Quick Recap)
+
+In a VPC, resources in a **private subnet** (a subnet with no direct route to the internet) only have private IPs. The internet doesn't know how to route to private IPs (which belong to the RFC 1918 range — IP addresses reserved for internal networks), so these resources **cannot communicate directly with the internet**.
+
+**NAT** (Network Address Translation) solves this by placing a "proxy" in the **public subnet**: when an EC2 instance in a private subnet wants to reach the internet, the packet is sent to the NAT, which replaces the source IP with its own public IP and forwards the packet out. When the response comes back, the NAT looks up its mapping table and routes it back to the original EC2.
+
+AWS provides 2 ways to do NAT:
+
+- **NAT Gateway**: a fully managed service by AWS — you create it, attach an Elastic IP, done. AWS handles everything else.
+- **NAT Instance**: an EC2 instance you configure yourself to act as NAT — you manage everything from A to Z.
+
+This post focuses on NAT Instance — how it works internally, then compares it with NAT Gateway.
+
+---
+
+## 2. NAT Instance — How It Works
+
+### 2.1. Under the Hood: An EC2 Acting as NAT
+
+A NAT Instance is essentially an **EC2 instance** running an AMI (Amazon Machine Image) configured with **IP forwarding** (allowing the OS to forward packets between network interfaces instead of only processing packets destined for itself) and **iptables** (a Linux tool for managing firewall rules and NAT). When a packet arrives, instead of processing it at the application layer, the OS **changes the source IP** and **forwards the packet** out through another interface — just like a traditional NAT router.
+
+To function, a NAT Instance requires 4 things:
+
+1. **Placed in a public subnet** — because it needs a route to the internet via the Internet Gateway (IGW)
+2. **Elastic IP attached** (EIP — a static public IP address provided by AWS) — so the internet can send responses back
+3. **Source/Destination Check disabled** — details in the next section
+4. **Route table configured** — the private subnet must have a route `0.0.0.0/0 → eni-xxx` pointing to the NAT Instance's ENI
+
+AWS used to provide a **pre-configured Amazon Linux AMI** for NAT Instances, but this AMI reached the end of standard support on **December 31, 2020**. If you want to use a NAT Instance today, you have 2 options: find an **alternative AMI on the AWS Marketplace** (several community AMIs come pre-configured for NAT, such as fck-nat — an open-source alternative optimized for cost), or configure it yourself from a standard Linux AMI — enable IP forwarding in the kernel (`net.ipv4.ip_forward = 1`) and set up iptables NAT rules.
+
+### 2.2. Source/Destination Check — Why Must It Be Disabled?
+
+This is the most interesting part of understanding NAT Instance. Before understanding why it must be disabled, let's understand why AWS enables it by default.
+
+#### What Is Source/Destination Check?
+
+By default, AWS enables **Source/Destination Check** on every EC2 instance. This feature checks: _does the packet arriving at or leaving this instance have a source or destination IP that matches the instance's own IP?_ If not — the packet is **dropped** immediately.
+
+#### Why Does AWS Enable It by Default?
+
+This is a **defense in depth** (multi-layer security) mechanism that works independently of Security Groups and NACLs — meaning even if your SG or NACL is misconfigured, this layer still prevents dangerous behavior:
+
+**1. Preventing IP Spoofing** — **IP Spoofing** is a technique where an attacker forges the source IP in a packet to deceive the target system. Attackers can use this in **DDoS reflection attacks** (spoofing the victim's IP so servers send responses to the victim), or bypass firewalls by impersonating a trusted IP. Source/Dest Check ensures that outgoing packets **must have the instance's own IP as the source**, preventing all forms of IP forgery.
+
+**2. Blocking Unauthorized Traffic Forwarding** — Without this mechanism, a compromised EC2 instance could become a **proxy** to forward malicious traffic to other instances in the VPC, or perform **lateral movement** (a technique where an attacker moves from one compromised instance to other instances in the same network). By dropping all packets that don't belong to the instance, AWS blocks this behavior at the infrastructure level.
+
+**3. Ensuring Routing Consistency** — In a multi-tenant cloud environment, AWS needs to ensure traffic follows the defined route tables. If instances could freely forward traffic, any instance could "become a router" on its own and break the network topology, making troubleshooting and network auditing extremely difficult.
+
+**4. Secure by Default** — AWS follows the **Least Privilege** principle: dangerous behaviors are blocked by default, and those who need them must explicitly opt in. Most workloads (web servers, app servers, databases) **don't need** to forward traffic, so enabling Source/Dest Check by default makes sense.
+
+| Purpose | Protects Against |
+| --- | --- |
+| Anti IP Spoofing | IP forgery attacks, DDoS reflection |
+| Block unauthorized forwarding | Compromised instance as proxy, lateral movement |
+| Ensure routing consistency | Misrouted traffic, audit difficulties |
+| Secure by default | Accidental vulnerabilities from misconfiguration |
+
+#### Why Must NAT Instance Disable It?
+
+<ExcalidrawDiagram
+  src="/nat-instance-source-dest-check.excalidraw"
+  alt="Source/Destination Check — Packet with mismatched IPs gets dropped when check is enabled, forwarded when disabled"
+/>
+
+But NAT Instance is different — its entire job **is** to forward packets on behalf of others. Look at the packet it receives from an EC2 in a private subnet:
+
+```
+src: 10.0.0.20   ← IP of the EC2 in the private subnet
+dst: 50.60.4.10  ← IP of an external server
+```
+
+The NAT Instance has IP `10.0.0.30`. Neither the source nor the destination matches the NAT Instance's IP. With Source/Destination Check enabled, this packet gets dropped — the NAT Instance never even sees it.
+
+Similarly, when the NAT Instance forwards a packet outbound, the original source IP (`10.0.0.20`) doesn't match the NAT Instance's IP → check fails → packet dropped again.
+
+That's why **you must disable Source/Destination Check** on the NAT Instance. Without this step, the NAT Instance is completely useless — it cannot forward a single packet. Besides NAT Instance, other use cases that require disabling this mechanism include: VPN instances, software firewalls, or any instance acting as a router.
+
+> With NAT Gateway, you don't need to worry about this — AWS handles it automatically since it's a managed service, not running on a regular EC2 instance.
+
+### 2.3. Detailed Packet Flow
+
+Let's trace a packet from an EC2 in a private subnet to the internet via a NAT Instance:
+
+| Entity                       | IP                                            |
+| ---------------------------- | --------------------------------------------- |
+| EC2 (private subnet)         | `10.0.0.20`                                   |
+| NAT Instance (public subnet) | Private: `10.0.0.30`, EIP: `12.34.56.78`      |
+| External server              | `50.60.4.10`                                  |
+
+**Outbound:**
+
+| #   | Location              | src                          | dst           | Action                                              |
+| --- | --------------------- | ---------------------------- | ------------- | --------------------------------------------------- |
+| 1   | **EC2**               | `10.0.0.20`                  | `50.60.4.10`  | Create packet                                       |
+| 2   | **Route Table** (private) | `10.0.0.20`              | `50.60.4.10`  | Match `0.0.0.0/0 → eni-xxx` → forward to NAT Instance |
+| 3   | **NAT Instance**      | `10.0.0.20` → `10.0.0.30`   | `50.60.4.10`  | iptables replaces src IP, saves mapping in conntrack |
+| 4   | **Route Table** (public) | `10.0.0.30`               | `50.60.4.10`  | Match `0.0.0.0/0 → igw-xxx` → forward to IGW        |
+| 5   | **IGW**               | `10.0.0.30` → `12.34.56.78` | `50.60.4.10`  | 1:1 NAT private → EIP                               |
+| 6   | **Internet**          | `12.34.56.78`                | `50.60.4.10`  | Server receives request                              |
+
+**Return:**
+
+| #   | Location              | src           | dst                          | Action                                 |
+| --- | --------------------- | ------------- | ---------------------------- | -------------------------------------- |
+| 1   | **Server**            | `50.60.4.10`  | `12.34.56.78`                | Send response                          |
+| 2   | **IGW**               | `50.60.4.10`  | `12.34.56.78` → `10.0.0.30` | 1:1 NAT EIP → private                 |
+| 3   | **Route Table** (public) | `50.60.4.10` | `10.0.0.30`               | Match `10.0.0.0/16 → local`           |
+| 4   | **NAT Instance**      | `50.60.4.10`  | `10.0.0.30` → `10.0.0.20`   | Look up conntrack, replace dst IP      |
+| 5   | **Route Table** (private) | `50.60.4.10` | `10.0.0.20`              | Match `10.0.0.0/16 → local`           |
+| 6   | **EC2**               | `50.60.4.10`  | `10.0.0.20`                  | Receive response                       |
+
+Just like NAT Gateway, there are **2 NAT translations** on the outbound path:
+
+- **NAT Instance** (hop 3): many-to-1 — multiple EC2s share the NAT Instance's private IP, differentiated by source port
+- **IGW** (hop 5): 1-to-1 — fixed EIP mapping
+
+### 2.4. Security Group for NAT Instance
+
+Since a NAT Instance is an EC2, you can (and must) attach a **Security Group** (a virtual firewall at the instance level, stateful). This is both an **advantage** (granular traffic control) and a **responsibility** (misconfigure it and you lose connectivity).
+
+Minimum Security Group rules for a NAT Instance:
+
+**Inbound Rules:**
+
+| Type  | Port | Source                                | Purpose                                  |
+| ----- | ---- | ------------------------------------- | ---------------------------------------- |
+| HTTP  | 80   | `10.0.0.0/24` (Private Subnet CIDR)  | Allow HTTP traffic from private subnet   |
+| HTTPS | 443  | `10.0.0.0/24` (Private Subnet CIDR)  | Allow HTTPS traffic from private subnet  |
+| SSH   | 22   | `Your IP`                             | Administer the NAT Instance (via IGW)    |
+
+**Outbound Rules:**
+
+| Type  | Port | Destination  | Purpose                                 |
+| ----- | ---- | ------------ | --------------------------------------- |
+| HTTP  | 80   | `0.0.0.0/0`  | Forward HTTP traffic to the internet    |
+| HTTPS | 443  | `0.0.0.0/0`  | Forward HTTPS traffic to the internet   |
+
+> For comparison: NAT Gateway **does not support Security Groups** — you can only control traffic using **NACLs** (Network Access Control Lists — a subnet-level firewall, stateless). With a NAT Instance, you get both layers of protection: Security Group (stateful, instance-level) + NACL (stateless, subnet-level).
+
+---
+
+## 3. NAT Gateway — Managed Service (Recap)
+
+NAT Gateway is the option **AWS recommends by default**. Instead of managing your own EC2, you simply:
+
+1. Create a NAT Gateway in a public subnet
+2. Attach an Elastic IP
+3. Configure the route table: `0.0.0.0/0 → nat-xxx`
+
+AWS handles everything else: patching, monitoring, scaling, and high availability within the AZ. Bandwidth auto-scales from **5 Gbps up to 100 Gbps** — no need to choose an instance type or worry about bottlenecks.
+
+> For details on how NAT Gateway works (PAT, double NAT, connection tracking), see [AWS VPC: Understanding VPC Through a Packet's Journey — Flow 3: EC2 → Stripe](/en/posts/vpc-overview#flow-3-ec2--stripe--outbound-through-nat-gateway).
+
+**Important note about High Availability**: NAT Gateway has automatic HA **within a single AZ**. If that AZ goes down, the NAT Gateway goes down too. For region-wide HA, you need to deploy **one NAT Gateway per AZ** and configure route tables accordingly for each AZ's private subnets.
+
+---
+
+## 4. Detailed Comparison
+
+| Criteria                      | NAT Instance                                         | NAT Gateway                                   |
+| ----------------------------- | ---------------------------------------------------- | --------------------------------------------- |
+| **Nature**                    | EC2 instance running a NAT-configured AMI            | Fully managed AWS service                      |
+| **Management**                | You manage everything (patch, update, monitor)       | AWS manages everything                         |
+| **High Availability**         | Not built-in — must self-setup with ASG multi-AZ     | Automatic HA within 1 AZ                       |
+| **Bandwidth**                 | Depends on instance type                             | Auto-scales 5–100 Gbps                         |
+| **Performance**               | Limited by EC2 CPU/network                           | Optimized for NAT, high performance            |
+| **Cost**                      | Pay for EC2 instance (cheaper with small instances)  | $0.045/hr + $0.045/GB (more expensive)         |
+| **Security Group**            | ✅ Can attach                                        | ❌ Not supported (NACL only)                   |
+| **Use as Bastion host**       | ✅ Possible                                          | ❌ Not possible                                |
+| **Port forwarding**           | ✅ Supported                                         | ❌ Not supported                               |
+| **Source/Destination Check**  | Must disable manually                                | Not needed (AWS handles it)                    |
+| **Elastic IP**                | Can use EIP or public IP                             | EIP required                                   |
+
+---
+
+## 5. When Should You Use Which?
+
+### Use NAT Gateway when:
+
+- **Production environments** requiring high reliability and HA
+- You need **high bandwidth** and auto-scaling capabilities
+- You don't want to spend time managing NAT infrastructure
+- This is the **default recommendation** from AWS
+
+### Use NAT Instance when:
+
+- You want to **save costs** for dev/test environments — a `t3.micro` costs only ~$7–8/month compared to ~$32/month for NAT Gateway (excluding data processing fees)
+- You need **port forwarding** — for example, forwarding port 3306 from the internet to an RDS in a private subnet (NAT Gateway doesn't support this)
+- You want to also use it as a **bastion host** (a jump server for SSH-ing into instances in private subnets)
+- You need granular traffic control via **Security Groups** instead of just NACLs
+- Internet traffic is **low and predictable**
+
+> **SAA exam tip**: exam questions often focus on the differences between NAT Instance and NAT Gateway. Remember 3 key concepts: **Source/Destination Check** (must be disabled for NAT Instance), **Security Group** (only NAT Instance supports it), and **High Availability** (NAT Gateway has it built-in per AZ, NAT Instance requires manual setup).
+
+---
+
+## Conclusion
+
+Back to the original question: your colleague suggested using a NAT Instance for the dev environment — this is a reasonable choice if you accept the trade-off of manual management and no built-in HA in exchange for lower costs.
+
+Key takeaways:
+
+- **NAT Instance** is a self-managed EC2 that requires disabling **Source/Destination Check** because it forwards packets that don't belong to it — neither the source nor destination IP matches its own
+- **NAT Gateway** is a managed service — AWS handles HA, scaling, and patching — you just create it, attach an EIP, and configure the route table
+- NAT Instance supports **Security Groups**, can serve as a **bastion host**, and enables **port forwarding** — capabilities that NAT Gateway lacks
+- NAT Gateway is the default choice for **production**; NAT Instance is suitable for **dev/test** or when you need special features
+- For **region-wide HA**, both require deployment in **each AZ** — NAT Gateway has automatic HA within an AZ, while NAT Instance requires manual setup with ASG
