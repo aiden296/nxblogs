@@ -90,13 +90,13 @@ This is a **defense in depth** (multi-layer security) mechanism that works indep
 But NAT Instance is different — its entire job **is** to forward packets on behalf of others. Look at the packet it receives from an EC2 in a private subnet:
 
 ```
-src: 10.0.0.20   ← IP of the EC2 in the private subnet
-dst: 50.60.4.10  ← IP of an external server
+src: 10.0.2.20   ← IP of the EC2 in the private subnet
+dst: 3.5.6.7  ← IP of an external server
 ```
 
-The NAT Instance has IP `10.0.0.30`. Neither the source nor the destination matches the NAT Instance's IP. With Source/Destination Check enabled, this packet gets dropped — the NAT Instance never even sees it.
+The NAT Instance has IP `10.0.1.30`. Neither the source nor the destination matches the NAT Instance's IP. With Source/Destination Check enabled, this packet gets dropped — the NAT Instance never even sees it.
 
-Similarly, when the NAT Instance forwards a packet outbound, the original source IP (`10.0.0.20`) doesn't match the NAT Instance's IP → check fails → packet dropped again.
+Similarly, when the NAT Instance forwards a packet outbound, the original source IP (`10.0.2.20`) doesn't match the NAT Instance's IP → check fails → packet dropped again.
 
 That's why **you must disable Source/Destination Check** on the NAT Instance. Without this step, the NAT Instance is completely useless — it cannot forward a single packet. Besides NAT Instance, other use cases that require disabling this mechanism include: VPN instances, software firewalls, or any instance acting as a router.
 
@@ -108,31 +108,31 @@ Let's trace a packet from an EC2 in a private subnet to the internet via a NAT I
 
 | Entity                       | IP                                            |
 | ---------------------------- | --------------------------------------------- |
-| EC2 (private subnet)         | `10.0.0.20`                                   |
-| NAT Instance (public subnet) | Private: `10.0.0.30`, EIP: `12.34.56.78`      |
-| External server              | `50.60.4.10`                                  |
+| EC2 (private subnet)         | `10.0.2.20`                                   |
+| NAT Instance (public subnet) | Private: `10.0.1.30`, EIP: `12.34.56.78`      |
+| External server              | `3.5.6.7`                                  |
 
 **Outbound:**
 
 | #   | Location              | src                          | dst           | Action                                              |
 | --- | --------------------- | ---------------------------- | ------------- | --------------------------------------------------- |
-| 1   | **EC2**               | `10.0.0.20`                  | `50.60.4.10`  | Create packet                                       |
-| 2   | **Route Table** (private) | `10.0.0.20`              | `50.60.4.10`  | Match `0.0.0.0/0 → eni-xxx` → forward to NAT Instance |
-| 3   | **NAT Instance**      | `10.0.0.20` → `10.0.0.30`   | `50.60.4.10`  | iptables replaces src IP, saves mapping in conntrack |
-| 4   | **Route Table** (public) | `10.0.0.30`               | `50.60.4.10`  | Match `0.0.0.0/0 → igw-xxx` → forward to IGW        |
-| 5   | **IGW**               | `10.0.0.30` → `12.34.56.78` | `50.60.4.10`  | 1:1 NAT private → EIP                               |
-| 6   | **Internet**          | `12.34.56.78`                | `50.60.4.10`  | Server receives request                              |
+| 1   | **EC2**               | `10.0.2.20`                  | `3.5.6.7`  | Create packet                                       |
+| 2   | **Route Table** (private) | `10.0.2.20`              | `3.5.6.7`  | Match `0.0.0.0/0 → eni-xxx` → forward to NAT Instance |
+| 3   | **NAT Instance**      | `10.0.2.20` → `10.0.1.30`   | `3.5.6.7`  | iptables replaces src IP, saves mapping in conntrack |
+| 4   | **Route Table** (public) | `10.0.1.30`               | `3.5.6.7`  | Match `0.0.0.0/0 → igw-xxx` → forward to IGW        |
+| 5   | **IGW**               | `10.0.1.30` → `12.34.56.78` | `3.5.6.7`  | 1:1 NAT private → EIP                               |
+| 6   | **Internet**          | `12.34.56.78`                | `3.5.6.7`  | Server receives request                              |
 
 **Return:**
 
 | #   | Location              | src           | dst                          | Action                                 |
 | --- | --------------------- | ------------- | ---------------------------- | -------------------------------------- |
-| 1   | **Server**            | `50.60.4.10`  | `12.34.56.78`                | Send response                          |
-| 2   | **IGW**               | `50.60.4.10`  | `12.34.56.78` → `10.0.0.30` | 1:1 NAT EIP → private                 |
-| 3   | **Route Table** (public) | `50.60.4.10` | `10.0.0.30`               | Match `10.0.0.0/16 → local`           |
-| 4   | **NAT Instance**      | `50.60.4.10`  | `10.0.0.30` → `10.0.0.20`   | Look up conntrack, replace dst IP      |
-| 5   | **Route Table** (private) | `50.60.4.10` | `10.0.0.20`              | Match `10.0.0.0/16 → local`           |
-| 6   | **EC2**               | `50.60.4.10`  | `10.0.0.20`                  | Receive response                       |
+| 1   | **Server**            | `3.5.6.7`  | `12.34.56.78`                | Send response                          |
+| 2   | **IGW**               | `3.5.6.7`  | `12.34.56.78` → `10.0.1.30` | 1:1 NAT EIP → private                 |
+| 3   | **Route Table** (public) | `3.5.6.7` | `10.0.1.30`               | Match `10.0.0.0/16 → local`           |
+| 4   | **NAT Instance**      | `3.5.6.7`  | `10.0.1.30` → `10.0.2.20`   | Look up conntrack, replace dst IP      |
+| 5   | **Route Table** (private) | `3.5.6.7` | `10.0.2.20`              | Match `10.0.0.0/16 → local`           |
+| 6   | **EC2**               | `3.5.6.7`  | `10.0.2.20`                  | Receive response                       |
 
 Just like NAT Gateway, there are **2 NAT translations** on the outbound path:
 
@@ -149,8 +149,8 @@ Minimum Security Group rules for a NAT Instance:
 
 | Type  | Port | Source                                | Purpose                                  |
 | ----- | ---- | ------------------------------------- | ---------------------------------------- |
-| HTTP  | 80   | `10.0.0.0/24` (Private Subnet CIDR)  | Allow HTTP traffic from private subnet   |
-| HTTPS | 443  | `10.0.0.0/24` (Private Subnet CIDR)  | Allow HTTPS traffic from private subnet  |
+| HTTP  | 80   | `10.0.2.0/24` (Private Subnet CIDR)  | Allow HTTP traffic from private subnet   |
+| HTTPS | 443  | `10.0.2.0/24` (Private Subnet CIDR)  | Allow HTTPS traffic from private subnet  |
 | SSH   | 22   | `Your IP`                             | Administer the NAT Instance (via IGW)    |
 
 **Outbound Rules:**

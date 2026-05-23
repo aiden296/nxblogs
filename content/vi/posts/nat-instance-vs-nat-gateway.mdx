@@ -90,13 +90,13 @@ Mặc định, AWS bật **Source/Destination Check** trên mọi EC2 instance. 
 Nhưng NAT Instance thì khác — công việc của nó **chính là** forward packet cho người khác. Hãy xem packet mà NAT Instance nhận từ EC2 trong private subnet:
 
 ```
-src: 10.0.0.20   ← IP của EC2 trong private subnet
-dst: 50.60.4.10  ← IP của server bên ngoài internet
+src: 10.0.2.20   ← IP của EC2 trong private subnet
+dst: 3.5.6.7  ← IP của server bên ngoài internet
 ```
 
-NAT Instance có IP `10.0.0.30`. Cả source lẫn destination đều **không phải** IP của NAT Instance. Với Source/Destination Check bật, packet này bị drop — NAT Instance không bao giờ thấy nó.
+NAT Instance có IP `10.0.1.30`. Cả source lẫn destination đều **không phải** IP của NAT Instance. Với Source/Destination Check bật, packet này bị drop — NAT Instance không bao giờ thấy nó.
 
-Tương tự khi NAT Instance forward packet ra ngoài, source IP ban đầu (`10.0.0.20`) không phải IP của NAT Instance → check fail → packet bị drop lần nữa.
+Tương tự khi NAT Instance forward packet ra ngoài, source IP ban đầu (`10.0.2.20`) không phải IP của NAT Instance → check fail → packet bị drop lần nữa.
 
 Vì vậy, **bạn phải disable Source/Destination Check** trên NAT Instance. Không có bước này, NAT Instance hoàn toàn vô dụng — nó không thể forward được bất kỳ packet nào. Ngoài NAT Instance, các use case khác cần disable cơ chế này bao gồm: VPN instance, software firewall, hoặc bất kỳ instance nào đóng vai trò router.
 
@@ -108,31 +108,31 @@ Hãy trace một packet từ EC2 trong private subnet ra internet qua NAT Instan
 
 | Entity                       | IP                                            |
 | ---------------------------- | --------------------------------------------- |
-| EC2 (private subnet)         | `10.0.0.20`                                   |
-| NAT Instance (public subnet) | Private: `10.0.0.30`, EIP: `12.34.56.78`      |
-| Server ngoài internet        | `50.60.4.10`                                  |
+| EC2 (private subnet)         | `10.0.2.20`                                   |
+| NAT Instance (public subnet) | Private: `10.0.1.30`, EIP: `12.34.56.78`      |
+| Server ngoài internet        | `3.5.6.7`                                  |
 
 **Chiều đi (Outbound):**
 
 | #   | Vị trí              | src                          | dst           | Hành động                                           |
 | --- | ------------------- | ---------------------------- | ------------- | --------------------------------------------------- |
-| 1   | **EC2**             | `10.0.0.20`                  | `50.60.4.10`  | Tạo packet                                          |
-| 2   | **Route Table** (private) | `10.0.0.20`             | `50.60.4.10`  | Match `0.0.0.0/0 → eni-xxx` → forward đến NAT Instance |
-| 3   | **NAT Instance**    | `10.0.0.20` → `10.0.0.30`   | `50.60.4.10`  | iptables thay src IP, lưu mapping vào conntrack table |
-| 4   | **Route Table** (public) | `10.0.0.30`              | `50.60.4.10`  | Match `0.0.0.0/0 → igw-xxx` → forward đến IGW       |
-| 5   | **IGW**             | `10.0.0.30` → `12.34.56.78` | `50.60.4.10`  | NAT 1:1 private → EIP                               |
-| 6   | **Internet**        | `12.34.56.78`                | `50.60.4.10`  | Server nhận request                                  |
+| 1   | **EC2**             | `10.0.2.20`                  | `3.5.6.7`  | Tạo packet                                          |
+| 2   | **Route Table** (private) | `10.0.2.20`             | `3.5.6.7`  | Match `0.0.0.0/0 → eni-xxx` → forward đến NAT Instance |
+| 3   | **NAT Instance**    | `10.0.2.20` → `10.0.1.30`   | `3.5.6.7`  | iptables thay src IP, lưu mapping vào conntrack table |
+| 4   | **Route Table** (public) | `10.0.1.30`              | `3.5.6.7`  | Match `0.0.0.0/0 → igw-xxx` → forward đến IGW       |
+| 5   | **IGW**             | `10.0.1.30` → `12.34.56.78` | `3.5.6.7`  | NAT 1:1 private → EIP                               |
+| 6   | **Internet**        | `12.34.56.78`                | `3.5.6.7`  | Server nhận request                                  |
 
 **Chiều về (Return):**
 
 | #   | Vị trí              | src           | dst                          | Hành động                            |
 | --- | ------------------- | ------------- | ---------------------------- | ------------------------------------ |
-| 1   | **Server**          | `50.60.4.10`  | `12.34.56.78`                | Gửi response                         |
-| 2   | **IGW**             | `50.60.4.10`  | `12.34.56.78` → `10.0.0.30` | NAT 1:1 EIP → private                |
-| 3   | **Route Table** (public) | `50.60.4.10` | `10.0.0.30`              | Match `10.0.0.0/16 → local`          |
-| 4   | **NAT Instance**    | `50.60.4.10`  | `10.0.0.30` → `10.0.0.20`   | Tra conntrack, thay dst IP về EC2 gốc |
-| 5   | **Route Table** (private) | `50.60.4.10` | `10.0.0.20`             | Match `10.0.0.0/16 → local`          |
-| 6   | **EC2**             | `50.60.4.10`  | `10.0.0.20`                  | Nhận response                        |
+| 1   | **Server**          | `3.5.6.7`  | `12.34.56.78`                | Gửi response                         |
+| 2   | **IGW**             | `3.5.6.7`  | `12.34.56.78` → `10.0.1.30` | NAT 1:1 EIP → private                |
+| 3   | **Route Table** (public) | `3.5.6.7` | `10.0.1.30`              | Match `10.0.0.0/16 → local`          |
+| 4   | **NAT Instance**    | `3.5.6.7`  | `10.0.1.30` → `10.0.2.20`   | Tra conntrack, thay dst IP về EC2 gốc |
+| 5   | **Route Table** (private) | `3.5.6.7` | `10.0.2.20`             | Match `10.0.0.0/16 → local`          |
+| 6   | **EC2**             | `3.5.6.7`  | `10.0.2.20`                  | Nhận response                        |
 
 Giống NAT Gateway, có **2 lần NAT** trên đường đi:
 
@@ -149,8 +149,8 @@ Security Group tối thiểu cho NAT Instance:
 
 | Type  | Port | Source                                | Mục đích                                |
 | ----- | ---- | ------------------------------------- | --------------------------------------- |
-| HTTP  | 80   | `10.0.0.0/24` (Private Subnet CIDR)  | Cho phép traffic HTTP từ private subnet |
-| HTTPS | 443  | `10.0.0.0/24` (Private Subnet CIDR)  | Cho phép traffic HTTPS từ private subnet |
+| HTTP  | 80   | `10.0.2.0/24` (Private Subnet CIDR)  | Cho phép traffic HTTP từ private subnet |
+| HTTPS | 443  | `10.0.2.0/24` (Private Subnet CIDR)  | Cho phép traffic HTTPS từ private subnet |
 | SSH   | 22   | `Your IP`                             | Quản trị NAT Instance (qua IGW)        |
 
 **Outbound Rules:**
