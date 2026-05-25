@@ -1,0 +1,831 @@
+---
+title: 'Elasticsearch: Deep Dive kiến trúc phân tán đằng sau search engine xử lý petabytes dữ liệu'
+date: '2026-05-25'
+tags: ['Backend', 'System Design', 'Elasticsearch']
+description: 'Deep dive kiến trúc phân tán của Elasticsearch — cluster, node types, shard và replica, cơ chế allocation và rebalancing, master election theo Zen2, cùng cách quorum-based voting ngăn chặn split-brain.'
+enableComment: true
+---
+
+# Elasticsearch: Deep Dive kiến trúc phân tán đằng sau search engine xử lý petabytes dữ liệu
+
+Bạn vừa nhận yêu cầu xây tính năng tìm kiếm cho 1 trang e-commerce có 50 triệu sản phẩm. Reqs nghe đơn giản: gõ "samsung galaxy s24 ultra 256gb đen" là phải trả về đúng sản phẩm trong dưới 100ms, có gợi ý khi gõ sai chính tả, có ranking theo độ liên quan, và filter được theo giá, thương hiệu, đánh giá.
+
+Bạn mở PostgreSQL — vốn đang lưu toàn bộ sản phẩm — và viết câu query đầu tiên: `SELECT * FROM products WHERE name ILIKE '%samsung galaxy s24 ultra 256gb đen%'`. Kết quả: query mất 15 giây, scan toàn bộ bảng, và nếu user gõ thiếu chữ "ultra" thì không match. Bạn thử dùng `tsvector` và `ts_rank` của PostgreSQL Full-Text Search — tốt hơn một chút nhưng vẫn không hiểu typo, không stem được từ tiếng Việt, và khi index lên 50 triệu rows thì việc rebuild tốn hàng giờ.
+
+Đây không phải là bài toán mà một relational database có thể giải quyết tốt. Vấn đề cốt lõi nằm ở chỗ: search không chỉ là **so khớp chuỗi**, mà là một bài toán **phân tích ngôn ngữ + ranking + scale ngang**. Bạn cần một hệ thống biết tách "samsung galaxy s24 ultra" thành các token, hiểu rằng "đen" có thể là một thuộc tính màu, ranking documents theo TF-IDF hoặc BM25, và quan trọng nhất — phải scale được khi data lên hàng trăm GB hoặc TB.
+
+Đây chính là không gian mà **Elasticsearch** chiếm lĩnh suốt hơn một thập kỷ qua. Là một **distributed search and analytics engine** xây trên nền **Apache Lucene** (thư viện inverted-index huyền thoại của Doug Cutting), Elasticsearch không chỉ đảm nhận search mà còn xử lý log aggregation (stack ELK), observability, security analytics, và là backbone của những hệ thống xử lý hàng **petabytes dữ liệu** tại Netflix, eBay, Uber, Wikipedia.
+
+Nhưng cái làm Elasticsearch đặc biệt — và cũng là phần thường bị che giấu sau REST API trông có vẻ đơn giản — là **kiến trúc phân tán** của nó. Làm sao một cluster có thể tự cân bằng dữ liệu khi thêm node? Làm sao đảm bảo data không mất khi 1 node chết? Làm sao tránh được **split-brain** khi network bị chia cắt? Tại sao production luôn khuyến cáo phải có ít nhất 3 master-eligible nodes? Và tại sao số shards lại immutable sau khi tạo index?
+
+Bài viết này sẽ đi sâu vào những câu hỏi đó. Chúng ta sẽ bóc tách Elasticsearch từ tầng cao nhất — cluster và node — xuống đến cơ chế shard allocation, rebalancing, và cuối cùng là phần quan trọng nhất: **cluster coordination & master election** theo thuật toán Zen2 (Raft-inspired) mà Elasticsearch 7+ sử dụng.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-cluster-overview.excalidraw"
+  alt="Elasticsearch Cluster Architecture — Master/Data/Ingest/Coordinating Nodes, Index, Primary và Replica Shards"
+/>
+
+> Bài viết này tập trung **100% vào kiến trúc phân tán**. Các chủ đề như Lucene segment internals, inverted index, query DSL, scoring (TF-IDF, BM25), aggregations sẽ là chủ đề của các bài tiếp theo trong series.
+
+---
+
+## 1. Cluster & Node — Đơn vị tổ chức cao nhất
+
+### 1.1. Cluster là gì?
+
+Một **Elasticsearch cluster** là một tập hợp các Elasticsearch **node** (process) cùng làm việc với nhau, chia sẻ chung một `cluster.name`. Đó là **toàn bộ định nghĩa** — không có một "master cluster process" nào đứng riêng. Bất kỳ node nào có cùng `cluster.name` và có thể discover được nhau qua mạng đều tự động join vào cluster đó.
+
+```yaml
+# elasticsearch.yml
+cluster.name: production-search
+node.name: node-1
+network.host: 10.0.1.5
+discovery.seed_hosts: ['10.0.1.6', '10.0.1.7', '10.0.1.8']
+```
+
+Cluster là **đơn vị logic cao nhất** — mọi index, mọi shard, mọi cluster state đều thuộc về cluster, không thuộc về node nào cụ thể. Đó là lý do bạn có thể tắt 1 node mà cluster vẫn sống tiếp (miễn là còn đủ replica), và khi thêm node mới, dữ liệu sẽ tự động được redistribute.
+
+### 1.2. Node là gì?
+
+Một **node** là **một instance Elasticsearch process** (1 JVM) chạy trên một máy. Một máy vật lý có thể chạy nhiều node (mỗi node một port riêng), nhưng trong production thường là 1-1 — 1 máy, 1 node — để cô lập tài nguyên CPU/RAM/disk.
+
+Mỗi node có một **`node.name`** duy nhất trong cluster, và có một hoặc nhiều **`node.roles`** xác định nhiệm vụ của nó. Đây là điểm thú vị nhất: Elasticsearch không có khái niệm "node generic" — mỗi node được khai báo rõ ràng nó đảm nhận role gì.
+
+### 1.3. Các loại Node (Node Roles)
+
+Trước Elasticsearch 7, bạn cấu hình từng role bằng các flag riêng như `node.master: true`, `node.data: true`. Từ 7.9+, mọi role gom vào một mảng `node.roles`:
+
+```yaml
+node.roles: ['master', 'data', 'ingest']
+```
+
+Theo [tài liệu chính thức](https://www.elastic.co/docs/deploy-manage/distributed-architecture/clusters-nodes-shards/node-roles), Elasticsearch hỗ trợ **12 role**:
+
+| Role                        | Tên đầy đủ                       | Vai trò                                                                                                                                  | Khi nào dùng                                                                                                    |
+| --------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **`master`**                | Master-eligible node             | Có thể được bầu làm active master, chịu trách nhiệm cluster-wide actions như tạo/xoá index, allocate shard, track node nào trong cluster | Tách riêng ở production cluster (3 hoặc 5 dedicated master nodes)                                               |
+| **`data`**                  | Generic data node                | Lưu trữ shards, xử lý CRUD, search và aggregation — node "tổng hợp" gồm tất cả các data tier                                             | Cluster nhỏ, hoặc cluster không dùng tiered storage                                                             |
+| **`data_content`**          | Content data node                | Lưu **non-time-series content** (product catalog, article archive), tối ưu cho query performance hơn ingest rate                         | Product catalog, blog/article archive, knowledge base — data ít thay đổi theo thời gian                         |
+| **`data_hot`**              | Hot data node                    | **Entry point cho time-series data mới** — write-heavy, đọc nhiều. Cần disk nhanh (NVMe SSD)                                             | Bắt buộc cho data stream / ILM; data mới luôn vào hot tier trước                                                |
+| **`data_warm`**             | Warm data node                   | Lưu time-series data của vài tuần gần đây, ít query hơn nhưng vẫn cần response thời gian thực                                            | Bậc tiếp theo sau hot tier để tiết kiệm chi phí storage                                                         |
+| **`data_cold`**             | Cold data node                   | Tối ưu chi phí storage hơn là search speed; thường lưu searchable snapshots hoặc index ít query                                          | Data cũ hơn warm, query thi thoảng, chấp nhận latency cao hơn                                                   |
+| **`data_frozen`**           | Frozen data node                 | **Mount partially một phần searchable snapshot** từ snapshot repository (S3, GCS) qua local disk cache                                   | Archive data hiếm query — chi phí siêu thấp vì data thực tế ở object storage                                    |
+| **`ingest`**                | Ingest node                      | Chạy ingest pipelines để **transform / enrich document** trước khi index (parse JSON, grok pattern, geoip lookup, ...)                   | Khi pipeline phức tạp, tách riêng để không tiêu hao CPU/heap của data nodes                                     |
+| **`ml`**                    | Machine learning node            | Chạy ML jobs (anomaly detection, forecasting, NLP), serve ML APIs và inference requests                                                  | Khi dùng X-Pack ML hoặc inference với loaded models                                                             |
+| **`transform`**             | Transform node                   | Chạy continuous transforms (pivot/aggregate index này thành index khác)                                                                  | Khi dùng Transform feature để materialize aggregations                                                          |
+| **`remote_cluster_client`** | Remote-eligible node             | Acts as client kết nối tới các remote cluster qua transport protocol                                                                     | Cross-cluster search (CCS) và cross-cluster replication (CCR)                                                   |
+| **`voting_only`**           | Voting-only master-eligible node | Tham gia voting cho master election và cluster state commit, nhưng **không bao giờ được elect làm active master**                        | Tiebreaker trong setup 2-zone, hoặc khi cần thêm voter mà không muốn thêm master thực sự (tiết kiệm tài nguyên) |
+
+Mặc định khi cài Elasticsearch và không cấu hình `node.roles`, node sẽ nhận tất cả role, ngoại trừ `voting_only` - phải khai báo explicit.
+
+Phù hợp cho dev/test trên 1 máy, nhưng **tuyệt đối không** dùng trong production cluster lớn — phải tách role rõ ràng.
+
+#### Coordinating Node — không có role tên là "coordinating"
+
+Đây là điểm thường gây nhầm lẫn: **không có giá trị `coordinating` nào trong `node.roles`**. Mọi node trong cluster đều **mặc định** đảm nhận vai trò coordinating — tức nhận request từ client, route đến shard cần, gom kết quả, trả về client thì được xem là coordinating node.
+
+Khi bạn muốn có **dedicated coordinating-only node** (không lưu data, không tham gia master election, không chạy ML/ingest/transform), bạn khai báo bằng cách **set mảng roles rỗng**:
+
+```yaml
+node.roles: []
+```
+
+Đúng vậy — một mảng rỗng đồng nghĩa với "tôi chỉ coordinate, không làm gì khác". Loại node này hữu ích khi cluster có search load lớn và bạn muốn tách lớp gom kết quả ra khỏi data layer để giảm áp lực memory/CPU lên data nodes.
+
+### 1.4. Dedicated roles vs Combined roles — Vì sao production cần tách Master Node?
+
+Trong setup development, một node làm tất cả các role là tiện. Nhưng production cluster lớn (hàng chục TB dữ liệu, hàng nghìn shards) cần tách role rõ ràng — đặc biệt là **dedicated master-eligible nodes**.
+
+Lý do:
+
+1. **Cluster state là single source of truth** — master node giữ và publish cluster state đến mọi node. Cluster state lớn (cluster nhiều index có thể có cluster state vài MB đến hàng chục MB). Mỗi lần thay đổi (tạo index, allocate shard, node join/leave), master phải gửi diff đến mọi node. Nếu master cũng đang phải xử lý query nặng, latency của cluster state sync sẽ bị ảnh hưởng → rebalance chậm, allocation chậm, cluster có cảm giác "đơ".
+
+2. **Cô lập failure** — nếu một data node hết RAM do query phức tạp và bị OOMKill, bạn chỉ mất 1 data node. Nhưng nếu node đó cũng đang là active master, cluster mất master trong khoảng vài giây để election → tất cả write tạm thời block, một số read fail.
+
+3. **Resource sizing khác nhau** — master node không cần nhiều disk hay RAM (cluster state ~ vài GB là max), chỉ cần CPU ổn định và network latency thấp. Data node thì ngược lại: cần nhiều RAM (cho heap + filesystem cache), disk nhanh (NVMe), và CPU mạnh.
+
+Best practice production:
+
+```
+3 dedicated master nodes  (small: 2 vCPU, 4GB RAM, 50GB disk)
+N data nodes              (large: 8+ vCPU, 32-64GB RAM, NVMe disk)
+2 coordinating nodes      (medium: 4 vCPU, 16GB RAM) — nếu search QPS cao
+1-2 ingest nodes          (medium) — nếu pipelines nặng
+```
+
+---
+
+## 2. Index, Shard, Replica — Mô hình dữ liệu phân tán
+
+### 2.1. Index là gì?
+
+Trong Elasticsearch, **index** là một **namespace logic** chứa các documents có schema tương tự nhau — đại khái giống "table" trong relational database, nhưng schema linh hoạt hơn nhiều (schema-less hoặc schema-light qua `_mapping`).
+
+```
+PUT /products
+{
+  "mappings": {
+    "properties": {
+      "name":       { "type": "text", "analyzer": "standard" },
+      "price":      { "type": "double" },
+      "brand":      { "type": "keyword" },
+      "created_at": { "type": "date" }
+    }
+  }
+}
+
+POST /products/_doc/sku-12345
+{
+  "name": "Samsung Galaxy S24 Ultra 256GB Black",
+  "price": 1299.99,
+  "brand": "Samsung",
+  "created_at": "2026-05-25T00:00:00Z"
+}
+```
+
+Index `products` trông như một thực thể đơn lẻ từ phía client. Nhưng dưới capo, nó được **chia nhỏ thành nhiều shard** trải khắp các data node — và đây là chìa khoá cho khả năng scale của Elasticsearch.
+
+### 2.2. Vì sao cần Shard?
+
+Hãy hình dung bạn có 1 index `logs` lưu **300GB** log mỗi ngày. Nếu Elasticsearch lưu toàn bộ index trên 1 node:
+
+- Disk của node đó phải có > 300GB free → vertical scaling limit
+- Mọi query phải chạy trên 1 node → CPU bottleneck
+- Node chết = mất luôn data → no fault tolerance
+
+**Shard** giải quyết cả 3 vấn đề. Một shard là một **Lucene index độc lập** — đầy đủ inverted index, doc values, stored fields, segments riêng — và là **đơn vị nhỏ nhất** để Elasticsearch scale ngang.
+
+Khi tạo index `logs` với `number_of_shards: 6`, Elasticsearch sẽ tạo ra 6 shard:
+
+```
+Index "logs" (logical, 300GB)
+  ├── Shard 0  (~50GB)  — physical on Node A
+  ├── Shard 1  (~50GB)  — physical on Node B
+  ├── Shard 2  (~50GB)  — physical on Node C
+  ├── Shard 3  (~50GB)  — physical on Node A
+  ├── Shard 4  (~50GB)  — physical on Node B
+  └── Shard 5  (~50GB)  — physical on Node C
+```
+
+Mỗi shard giờ đây chỉ ~50GB, fit vào disk của bất kỳ node nào. Khi query, Elasticsearch fan-out query đến cả 6 shard song song → leverage được CPU/IO của 3 node cùng lúc. Khi cluster cần thêm capacity, thêm Node D vào — cluster có thể move shard từ A/B/C sang D để cân bằng.
+
+### 2.3. Primary Shard vs Replica Shard
+
+Mỗi shard trong một index thực ra có 2 dạng: **primary** và **replica**.
+
+- **Primary shard**: nơi chứa "bản gốc" của dữ liệu. Mọi indexing (write/update/delete) bắt buộc đi qua primary trước.
+- **Replica shard**: bản sao của một primary shard cụ thể. Replica cũng chứa toàn bộ dữ liệu của primary, có thể phục vụ read (search) song song với primary để tăng read throughput, và quan trọng nhất — là **bản dự phòng** khi node chứa primary bị chết.
+
+Khi tạo index, bạn khai báo số lượng:
+
+```
+PUT /products
+{
+  "settings": {
+    "number_of_shards":   3,
+    "number_of_replicas": 1
+  }
+}
+```
+
+`number_of_shards: 3` là 3 primary shards (FIX, không đổi được sau khi tạo). `number_of_replicas: 1` nghĩa là mỗi primary có 1 replica → tổng 3 + 3 = 6 shards trong cluster.
+
+Với `3 primary + 1 replica` và 3 data node, cluster sẽ phân bố theo nguyên tắc bất di bất dịch: **primary và replica của cùng một shard không bao giờ ở cùng node**.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-shard-replica-distribution.excalidraw"
+  alt="Shard và Replica Distribution — 3 primary + 3 replica trên 3 data nodes, primary và replica không bao giờ cùng node"
+/>
+
+Nguyên tắc này là **cơ sở của high availability**. Khi Node 1 chết, P0 (primary của shard 0) cũng chết theo. Nhưng R0 vẫn còn trên Node 2. Master phát hiện Node 1 mất, **promote R0 thành primary mới**, rồi tìm node còn lại (Node 3) để tạo replica mới của shard 0. Cluster vẫn hoạt động bình thường, người dùng không cảm nhận được sự cố.
+
+#### Đặc tính quan trọng của `number_of_replicas`
+
+- Có thể **thay đổi runtime** (không cần re-index): `PUT /products/_settings { "number_of_replicas": 2 }`
+- Tăng replicas tăng read throughput (query có thể chạy trên cả primary hoặc replica), nhưng **không tăng** write throughput (vì write vẫn phải vào primary trước rồi mới replicate)
+- Tăng replicas → tăng disk usage tương ứng. `3 primary × 2 replicas = 6 copies × ~50GB = 300GB extra`
+- Replica count = 0 nghĩa là không có HA — node chết là mất shard đó
+
+### 2.4. Document Routing — Cách Elasticsearch quyết định document vào shard nào?
+
+Khi bạn POST một document vào index, Elasticsearch phải quyết định **document này sẽ vào primary shard nào**, chỉ tính các shard của index. Quyết định đó dùng một công thức cực kỳ đơn giản:
+
+```
+shard_num = hash(_routing) % number_of_primary_shards
+```
+
+Mặc định `_routing = _id`. Tức là `hash(_id) % number_of_shards` quyết định shard. Hash dùng là `MurmurHash3` — fast và phân tán đều.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-document-routing.excalidraw"
+  alt="Document Routing — _id hash mod number of shards quyết định shard nào nhận document"
+/>
+
+#### Vì sao `number_of_primary_shards` IMMUTABLE sau khi tạo index?
+
+Đây là một trong những "gotchas" lớn nhất mà developer mới đến với Elasticsearch hay vấp phải. Khi bạn tạo index với `number_of_shards: 3`, con số 3 đó được "khắc đá" vào index metadata và **không thể thay đổi** trong cuộc đời index.
+
+Tại sao? Vì routing dùng `% 3`. Nếu bạn đổi sang `% 4`, mọi document đã index trước đó sẽ map đến shard **khác** với khi nó được index. Search sẽ không tìm thấy data — hay tệ hơn, sẽ tìm thấy nhưng partial, không consistent. Để đổi shard count phải tạo index mới và **re-index toàn bộ data** (hoặc dùng `_split` / `_shrink` API có giới hạn — `_split` chỉ nhân đôi, `_shrink` chỉ ước chừng số lượng shard giảm xuống ước số).
+
+Hệ quả thực tế: **phải estimate đúng shard count ngay từ đầu**. Underestimate → đến lúc data lên 500GB/shard thì query chậm, không split được dễ dàng. Overestimate → tốn metadata overhead, cluster state phình to, oversharding.
+
+#### Rule of thumb sizing
+
+Elastic team đề xuất:
+
+- Mỗi shard nên ở mức **10-50 GB** (search workload) hoặc **lên đến 65GB** (log/time-series)
+- Mỗi node không nên giữ quá **20 shards mỗi GB heap** (vd: node 30GB heap → < 600 shards)
+- Tổng số shard trong cluster không nên vượt quá **vài chục nghìn** (cluster state explosion)
+
+Tính ngược: nếu bạn dự đoán index sẽ lưu **600GB** trong 6 tháng, target shard size **50GB** → cần **12 primary shards**. Cộng thêm replica = 24 shards. Cần ít nhất 4 data node để spread tốt.
+
+#### Custom routing — Tối ưu cho multi-tenant
+
+Mặc định `_routing = _id`, nhưng bạn có thể custom. Ví dụ một SaaS có 10,000 tenants, mỗi tenant query data của riêng họ — bạn không muốn fan-out query đến cả 12 shard mỗi lần.
+
+```
+POST /orders/_doc/order-789?routing=tenant-42
+{
+  "tenant_id": "tenant-42",
+  "amount":    99.99,
+  "items":     [ /* ... */ ]
+}
+# Query với cùng routing — chỉ hit 1 shard
+GET /orders/_search?routing=tenant-42
+{
+  "query": {
+    "term": { "tenant_id": "tenant-42" }
+  }
+}
+```
+
+Cùng `routing` → cùng shard. Query với `routing` parameter sẽ chỉ scan đúng shard đó thay vì fan-out 12 shards. Latency giảm cả chục lần.
+
+**Trade-off**: nếu một số tenant lớn bất thường, shard chứa data của họ sẽ phình to hơn các shard khác (hot shard problem).
+
+---
+
+## 3. Shard Allocation — Ai quyết định shard nằm ở đâu?
+
+### 3.1. Allocation là gì?
+
+**Shard allocation** là quá trình **master node quyết định một shard sẽ được đặt (assigned) lên node nào trong cluster**. Allocation xảy ra trong các tình huống:
+
+- Tạo index mới — cần allocate primary shards
+- Tăng `number_of_replicas` — cần allocate thêm replica
+- Một data node join cluster — có thể trigger move shard sang node mới
+- Một data node leave cluster — các primary shard trên node đó sẽ mất, replica của các shard trên node đó được promote lên làm primary, các shard mất replica cần tái allocate
+- Restore snapshot — cần allocate shards của index được restore
+- `_cluster/reroute` API được gọi thủ công
+
+Quyết định allocation **không phải random** — nó là kết quả của một chuỗi **deciders** (bộ lọc) chạy tuần tự. Mỗi decider trả lời câu hỏi: "Shard X có được phép đặt lên Node Y không?" Câu trả lời chỉ cần một `NO` là cả allocation bị từ chối.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-shard-allocation-deciders.excalidraw"
+  alt="Allocation Deciders — pipeline of decision filters: SameShard, DiskThreshold, Awareness, Filter, ShardsLimit"
+/>
+
+### 3.2. Các Allocation Deciders quan trọng
+
+Elasticsearch có **18+ deciders** trong source code. Đây là những cái bạn cần biết:
+
+#### `SameShardAllocationDecider`
+
+Cấm 2 copies của **cùng một shard** (primary + replica, hoặc 2 replica) cùng nằm trên 1 node. Cấm cả cùng host (nếu config `cluster.routing.allocation.same_shard.host: true`). Quy tắc bất di bất dịch không thể override.
+
+#### `DiskThresholdDecider`
+
+Quyết định dựa trên dung lượng disk còn lại của node. Có 3 mức watermark:
+
+| Watermark     | Default | Hành vi                                                                 |
+| ------------- | ------- | ----------------------------------------------------------------------- |
+| `low`         | 85%     | Không allocate shard mới lên node có disk usage > 85%                   |
+| `high`        | 90%     | Bắt đầu move shard ra khỏi node có disk usage > 90%                     |
+| `flood_stage` | 95%     | Đặt mọi index có shard trên node này thành **read-only** (block writes) |
+
+Khi cluster bị flood stage, bạn sẽ thấy lỗi `cluster_block_exception` khi cố index document mới. Phải xoá bớt data hoặc thêm disk space, rồi unblock thủ công:
+
+```
+PUT /products/_settings
+{
+  "index.blocks.read_only_allow_delete": null
+}
+```
+
+#### `AwarenessAllocationDecider`
+
+Cho phép bạn label node theo "zone" hoặc "rack" và Elasticsearch sẽ **cố gắng spread replica qua các zone khác nhau**. Cực kỳ quan trọng khi cluster trải qua nhiều AZ của AWS để chống AZ failure.
+
+```yaml
+# Node 1 trong zone us-east-1a
+node.attr.zone: us-east-1a
+
+# Node 2 trong zone us-east-1b
+node.attr.zone: us-east-1b
+```
+
+Sau đó bật awareness:
+
+```yaml
+cluster.routing.allocation.awareness.attributes: zone
+```
+
+Khi `awareness` được bật ở **soft mode** (mặc định), Elasticsearch sẽ ưu tiên spread shard qua các zone, nhưng nếu không thể (vd: chỉ còn 1 zone alive), nó vẫn allocate. Còn nếu bạn dùng **forced awareness**:
+
+```yaml
+cluster.routing.allocation.awareness.force.zone.values: us-east-1a,us-east-1b
+```
+
+Lúc này Elasticsearch **tuyệt đối không** allocate replica vào zone đã có primary. Nếu thiếu zone, replica unassigned. Trade-off: HA tuyệt đối, nhưng nếu mất 1 zone, capacity giảm 50% và cluster có thể bị mất replica tạm thời.
+
+#### `FilterAllocationDecider`
+
+Cho phép include/exclude shard theo node attribute, ở 3 cấp: cluster, index, và per-shard. Dùng nhiều khi cần "drain" một node trước maintenance:
+
+```
+# Drain node tên "data-3" — di chuyển mọi shard ra
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.exclude._name": "data-3"
+  }
+}
+
+# Sau khi shard đã rời (kiểm tra qua GET /_cat/shards), bạn có thể tắt node-3 an toàn
+```
+
+#### `ShardsLimitAllocationDecider`
+
+Giới hạn số shards tối đa của 1 index trên 1 node. Hữu ích khi bạn không muốn một node chứa quá nhiều shard của cùng 1 index (gây hot spot):
+
+```
+PUT /products/_settings
+{
+  "index.routing.allocation.total_shards_per_node": 2
+}
+```
+
+#### Các deciders khác (mention nhanh)
+
+- `ClusterRebalanceAllocationDecider` — quyết định khi nào cluster được phép rebalance (chỉ khi tất cả shard active, hoặc khi mọi primary active, v.v.)
+- `ConcurrentRebalanceAllocationDecider` — giới hạn số shard đang rebalance đồng thời
+- `ThrottlingAllocationDecider` — giới hạn số recovery đồng thời mỗi node
+- `EnableAllocationDecider` — toggle on/off allocation toàn cluster hoặc per-index
+
+### 3.3. Hot-Warm-Cold-Frozen Tier — Allocation theo vòng đời data
+
+Đây là pattern allocation phổ biến nhất cho log/time-series data:
+
+- **Hot tier** — index mới, write-heavy, search nhiều. SSD nhanh, RAM nhiều.
+- **Warm tier** — index 1-7 ngày tuổi, vẫn search nhưng ít write. SATA SSD, RAM ít hơn.
+- **Cold tier** — index > 7 ngày, hiếm search. HDD, có thể là searchable snapshots.
+- **Frozen tier** — index hàng tháng/năm tuổi, lưu trữ trên S3, chỉ load khi cần.
+
+Cách implement: gắn label cho data node:
+
+```yaml
+# Hot data node
+node.roles: ['data_hot']
+
+# Warm data node
+node.roles: ['data_warm']
+
+# Cold data node
+node.roles: ['data_cold']
+```
+
+Sau đó dùng **Index Lifecycle Management (ILM)** để tự động migrate index theo tuổi: tạo index `logs-2026.05.25` ở hot tier, sau 1 ngày → warm, sau 7 ngày → cold, sau 30 ngày → frozen, sau 90 ngày → delete. Allocation tự xảy ra dưới capo qua filter deciders.
+
+### 3.4. Manual Allocation — Khi cần override
+
+Đôi khi master tự allocate không tối ưu (hoặc bug), bạn cần manual:
+
+```
+# Tạm dừng mọi allocation (chỉ cho primaries, dùng khi rolling restart)
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.enable": "primaries"
+  }
+}
+
+# Force-allocate một shard cụ thể lên một node cụ thể
+POST /_cluster/reroute
+{
+  "commands": [
+    {
+      "allocate_replica": {
+        "index": "products",
+        "shard": 2,
+        "node":  "data-5"
+      }
+    }
+  ]
+}
+
+# Bật allocation trở lại
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.enable": null
+  }
+}
+```
+
+Diagnose vì sao một shard không allocate được dùng `_cluster/allocation/explain`:
+
+```
+POST /_cluster/allocation/explain
+{
+  "index":   "products",
+  "shard":   2,
+  "primary": false
+}
+```
+
+Response trả về `node_allocation_decisions` — một danh sách giải thích lý do tại sao mỗi node được chấp nhận hoặc bị từ chối, ví dụ: `"low disk watermark exceeded on this node"`, `"a copy of this shard is already allocated to this node"`, ...
+
+---
+
+## 4. Shard Rebalancing — Cluster tự cân bằng như thế nào?
+
+### 4.1. Rebalancing vs Allocation — Khác nhau ở đâu?
+
+Hai khái niệm dễ nhầm:
+
+- **Allocation**: quyết định **ban đầu** đặt shard ở đâu (khi tạo index, khi promote replica, ...).
+- **Rebalancing**: **di chuyển** shard giữa các node đã có sẵn để **cân bằng tải** sau khi cluster đã ổn định.
+
+Allocation là điều kiện cần — không có allocation thì shard không tồn tại. Rebalancing là điều kiện đủ — để cluster không bị skew (1 node nặng, các node khác nhẹ).
+
+### 4.2. Khi nào rebalance xảy ra?
+
+- **Node mới join cluster** — node mới sẽ "rỗng", rebalance để san đều shard từ các node khác sang
+- **Node leave cluster** — các primary shards trên node đó sẽ mất, sau khi promote replica lên làm primary, các shard còn lại có thể skew → rebalance
+- **Disk pressure** — một node vượt `high watermark` (90%), shard sẽ bị move ra
+- **Sau khi thay đổi `total_shards_per_node`** hoặc các allocation filter
+- **Manual reroute**
+
+<ExcalidrawDiagram
+  src="/elasticsearch-rebalancing.excalidraw"
+  alt="Shard Rebalancing — trước khi node mới join (3 nodes, 12 shards) và sau khi rebalance (4 nodes, 12 shards đều)"
+/>
+
+### 4.3. Cluster cân bằng bằng "Weight Function"
+
+Master tính một **weight score** cho mỗi (node, shard) cặp dựa trên 3 yếu tố:
+
+```
+weight = index_balance × (shards_of_index_on_node - avg_shards_of_index_per_node)
+       + shard_balance × (total_shards_on_node - avg_total_shards_per_node)
+       + write_load_balance × (write_load_on_node - avg_write_load)
+       + disk_usage_balance × (disk_usage_on_node - avg_disk_usage)
+```
+
+Mục tiêu: minimize **biến thiên** giữa các node. Mỗi lần tính, cluster có thể move 1 shard từ node "nặng" sang node "nhẹ" nếu việc đó giảm tổng weight. Lặp lại cho đến khi không còn move nào giảm được weight nữa — cluster cân bằng.
+
+Có thể tune mức nhạy của từng yếu tố (Elasticsearch 8 trở đi có **desired balance allocator** thay vì balanced shards allocator cũ — tính toán smarter hơn, batch nhiều moves cùng lúc):
+
+```
+PUT /_cluster/settings
+{
+  "persistent": {
+    "cluster.routing.allocation.balance.shard":     0.45,
+    "cluster.routing.allocation.balance.index":     0.55,
+    "cluster.routing.allocation.balance.threshold": 1.0
+  }
+}
+```
+
+### 4.4. Throttling — Đừng để rebalancing giết cluster
+
+Mỗi lần move shard thực ra là **copy toàn bộ dữ liệu shard từ source node sang target node** — có thể là vài chục GB. Nếu cluster rebalance đồng thời 50 shard, network và disk sẽ nghẹt → query latency tăng vọt.
+
+Vì vậy có các giới hạn:
+
+| Setting                                                          | Default | Ý nghĩa                                      |
+| ---------------------------------------------------------------- | ------- | -------------------------------------------- |
+| `cluster.routing.allocation.cluster_concurrent_rebalance`        | 2       | Số rebalance đồng thời trên toàn cluster     |
+| `cluster.routing.allocation.node_concurrent_incoming_recoveries` | 2       | Số shard đang được recover **đến** mỗi node  |
+| `cluster.routing.allocation.node_concurrent_outgoing_recoveries` | 2       | Số shard đang được copy **ra khỏi** mỗi node |
+| `indices.recovery.max_bytes_per_sec`                             | 40MB    | Bandwidth tối đa cho recovery mỗi node       |
+
+Khi thêm node mới vào cluster lớn, default settings sẽ làm rebalance rất chậm. Tăng tạm thời:
+
+```
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.node_concurrent_recoveries": 6,
+    "indices.recovery.max_bytes_per_sec":                    "200mb"
+  }
+}
+```
+
+Sau khi rebalance xong, nhớ reset về default để không hại cluster trong các sự kiện recovery khẩn cấp.
+
+### 4.5. Recovery Process — Khi shard được copy
+
+Khi một shard cần "recover" (move sang node mới, hoặc khôi phục từ node vừa restart), có 2 dạng:
+
+- **Peer recovery** — copy từ một bản đang active của shard (primary hoặc replica khác)
+- **Snapshot recovery** — copy từ snapshot trên repository (S3, NFS)
+
+Peer recovery có 2 phases:
+
+**Phase 1 — File-based copy**: Source node copy toàn bộ Lucene segment files sang target node. Source node tạm thời "freeze" segments (vẫn cho write thêm, nhưng segments hiện tại không bị delete) để đảm bảo file copy nhất quán.
+
+**Phase 2 — Translog replay**: Trong lúc phase 1 chạy, primary vẫn nhận write. Những write đó được ghi vào **translog** (write-ahead log). Sau khi phase 1 xong, target node "replay" translog để bắt kịp với primary. Cuối cùng cluster đánh dấu shard mới là active.
+
+Monitor recovery:
+
+```
+GET /_cat/recovery?v&active_only=true&h=index,shard,source_node,target_node,stage,bytes_percent,files_percent
+```
+
+Output dạng bảng (tabular):
+
+```
+index    shard source_node target_node stage bytes_percent files_percent
+products 2     data-1      data-4      index 67.3%         85.0%
+```
+
+---
+
+## 5. Cluster Coordination & Master Election
+
+Đây là phần kiến trúc tinh tế nhất của Elasticsearch — và cũng là phần mà nếu cấu hình sai sẽ dẫn đến mất dữ liệu thực sự. Hãy đi từ căn bản.
+
+### 5.1. Cluster State là gì?
+
+**Cluster state** là **single source of truth** cho mọi thứ về cluster. Đó là một object immutable chứa:
+
+- **Danh sách nodes** (id, name, attributes, roles)
+- **Index metadata** (mappings, settings, aliases) của mọi index
+- **Routing table** — mỗi shard của mỗi index đang ở node nào, đang ở state nào (started/initializing/relocating/unassigned)
+- **Cluster blocks** — read-only flags, ...
+- **Cluster settings** (transient + persistent)
+
+Mỗi cluster có duy nhất 1 active **master node** tại một thời điểm. Master là **chủ sở hữu** cluster state. Mọi thay đổi (tạo index, update settings, allocate shard, node join/leave) đều phải đi qua master, master tạo phiên bản mới của cluster state, rồi **publish** đến tất cả nodes trong cluster.
+
+```
+GET /_cluster/state
+```
+
+Response (đã rút gọn):
+
+```json
+{
+  "cluster_name": "production-search",
+  "cluster_uuid": "abc...",
+  "version":      1842,
+  "state_uuid":   "xyz...",
+  "master_node":  "kZx2nQpQQHK_pXJ8wA9G7w",
+  "nodes":    { /* 5 nodes */ },
+  "metadata": { "indices": { /* 47 indices */ } },
+  "routing_table": { /* shard placement table */ }
+}
+```
+
+`version` tăng mỗi lần state thay đổi. Nếu version trên node-A là 1842 và trên node-B là 1840, nghĩa là node-B đang "stale" — chưa apply 2 update mới nhất từ master.
+
+### 5.2. Discovery — Làm sao node tìm thấy nhau?
+
+Khi một node Elasticsearch khởi động, nó cần "discover" các node khác để join cluster. Mechanism là `discovery.seed_hosts` — danh sách IP/hostname của một số node "đã biết":
+
+```yaml
+discovery.seed_hosts:
+  - 10.0.1.5
+  - 10.0.1.6
+  - 10.0.1.7
+```
+
+Node mới sẽ contact các seed host, hỏi "ai là master hiện tại?", rồi join cluster qua master đó. Sau khi join, nó nhận full cluster state và biết toàn bộ cluster topology.
+
+Seed hosts **không cần** liệt kê tất cả master nodes — chỉ cần đủ để node mới tìm được ít nhất 1 master-eligible node đang sống. Best practice: list **tất cả các dedicated master nodes** (vì chúng ổn định, ít restart) trong seed_hosts.
+
+### 5.3. Bootstrap — Khởi tạo cluster lần đầu
+
+Khi cluster **chưa bao giờ tồn tại** (deploy mới hoàn toàn), không có master nào cả → các master-eligible nodes không biết bầu ai. Để giải quyết "chicken and egg", Elasticsearch yêu cầu một setting đặc biệt **chỉ dùng khi khởi tạo**:
+
+```yaml
+cluster.initial_master_nodes:
+  - master-1
+  - master-2
+  - master-3
+```
+
+Setting này nói: "Đây là 3 master-eligible node ban đầu, hãy bầu master từ trong này." Sau khi cluster đã có master và đã hình thành **voting configuration** lần đầu, setting này **phải được xoá đi** — nếu để lại và cluster restart trong tương lai, nó có thể gây ra inconsistent voting config.
+
+Một lỗi rất phổ biến: deploy lần đầu xong vẫn để lại `cluster.initial_master_nodes` trong config. Sau này khi scale cluster lên 5 master nodes, restart cũ vẫn dùng list 3 nodes ban đầu → election bị confused. Luôn xoá sau khi deploy thành công.
+
+### 5.4. Voting Configuration — Ai có quyền vote?
+
+Đây là khái niệm cốt lõi của **Zen2** (cluster coordination algorithm mặc định từ Elasticsearch 7.0+).
+
+**Voting configuration** là **subset của master-eligible nodes** được phép tham gia voting để elect master và commit cluster state. Một setting tiêu biểu: 5 master-eligible nodes có thể được dùng làm voting config 5 (tất cả vote), hoặc voting config 3 (chỉ 3 trong 5 vote).
+
+Quorum = **(N/2) + 1** trong đó N là kích thước voting configuration.
+
+| Voting config size | Quorum | Tolerate được mất bao nhiêu node? |
+| ------------------ | ------ | --------------------------------- |
+| 1                  | 1      | 0                                 |
+| 2                  | 2      | 0 (không có HA — mất 1 là die)    |
+| 3                  | 2      | 1                                 |
+| 4                  | 3      | 1                                 |
+| 5                  | 3      | 2                                 |
+| 6                  | 4      | 2                                 |
+| 7                  | 4      | 3                                 |
+
+**Vì sao master-eligible nodes nên là số lẻ?** Nhìn bảng: voting config 3 và 4 đều tolerate 1 failure. Nhưng config 4 đắt hơn (cần thêm 1 node), và yêu cầu quorum 3 (cao hơn). Số lẻ luôn cho ratio "tolerance / cost" tốt nhất.
+
+Elasticsearch nhận thấy điều này nên tự động **auto-shrink voting config xuống số lẻ**: nếu bạn có 4 master-eligible nodes, cluster sẽ chọn 3 trong 4 làm voting config; node thứ 4 vẫn standby, có thể được pull vào voting config nếu một node khác chết.
+
+```
+GET /_cluster/state/metadata?filter_path=metadata.cluster_coordination
+```
+
+Response:
+
+```json
+{
+  "metadata": {
+    "cluster_coordination": {
+      "term": 12,
+      "last_committed_config": ["kZx2nQ...", "8mF3xY...", "pL9wQ..."],
+      "last_accepted_config":  ["kZx2nQ...", "8mF3xY...", "pL9wQ..."],
+      "voting_config_exclusions": []
+    }
+  }
+}
+```
+
+### 5.5. Master Election — Bầu cử thế nào?
+
+Election xảy ra khi:
+
+- Cluster vừa bootstrap (chưa có master)
+- Master hiện tại chết hoặc không liên lạc được
+- Master tự nguyện "step down" (vd: khi bị partition khỏi majority)
+
+Process (đơn giản hoá từ thuật toán Raft-inspired của Zen2):
+
+1. **Term increment** — mỗi master-eligible node duy trì một số `term` (monotonic increasing). Khi nghi ngờ master hiện tại đã chết, node tăng term lên 1 và tự khai báo "tôi là ứng viên cho term mới này".
+
+2. **Pre-vote** — ứng viên gửi request "pre-vote" đến các node khác trong voting config. Nếu majority responds "OK term mới của bạn lớn hơn tôi", ứng viên proceed đến vote chính thức.
+
+3. **Vote** — ứng viên gửi vote request. Mỗi voter chỉ vote 1 lần per term, vote cho ứng viên đầu tiên có log "up-to-date" so với mình.
+
+4. **Win** — nếu ứng viên nhận majority votes (≥ quorum), nó **trở thành master mới cho term đó**. Publish ngay cluster state mới (với term mới) để mọi node biết.
+
+5. **Heartbeat** — master mới định kỳ gửi heartbeat (`cluster.fault_detection.leader_check.interval`, default 1s) để duy trì leadership.
+
+Một master election điển hình ở cluster healthy hoàn thành trong **dưới 1 giây**. Trong khoảng đó, write request có thể bị block; read vẫn hoạt động trên các shard available.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-master-election.excalidraw"
+  alt="Master Election với Voting Configuration 5 nodes — quorum = 3, một node được elected làm master"
+/>
+
+### 5.6. Cluster State Publication — 2-Phase Commit
+
+Khi master quyết định một thay đổi cluster state (vd: allocate shard mới), nó không chỉ "broadcast và quên" — mà dùng **2-phase publication** giống two-phase commit:
+
+**Phase 1 — Publish**: Master gửi diff cluster state đến tất cả nodes. Mỗi node nhận, validate, nhưng **chưa apply** — chỉ ack "tôi đã nhận và sẵn sàng apply".
+
+**Phase 2 — Commit**: Khi master nhận được ack từ **majority of voting config** (≥ quorum), nó gửi "commit" message. Lúc này tất cả node mới thực sự apply state mới.
+
+Nếu trong timeout (`cluster.publish.timeout`, default 30s) không nhận đủ ack: master **step down** (tự nguyện từ nhiệm), một election mới sẽ chạy. Đây là cơ chế bảo vệ chống lại partial network failure — nếu master không thể đảm bảo majority đồng thuận, nó tự rút lui thay vì cố apply state mà nửa cluster không thấy.
+
+Diff thay vì full state: nếu chỉ thêm 1 index, diff chỉ vài KB thay vì gửi cả cluster state vài MB. Quan trọng cho cluster lớn.
+
+### 5.7. Split-Brain — Bài toán kinh điển
+
+**Split-brain** là tình huống cluster bị "chia đôi", và **cả hai nửa đều nghĩ mình là cluster chính** với master riêng. Hệ quả: cả 2 master đều accept write → data divergence không thể reconcile. Đây là nightmare scenario cho mọi distributed system.
+
+Hình dung cluster 5 nodes ở 2 zone:
+
+- Zone A: 3 master-eligible nodes (m1, m2, m3) + 2 data nodes
+- Zone B: 2 master-eligible nodes (m4, m5) + 2 data nodes
+
+Đột nhiên network giữa 2 zone bị đứt. Nếu **không có quorum protection**:
+
+- m1, m2, m3 ở zone A thấy mất liên lạc với m4, m5 → bầu master mới (giả sử m1)
+- m4, m5 ở zone B thấy mất liên lạc với m1, m2, m3 → cũng bầu master mới (giả sử m4)
+- Client gửi write đến cả 2 zone (có DNS round-robin) → cả m1 và m4 đều accept → data của các index ghi đè lẫn nhau
+
+<ExcalidrawDiagram
+  src="/elasticsearch-split-brain-prevention.excalidraw"
+  alt="Split-Brain Prevention — partition A có 3 nodes (majority, có quorum) elect master được; partition B chỉ 2 nodes (minority), không đủ quorum, không elect được master"
+/>
+
+**Quorum-based voting** giải quyết:
+
+- Zone A có 3/5 nodes ≥ quorum 3 → **được phép** elect master → cluster A tiếp tục hoạt động bình thường
+- Zone B có 2/5 nodes < quorum 3 → **không được phép** elect master → cluster B không thể accept write (kể cả read consistency cũng có hạn chế)
+
+Một và chỉ một partition có thể "make progress". Khi network heal lại, các node ở zone B sẽ rejoin cluster, nhận cluster state mới nhất từ master ở zone A, và discard mọi state cục bộ.
+
+**Best practice:** triển khai master nodes qua **3 zones**, mỗi zone 1 master. Với 3 master và quorum 2, cluster có thể tolerate mất 1 zone hoàn toàn. **Không bao giờ** đặt 2 master ở cùng zone trong setup 3-master.
+
+### 5.8. Voting-Only Nodes — Tối ưu cho cluster lớn
+
+Trong cluster siêu lớn, cluster state có thể vài chục MB, master phải xử lý nhiều thay đổi liên tục. Bạn không muốn master phải đồng thời serve data hay search. Nhưng nếu chỉ có 3 master và 1 trong số đó bị slow (vd: do GC), cluster có thể bị block.
+
+Giải pháp: **voting-only node** — master-eligible nhưng **không bao giờ được elect làm active master**:
+
+```yaml
+node.roles: ['master', 'voting_only']
+```
+
+Voting-only nodes tham gia voting (giúp đạt quorum) nhưng không thể trở thành active master. Có thể dùng làm "tiebreaker" trong setup 2-zone (mỗi zone 1 master + 1 voting-only ở zone thứ 3 để tránh split-brain).
+
+---
+
+## 6. Fault Tolerance & High Availability
+
+### 6.1. Khi một Data Node chết
+
+Master phát hiện qua **fault detection** (mỗi 1s gửi heartbeat đến followers). Nếu 3 heartbeat liên tiếp thất bại (default `cluster.fault_detection.follower_check.retry_count: 3`), master coi node đã chết và bắt đầu recovery:
+
+1. **Mark unassigned** — mọi shard trên node chết được đánh dấu `UNASSIGNED`
+2. **Promote replicas** — với mỗi primary shard mất, master tìm một replica đang active và **promote thành primary mới**
+3. **Re-allocate replicas** — sau khi có primary mới, cần tạo thêm replica để duy trì `number_of_replicas`. Master chọn node khác để allocate (peer recovery copy từ primary mới)
+
+Trong thời gian đó:
+
+- Search vẫn hoạt động trên các shard còn copies
+- Index/update bị block trên các shard không còn primary (rất ngắn — vài giây để promote)
+- Cluster status chuyển sang `yellow` (mất replica) hoặc `red` (mất luôn primary nếu replicas = 0)
+
+### 6.2. Khi Master Node chết
+
+Master chết → cluster mất "owner" cluster state. Hệ quả:
+
+- Mọi thay đổi state (allocate shard, update mapping, ...) bị block cho đến khi có master mới
+- Existing search và index requests vẫn hoạt động (vì chúng dùng cluster state hiện đã cache)
+- Sau khi election thành công (< 1s ở cluster healthy), master mới take over
+
+Lý do cần **3 dedicated master nodes**: nếu chỉ có 1 master, mất master = cluster die. Nếu có 2, mất 1 thì không đủ quorum (cần 2/2). Phải tối thiểu 3.
+
+### 6.3. Rolling Restart Best Practices
+
+Khi cần update Elasticsearch version hoặc thay config, cần restart từng node một mà không downtime. Sequence:
+
+```
+# Bước 1: Tắt allocation tạm thời (chỉ cho phép primaries để giữ availability)
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.enable": "primaries"
+  }
+}
+
+# Bước 2: Flush + sync để giảm translog phải replay sau restart
+POST /_flush
+
+# Bước 3: Stop indexing tạm thời (optional, giảm translog growth)
+# --- Restart node-1 ---
+
+# Bước 4: Sau khi node-1 sống lại và join cluster, bật allocation
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.enable": null
+  }
+}
+
+# Bước 5: Đợi cluster status về `green` trước khi restart node tiếp theo
+GET /_cluster/health?wait_for_status=green&timeout=5m
+
+# --- Lặp lại cho node-2, node-3, ... ---
+```
+
+Tại sao tắt allocation? Vì nếu không, ngay khi node-1 leave cluster, master sẽ start tạo replica mới của các shard từng ở node-1 trên các node khác → tốn network/disk. Sau vài phút khi node-1 trở lại, master phải tốn thêm tài nguyên để "undo" và move shard về lại — vô ích.
+
+Restart master nodes cần thêm cẩn thận: restart cuối cùng node đang là active master, để giảm thiểu số lần election. Trước khi restart non-master nodes, tắt allocation. Trước khi restart master, không cần tắt allocation nhưng phải đảm bảo có ít nhất 2 master-eligible khác còn alive (đủ quorum).
+
+---
+
+## Kết bài — Những nguyên tắc design cốt lõi
+
+Quay lại bài toán search 50 triệu sản phẩm ở đầu bài. Bây giờ bạn đã thấy lý do tại sao Elasticsearch là câu trả lời:
+
+- **Index được chia thành shards** trải khắp nhiều node → 50 triệu records không nằm chung 1 disk, query có thể fan-out song song
+- **Replica đảm bảo HA** — 1 node die không làm cluster die
+- **Allocation deciders + awareness** đảm bảo replica spread qua multi-AZ — chống cả AZ failure
+- **Master + cluster state** là single source of truth cho mọi mapping/routing/settings, mọi node luôn có cùng view
+- **Quorum-based voting (Zen2)** ngăn chặn split-brain, đảm bảo dù network có chia cắt, chỉ một partition có thể make progress
+
+Sáu nguyên tắc design xuyên suốt mà bạn cần nhớ:
+
+1. **Shard count immutable** — phải estimate đúng từ đầu. 10-50GB/shard là sweet spot.
+2. **Primary và replica không bao giờ cùng node** — đây là cơ sở của HA.
+3. **Number of master-eligible nodes nên là số lẻ** — và tối thiểu 3 để có HA thực sự.
+4. **Tách dedicated master nodes ở production** — không để master phải gánh thêm data/search load.
+5. **Triển khai master qua nhiều AZ** — chỉ cách chống được zone failure.
+6. **Mọi thứ đi qua master** — cluster state changes là 2-phase commit, bảo vệ consistency.
+
+Trong các bài tiếp theo của series, chúng ta sẽ đào sâu hơn vào **storage internals** — Lucene segments, translog, refresh/flush/merge —, **search internals** — inverted index, BM25 scoring, query DSL execution —, và **production tuning** — JVM heap sizing, index lifecycle management, snapshot/restore.
+
+Còn bây giờ, hãy mở terminal lên, `curl -X GET 'localhost:9200/_cluster/state?pretty'`, và scroll qua chính cluster state mà chúng ta vừa nói cả bài viết. Mọi thứ bạn vừa đọc đều ở đó — black on white.

@@ -1,0 +1,831 @@
+---
+title: 'Elasticsearch: Deep Dive into the Distributed Architecture Behind a Search Engine Handling Petabytes of Data'
+date: '2026-05-25'
+tags: ['Backend', 'System Design', 'Elasticsearch']
+description: 'A deep dive into the distributed architecture of Elasticsearch — cluster, node types, shards and replicas, allocation and rebalancing, Zen2 master election, and how quorum-based voting prevents split-brain.'
+enableComment: true
+---
+
+# Elasticsearch: Deep Dive into the Distributed Architecture Behind a Search Engine Handling Petabytes of Data
+
+You've just been handed a search feature for an e-commerce site with 50 million products. The requirements sound simple: type "samsung galaxy s24 ultra 256gb black" and the right product must come back in under 100ms, with typo tolerance, relevance ranking, and faceted filters for price, brand, and reviews.
+
+You open PostgreSQL — where all your products already live — and write the obvious query: `SELECT * FROM products WHERE name ILIKE '%samsung galaxy s24 ultra 256gb black%'`. The result: 15 seconds, full table scan, and if the user forgets the word "ultra" it returns nothing. You try PostgreSQL Full-Text Search with `tsvector` and `ts_rank` — slightly better, but still no typo tolerance, weak stemming for non-English languages, and rebuilding the index over 50 million rows takes hours.
+
+This isn't a problem a relational database is built to solve. The fundamental issue is that **search is not just string matching** — it's a problem of **linguistic analysis + ranking + horizontal scale**. You need a system that can tokenize "samsung galaxy s24 ultra" into searchable terms, understand that "black" is likely a color attribute, rank documents by TF-IDF or BM25, and crucially — scale horizontally as data grows into hundreds of gigabytes or terabytes.
+
+This is the space **Elasticsearch** has owned for over a decade. A **distributed search and analytics engine** built on top of **Apache Lucene** (Doug Cutting's legendary inverted-index library), Elasticsearch powers not only search but log aggregation (the ELK stack), observability, security analytics, and is the backbone of systems processing **petabytes of data** at Netflix, eBay, Uber, and Wikipedia.
+
+But what makes Elasticsearch special — and what's usually hidden behind its deceptively simple REST API — is the **distributed architecture**. How does a cluster automatically rebalance data when you add a node? How does it guarantee data isn't lost when a node dies? How does it avoid **split-brain** when the network is partitioned? Why does production always require at least 3 master-eligible nodes? And why is the shard count immutable once you create an index?
+
+This post drills into those questions. We'll peel back Elasticsearch from the top — cluster and node — down through shard allocation, rebalancing, and finally the most subtle piece: **cluster coordination and master election** based on the Zen2 (Raft-inspired) algorithm used in Elasticsearch 7+.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-cluster-overview.excalidraw"
+  alt="Elasticsearch Cluster Architecture — Master/Data/Ingest/Coordinating Nodes, Index, Primary and Replica Shards"
+/>
+
+> This post focuses **100% on distributed architecture**. Topics like Lucene segment internals, the inverted index, query DSL, scoring (TF-IDF, BM25), and aggregations are covered in later posts in the series.
+
+---
+
+## 1. Cluster & Node — The Top-Level Organizational Unit
+
+### 1.1. What is a Cluster?
+
+An **Elasticsearch cluster** is a collection of Elasticsearch **nodes** (processes) working together, sharing the same `cluster.name`. That is **the entire definition** — there's no separate "master cluster process" sitting somewhere. Any node with the same `cluster.name` that can discover the others over the network automatically joins the cluster.
+
+```yaml
+# elasticsearch.yml
+cluster.name: production-search
+node.name: node-1
+network.host: 10.0.1.5
+discovery.seed_hosts: ['10.0.1.6', '10.0.1.7', '10.0.1.8']
+```
+
+The cluster is the **highest logical unit** — every index, every shard, every piece of cluster state belongs to the cluster, not to any particular node. That's why you can shut down a single node and the cluster keeps running (as long as enough replicas remain), and why adding a new node triggers automatic data redistribution.
+
+### 1.2. What is a Node?
+
+A **node** is **a single Elasticsearch process** (one JVM) running on a machine. A physical machine can host multiple nodes (each on its own port), but in production it's usually 1-to-1 — one machine, one node — to isolate CPU, RAM, and disk resources.
+
+Every node has a unique **`node.name`** within the cluster, and one or more **`node.roles`** that define its responsibilities. This is the interesting part: Elasticsearch has no concept of a "generic node" — each node is explicitly declared with the roles it takes on.
+
+### 1.3. Node Roles
+
+Before Elasticsearch 7, you configured each role with its own flag like `node.master: true`, `node.data: true`. Since 7.9+, all roles are grouped into a single `node.roles` array:
+
+```yaml
+node.roles: ['master', 'data', 'ingest']
+```
+
+According to the [official documentation](https://www.elastic.co/docs/deploy-manage/distributed-architecture/clusters-nodes-shards/node-roles), Elasticsearch supports **12 roles**:
+
+| Role                        | Full Name                        | Responsibility                                                                                                                                | When to Use                                                                                              |
+| --------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **`master`**                | Master-eligible node             | Can be elected as the active master, responsible for cluster-wide actions like creating/deleting indices, allocating shards, tracking nodes   | Run as dedicated nodes in production clusters (3 or 5 of them)                                           |
+| **`data`**                  | Generic data node                | Stores shards, handles CRUD, search, and aggregations — an "all-in-one" node that covers every data tier                                      | Small clusters, or clusters not using tiered storage                                                     |
+| **`data_content`**          | Content data node                | Stores **non-time-series content** (product catalog, article archive), optimized for query performance over ingest rate                       | Product catalogs, blog/article archives, knowledge bases — data that doesn't change much over time       |
+| **`data_hot`**              | Hot data node                    | **Entry point for new time-series data** — write-heavy and frequently queried. Needs fast disk (NVMe SSD)                                     | Required for data streams / ILM; new data always lands on the hot tier first                             |
+| **`data_warm`**             | Warm data node                   | Stores time-series data from recent weeks, queried less often but still needs interactive response times                                      | The next tier after hot, used to cut storage cost                                                        |
+| **`data_cold`**             | Cold data node                   | Optimized for storage cost over search speed; typically holds searchable snapshots or rarely-queried indices                                  | Older data than warm, queried occasionally, with higher acceptable latency                               |
+| **`data_frozen`**           | Frozen data node                 | **Partially mounts searchable snapshots** from a snapshot repository (S3, GCS) using a local disk cache                                       | Archive data that's almost never queried — cheapest possible storage since data really lives in S3       |
+| **`ingest`**                | Ingest node                      | Runs ingest pipelines to **transform / enrich documents** before indexing (parse JSON, grok patterns, geoip lookup, ...)                      | When pipelines are heavy, separate them out so they don't burn data-node CPU/heap                        |
+| **`ml`**                    | Machine learning node            | Runs ML jobs (anomaly detection, forecasting, NLP), serves ML APIs and inference requests                                                     | When using X-Pack ML or inference with loaded models                                                     |
+| **`transform`**             | Transform node                   | Runs continuous transforms (pivot/aggregate one index into another)                                                                           | When using the Transform feature to materialize aggregations                                             |
+| **`remote_cluster_client`** | Remote-eligible node             | Acts as a client connecting to remote clusters over the transport protocol                                                                    | Cross-cluster search (CCS) and cross-cluster replication (CCR)                                           |
+| **`voting_only`**           | Voting-only master-eligible node | Participates in master election and cluster state commits, but **can never be elected as active master**                                      | Tiebreaker in 2-zone setups, or when you want more voters without paying for full master nodes           |
+
+By default, when you install Elasticsearch without configuring `node.roles`, the node receives every role except `voting_only` — which you have to declare explicitly.
+
+That default is fine for dev/test on a single machine, but **absolutely not** for a large production cluster — you must separate roles clearly.
+
+#### Coordinating Node — there is no role named "coordinating"
+
+A common point of confusion: **there is no `coordinating` value in `node.roles`**. Every node in the cluster is **by default** a coordinating node — meaning it can receive requests from clients, route them to the right shards, gather the results, and return them to the client. Any node doing this is acting as a coordinating node.
+
+When you want a **dedicated coordinating-only node** (one that stores no data, takes no part in master election, and runs no ML/ingest/transform work), you declare it by **setting an empty roles array**:
+
+```yaml
+node.roles: []
+```
+
+Yes, really — an empty array means "I only coordinate, nothing else." This kind of node is useful when the cluster has heavy search load and you want to isolate the result-gathering layer from the data layer to reduce memory/CPU pressure on data nodes.
+
+### 1.4. Dedicated Roles vs Combined Roles — Why Production Needs Dedicated Master Nodes
+
+In development, one node doing everything is convenient. But large production clusters (tens of TB of data, thousands of shards) need clear role separation — especially **dedicated master-eligible nodes**.
+
+Reasons:
+
+1. **Cluster state is the single source of truth** — the master node holds and publishes cluster state to every node. Cluster state grows large (a cluster with many indices can have a state from several MB to tens of MB). Every change (creating an index, allocating a shard, a node joining/leaving) requires the master to send diffs to every node. If the master is simultaneously handling heavy queries, cluster state sync latency suffers → rebalancing slows down, allocation slows down, the cluster feels "stuck."
+
+2. **Failure isolation** — if a data node runs out of RAM from a complex query and gets OOMKilled, you've only lost one data node. But if that node was also the active master, the cluster loses its master for a few seconds during election → all writes are temporarily blocked, some reads fail.
+
+3. **Different resource sizing** — master nodes don't need much disk or RAM (cluster state caps out around a few GB), they just need stable CPU and low network latency. Data nodes are the opposite: lots of RAM (for heap + filesystem cache), fast disk (NVMe), and strong CPU.
+
+Production best practice:
+
+```
+3 dedicated master nodes  (small: 2 vCPU, 4GB RAM, 50GB disk)
+N data nodes              (large: 8+ vCPU, 32-64GB RAM, NVMe disk)
+2 coordinating nodes      (medium: 4 vCPU, 16GB RAM) — if search QPS is high
+1-2 ingest nodes          (medium) — if pipelines are heavy
+```
+
+---
+
+## 2. Index, Shard, Replica — The Distributed Data Model
+
+### 2.1. What is an Index?
+
+In Elasticsearch, an **index** is a **logical namespace** holding documents with a similar schema — roughly analogous to a "table" in a relational database, but with a far more flexible schema (schema-less, or schema-light via `_mapping`).
+
+```
+PUT /products
+{
+  "mappings": {
+    "properties": {
+      "name":       { "type": "text", "analyzer": "standard" },
+      "price":      { "type": "double" },
+      "brand":      { "type": "keyword" },
+      "created_at": { "type": "date" }
+    }
+  }
+}
+
+POST /products/_doc/sku-12345
+{
+  "name": "Samsung Galaxy S24 Ultra 256GB Black",
+  "price": 1299.99,
+  "brand": "Samsung",
+  "created_at": "2026-05-25T00:00:00Z"
+}
+```
+
+From the client's perspective, the `products` index looks like a single entity. But under the hood it's **split into multiple shards** spread across data nodes — and that's the key to Elasticsearch's scalability.
+
+### 2.2. Why Shards?
+
+Imagine you have a `logs` index holding **300GB** of logs per day. If Elasticsearch stored the entire index on a single node:
+
+- That node's disk must have > 300GB free → vertical scaling limit
+- Every query runs on one node → CPU bottleneck
+- Node dies = data is gone → no fault tolerance
+
+**Shards** solve all three. A shard is a **standalone Lucene index** — complete with its own inverted index, doc values, stored fields, and segments — and it's the **smallest unit** by which Elasticsearch scales horizontally.
+
+When you create the `logs` index with `number_of_shards: 6`, Elasticsearch creates 6 shards:
+
+```
+Index "logs" (logical, 300GB)
+  ├── Shard 0  (~50GB)  — physical on Node A
+  ├── Shard 1  (~50GB)  — physical on Node B
+  ├── Shard 2  (~50GB)  — physical on Node C
+  ├── Shard 3  (~50GB)  — physical on Node A
+  ├── Shard 4  (~50GB)  — physical on Node B
+  └── Shard 5  (~50GB)  — physical on Node C
+```
+
+Each shard is now only ~50GB, fitting easily on any node's disk. On a query, Elasticsearch fans the query out to all 6 shards in parallel → leveraging the CPU/IO of 3 nodes simultaneously. When the cluster needs more capacity, you add Node D — the cluster can move shards from A/B/C to D to rebalance.
+
+### 2.3. Primary Shard vs Replica Shard
+
+Each shard in an index actually exists in two forms: **primary** and **replica**.
+
+- **Primary shard**: holds the "source of truth" for the data. Every indexing operation (write/update/delete) must go through the primary first.
+- **Replica shard**: a copy of a specific primary shard. A replica holds the full primary data, can serve reads (search) in parallel with the primary to increase read throughput, and most importantly — is the **fallback** when the node hosting the primary dies.
+
+When creating an index, you declare the counts:
+
+```
+PUT /products
+{
+  "settings": {
+    "number_of_shards":   3,
+    "number_of_replicas": 1
+  }
+}
+```
+
+`number_of_shards: 3` means 3 primary shards (FIXED, cannot be changed after creation). `number_of_replicas: 1` means each primary has 1 replica → for a total of 3 + 3 = 6 shards in the cluster.
+
+With `3 primary + 1 replica` and 3 data nodes, the cluster distributes them following an inviolable rule: **a primary and its replica are never placed on the same node**.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-shard-replica-distribution.excalidraw"
+  alt="Shard and Replica Distribution — 3 primaries + 3 replicas across 3 data nodes, with primary and replica never on the same node"
+/>
+
+This rule is **the foundation of high availability**. When Node 1 dies, P0 (the primary of shard 0) dies with it. But R0 still exists on Node 2. The master detects that Node 1 is gone, **promotes R0 to the new primary**, and then picks the remaining Node 3 to host a new replica of shard 0. The cluster keeps working, and users never notice the incident.
+
+#### Important properties of `number_of_replicas`
+
+- Can be **changed at runtime** (no re-index required): `PUT /products/_settings { "number_of_replicas": 2 }`
+- More replicas increase read throughput (queries can run on either the primary or any replica), but **do not** increase write throughput (writes still must hit the primary first and then replicate)
+- More replicas → more disk usage. `3 primary × 2 replicas = 6 copies × ~50GB = 300GB extra`
+- A replica count of 0 means no HA — a node death means losing that shard
+
+### 2.4. Document Routing — How Elasticsearch Picks the Shard
+
+When you POST a document into an index, Elasticsearch must decide **which primary shard it goes to** (only among that index's shards). The decision uses a surprisingly simple formula:
+
+```
+shard_num = hash(_routing) % number_of_primary_shards
+```
+
+By default `_routing = _id`. So `hash(_id) % number_of_shards` picks the shard. The hash is `MurmurHash3` — fast and well-distributed.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-document-routing.excalidraw"
+  alt="Document Routing — _id hash mod number of shards determines which shard receives the document"
+/>
+
+#### Why `number_of_primary_shards` is IMMUTABLE after index creation
+
+This is one of the biggest "gotchas" new Elasticsearch developers hit. When you create an index with `number_of_shards: 3`, that 3 is **carved in stone** into the index metadata and **cannot change** for the lifetime of the index.
+
+Why? Because routing uses `% 3`. If you switched to `% 4`, every document previously indexed would map to a **different** shard than where it was originally stored. Searches would either miss documents — or worse, return partial, inconsistent results. To change the shard count, you must create a new index and **re-index all the data** (or use the `_split` / `_shrink` APIs, which are limited — `_split` only doubles, `_shrink` only reduces to a divisor of the current count).
+
+The practical consequence: **you must estimate the shard count correctly from day one**. Underestimate → when data grows to 500GB per shard, queries slow down and splitting is hard. Overestimate → you waste metadata overhead, the cluster state bloats, and you end up with "oversharding."
+
+#### Sizing rules of thumb
+
+The Elastic team recommends:
+
+- Each shard should be **10–50 GB** (search workloads) or **up to 65GB** (log/time-series)
+- A node should hold no more than **20 shards per GB of heap** (e.g., a node with 30GB heap → < 600 shards)
+- Total shards in the cluster shouldn't exceed **a few tens of thousands** (cluster state explosion)
+
+Working backwards: if you expect an index to hold **600GB** over 6 months and target **50GB per shard** → you need **12 primary shards**. With one replica = 24 shards. You need at least 4 data nodes to spread them well.
+
+#### Custom routing — Optimizing for multi-tenancy
+
+By default `_routing = _id`, but you can customize it. Consider a SaaS with 10,000 tenants where each tenant queries only its own data — you don't want to fan out to all 12 shards every time.
+
+```
+POST /orders/_doc/order-789?routing=tenant-42
+{
+  "tenant_id": "tenant-42",
+  "amount":    99.99,
+  "items":     [ /* ... */ ]
+}
+# Query with the same routing — only hits one shard
+GET /orders/_search?routing=tenant-42
+{
+  "query": {
+    "term": { "tenant_id": "tenant-42" }
+  }
+}
+```
+
+Same `routing` → same shard. A query with the `routing` parameter only scans that one shard instead of fanning out to 12. Latency drops by an order of magnitude.
+
+**Trade-off**: if some tenants are unusually large, the shard holding their data will swell relative to the others (the "hot shard" problem).
+
+---
+
+## 3. Shard Allocation — Who Decides Where a Shard Lives?
+
+### 3.1. What is Allocation?
+
+**Shard allocation** is the process by which **the master node decides which node a shard gets assigned to**. Allocation happens in these situations:
+
+- Creating a new index — primary shards need to be allocated
+- Increasing `number_of_replicas` — additional replicas need to be allocated
+- A data node joins the cluster — may trigger moving shards to the new node
+- A data node leaves the cluster — the primary shards on that node are lost; replicas of those shards get promoted to primary, and shards now missing a replica need re-allocation
+- Restoring a snapshot — shards of the restored indices need allocation
+- The `_cluster/reroute` API is called manually
+
+The allocation decision **isn't random** — it's the result of a chain of **deciders** (filters) running in sequence. Each decider answers: "Can shard X be placed on node Y?" A single `NO` is enough to reject the allocation.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-shard-allocation-deciders.excalidraw"
+  alt="Allocation Deciders — a pipeline of decision filters: SameShard, DiskThreshold, Awareness, Filter, ShardsLimit"
+/>
+
+### 3.2. The Important Allocation Deciders
+
+Elasticsearch has **18+ deciders** in its source code. These are the ones worth knowing:
+
+#### `SameShardAllocationDecider`
+
+Forbids two copies of **the same shard** (primary + replica, or two replicas) from sitting on the same node. Also forbids the same host if `cluster.routing.allocation.same_shard.host: true` is set. This is an inviolable rule that cannot be overridden.
+
+#### `DiskThresholdDecider`
+
+Decides based on the node's remaining disk capacity. There are three watermarks:
+
+| Watermark     | Default | Behavior                                                                       |
+| ------------- | ------- | ------------------------------------------------------------------------------ |
+| `low`         | 85%     | Don't allocate new shards to nodes with disk usage > 85%                       |
+| `high`        | 90%     | Start moving shards away from nodes with disk usage > 90%                      |
+| `flood_stage` | 95%     | Mark every index with a shard on this node as **read-only** (writes are blocked) |
+
+When the cluster hits flood stage, you'll see `cluster_block_exception` errors when trying to index. You have to delete data or add disk space, then unblock manually:
+
+```
+PUT /products/_settings
+{
+  "index.blocks.read_only_allow_delete": null
+}
+```
+
+#### `AwarenessAllocationDecider`
+
+Lets you label nodes by "zone" or "rack" and Elasticsearch will **try to spread replicas across different zones**. Crucial when your cluster spans multiple AWS AZs and you need to survive an AZ failure.
+
+```yaml
+# Node 1 in zone us-east-1a
+node.attr.zone: us-east-1a
+
+# Node 2 in zone us-east-1b
+node.attr.zone: us-east-1b
+```
+
+Then enable awareness:
+
+```yaml
+cluster.routing.allocation.awareness.attributes: zone
+```
+
+In **soft mode** (the default), Elasticsearch prefers spreading shards across zones, but if it can't (e.g., only one zone is alive) it allocates anyway. With **forced awareness**:
+
+```yaml
+cluster.routing.allocation.awareness.force.zone.values: us-east-1a,us-east-1b
+```
+
+Now Elasticsearch **absolutely refuses** to allocate a replica into the zone that already holds the primary. If a zone is missing, the replica stays unassigned. Trade-off: absolute HA, but if you lose a zone, capacity drops 50% and replicas may stay temporarily unassigned.
+
+#### `FilterAllocationDecider`
+
+Lets you include/exclude shards based on node attributes, at three levels: cluster, index, and per-shard. Commonly used to "drain" a node before maintenance:
+
+```
+# Drain node "data-3" — move every shard off it
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.exclude._name": "data-3"
+  }
+}
+
+# After the shards have moved (check via GET /_cat/shards), it's safe to shut down node-3
+```
+
+#### `ShardsLimitAllocationDecider`
+
+Caps the maximum number of shards of a single index on a single node. Useful when you don't want one node hosting too many shards of the same index (hot spotting):
+
+```
+PUT /products/_settings
+{
+  "index.routing.allocation.total_shards_per_node": 2
+}
+```
+
+#### Other deciders (briefly)
+
+- `ClusterRebalanceAllocationDecider` — decides when the cluster is allowed to rebalance (only when all shards are active, or only when all primaries are active, etc.)
+- `ConcurrentRebalanceAllocationDecider` — caps how many shards can rebalance concurrently
+- `ThrottlingAllocationDecider` — caps the number of concurrent recoveries per node
+- `EnableAllocationDecider` — turns allocation on/off cluster-wide or per-index
+
+### 3.3. Hot-Warm-Cold-Frozen Tiers — Allocation by Data Lifecycle
+
+This is the most common allocation pattern for log/time-series data:
+
+- **Hot tier** — new indices, write-heavy, frequently searched. Fast SSD, lots of RAM.
+- **Warm tier** — indices 1–7 days old, still searched but rarely written. SATA SSD, less RAM.
+- **Cold tier** — indices > 7 days old, rarely searched. HDD, possibly searchable snapshots.
+- **Frozen tier** — indices months or years old, stored on S3, loaded on demand.
+
+To implement, label each data node:
+
+```yaml
+# Hot data node
+node.roles: ['data_hot']
+
+# Warm data node
+node.roles: ['data_warm']
+
+# Cold data node
+node.roles: ['data_cold']
+```
+
+Then use **Index Lifecycle Management (ILM)** to automatically migrate indices by age: create `logs-2026.05.25` on hot, after 1 day → warm, after 7 days → cold, after 30 days → frozen, after 90 days → delete. Allocation happens transparently underneath via the filter deciders.
+
+### 3.4. Manual Allocation — When You Need to Override
+
+Sometimes the master's automatic allocation is suboptimal (or buggy) and you need to take over:
+
+```
+# Pause all allocation (only primaries allowed — used during rolling restart)
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.enable": "primaries"
+  }
+}
+
+# Force-allocate a specific shard onto a specific node
+POST /_cluster/reroute
+{
+  "commands": [
+    {
+      "allocate_replica": {
+        "index": "products",
+        "shard": 2,
+        "node":  "data-5"
+      }
+    }
+  ]
+}
+
+# Re-enable allocation
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.enable": null
+  }
+}
+```
+
+To diagnose why a shard isn't being allocated, use `_cluster/allocation/explain`:
+
+```
+POST /_cluster/allocation/explain
+{
+  "index":   "products",
+  "shard":   2,
+  "primary": false
+}
+```
+
+The response returns `node_allocation_decisions` — a list explaining, per node, why the allocation was accepted or rejected, e.g. `"low disk watermark exceeded on this node"`, `"a copy of this shard is already allocated to this node"`, ...
+
+---
+
+## 4. Shard Rebalancing — How the Cluster Self-Balances
+
+### 4.1. Rebalancing vs Allocation — What's the Difference?
+
+Two concepts that are easy to confuse:
+
+- **Allocation**: the **initial** decision of where to place a shard (when creating an index, promoting a replica, ...).
+- **Rebalancing**: **moving** shards between existing nodes to **balance load** once the cluster has settled.
+
+Allocation is the necessary condition — without it, the shard doesn't exist. Rebalancing is the sufficient condition — it keeps the cluster from skewing (one node heavy while others are light).
+
+### 4.2. When Does Rebalancing Happen?
+
+- **A new node joins the cluster** — the new node is "empty," so rebalance to spread shards from the other nodes to it
+- **A node leaves the cluster** — its primary shards are lost; after promoting replicas to primary, the remaining shards may be skewed → rebalance
+- **Disk pressure** — a node crosses the `high watermark` (90%) and shards get moved off it
+- **After changing `total_shards_per_node`** or other allocation filters
+- **Manual reroute**
+
+<ExcalidrawDiagram
+  src="/elasticsearch-rebalancing.excalidraw"
+  alt="Shard Rebalancing — before a new node joins (3 nodes, 12 shards) and after rebalance (4 nodes, 12 shards evenly distributed)"
+/>
+
+### 4.3. The Cluster Balances via a "Weight Function"
+
+The master computes a **weight score** for each (node, shard) pair based on multiple factors:
+
+```
+weight = index_balance × (shards_of_index_on_node - avg_shards_of_index_per_node)
+       + shard_balance × (total_shards_on_node - avg_total_shards_per_node)
+       + write_load_balance × (write_load_on_node - avg_write_load)
+       + disk_usage_balance × (disk_usage_on_node - avg_disk_usage)
+```
+
+The goal: minimize **variance** between nodes. At each step, the cluster may move one shard from a "heavy" node to a "light" node if doing so lowers total weight. Repeat until no more moves reduce weight — the cluster is balanced.
+
+You can tune the sensitivity of each factor (Elasticsearch 8+ uses a **desired balance allocator** instead of the older balanced-shards allocator — smarter computation, batching multiple moves):
+
+```
+PUT /_cluster/settings
+{
+  "persistent": {
+    "cluster.routing.allocation.balance.shard":     0.45,
+    "cluster.routing.allocation.balance.index":     0.55,
+    "cluster.routing.allocation.balance.threshold": 1.0
+  }
+}
+```
+
+### 4.4. Throttling — Don't Let Rebalancing Kill Your Cluster
+
+Each shard move is actually **copying all the shard's data from the source node to the target node** — possibly tens of GB. If the cluster rebalances 50 shards simultaneously, network and disk get saturated → query latency spikes.
+
+That's why there are limits:
+
+| Setting                                                          | Default | Meaning                                       |
+| ---------------------------------------------------------------- | ------- | --------------------------------------------- |
+| `cluster.routing.allocation.cluster_concurrent_rebalance`        | 2       | Concurrent rebalances cluster-wide            |
+| `cluster.routing.allocation.node_concurrent_incoming_recoveries` | 2       | Shards being recovered **into** each node     |
+| `cluster.routing.allocation.node_concurrent_outgoing_recoveries` | 2       | Shards being copied **out of** each node      |
+| `indices.recovery.max_bytes_per_sec`                             | 40MB    | Maximum recovery bandwidth per node           |
+
+When adding a new node to a large cluster, the default settings make rebalancing very slow. Temporarily raise them:
+
+```
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.node_concurrent_recoveries": 6,
+    "indices.recovery.max_bytes_per_sec":                    "200mb"
+  }
+}
+```
+
+After rebalancing finishes, remember to reset them so the cluster isn't damaged during a real emergency recovery.
+
+### 4.5. The Recovery Process — How Shards Get Copied
+
+When a shard needs to "recover" (move to a new node, or come back from a restart), there are two flavors:
+
+- **Peer recovery** — copy from an active copy of the shard (primary or another replica)
+- **Snapshot recovery** — copy from a snapshot in a repository (S3, NFS)
+
+Peer recovery has two phases:
+
+**Phase 1 — File-based copy**: The source node copies all Lucene segment files to the target node. The source temporarily "freezes" segments (it still accepts writes, but the existing segments aren't deleted) so the file copy is consistent.
+
+**Phase 2 — Translog replay**: While phase 1 is running, the primary keeps accepting writes. Those writes are appended to the **translog** (write-ahead log). After phase 1 completes, the target node "replays" the translog to catch up to the primary. Finally the cluster marks the new shard as active.
+
+Monitor recovery:
+
+```
+GET /_cat/recovery?v&active_only=true&h=index,shard,source_node,target_node,stage,bytes_percent,files_percent
+```
+
+Tabular output:
+
+```
+index    shard source_node target_node stage bytes_percent files_percent
+products 2     data-1      data-4      index 67.3%         85.0%
+```
+
+---
+
+## 5. Cluster Coordination & Master Election
+
+This is the most subtle part of Elasticsearch's architecture — and also the part that, if misconfigured, can cause actual data loss. Let's start from the ground up.
+
+### 5.1. What is Cluster State?
+
+**Cluster state** is the **single source of truth** for everything about the cluster. It's an immutable object containing:
+
+- **Node list** (id, name, attributes, roles)
+- **Index metadata** (mappings, settings, aliases) for every index
+- **Routing table** — for every shard of every index: which node hosts it, what state it's in (started/initializing/relocating/unassigned)
+- **Cluster blocks** — read-only flags, etc.
+- **Cluster settings** (transient + persistent)
+
+Each cluster has exactly one active **master node** at any given moment. The master is the **owner** of the cluster state. Every change (creating an index, updating settings, allocating a shard, a node joining/leaving) goes through the master, which creates a new version of the cluster state and then **publishes** it to every node in the cluster.
+
+```
+GET /_cluster/state
+```
+
+Response (truncated):
+
+```json
+{
+  "cluster_name": "production-search",
+  "cluster_uuid": "abc...",
+  "version":      1842,
+  "state_uuid":   "xyz...",
+  "master_node":  "kZx2nQpQQHK_pXJ8wA9G7w",
+  "nodes":    { /* 5 nodes */ },
+  "metadata": { "indices": { /* 47 indices */ } },
+  "routing_table": { /* shard placement table */ }
+}
+```
+
+`version` increments every time the state changes. If node A's version is 1842 and node B's is 1840, node B is "stale" — it hasn't applied the last two updates from the master.
+
+### 5.2. Discovery — How Do Nodes Find Each Other?
+
+When an Elasticsearch node starts up, it needs to "discover" other nodes to join the cluster. The mechanism is `discovery.seed_hosts` — a list of "known" node IPs/hostnames:
+
+```yaml
+discovery.seed_hosts:
+  - 10.0.1.5
+  - 10.0.1.6
+  - 10.0.1.7
+```
+
+The new node contacts the seed hosts, asks "who's the current master?", and joins the cluster through that master. After joining, it receives the full cluster state and knows the entire cluster topology.
+
+Seed hosts **don't need** to list every master node — just enough that a new node can find at least one live master-eligible node. Best practice: list **all dedicated master nodes** (since they're stable and rarely restart) in seed_hosts.
+
+### 5.3. Bootstrap — Initializing the Cluster for the First Time
+
+When the cluster **has never existed** (a brand-new deployment), there's no master at all → the master-eligible nodes don't know who to elect. To solve the "chicken and egg" problem, Elasticsearch requires a special setting **used only at initialization**:
+
+```yaml
+cluster.initial_master_nodes:
+  - master-1
+  - master-2
+  - master-3
+```
+
+This says: "Here are 3 initial master-eligible nodes, elect a master from among them." After the cluster has a master and has formed its **voting configuration** for the first time, this setting **must be removed** — if left in place, a future restart could cause an inconsistent voting config.
+
+A very common mistake: leaving `cluster.initial_master_nodes` in the config after the first deploy. Later, when you scale to 5 master nodes, restarting will still reference the original 3-node list → confused elections. Always remove it after a successful deploy.
+
+### 5.4. Voting Configuration — Who Gets to Vote?
+
+This is the core concept of **Zen2** (the cluster coordination algorithm default since Elasticsearch 7.0+).
+
+The **voting configuration** is the **subset of master-eligible nodes** allowed to vote in master elections and cluster state commits. With 5 master-eligible nodes, the voting config could be all 5, or only 3 of the 5.
+
+Quorum = **(N/2) + 1** where N is the size of the voting configuration.
+
+| Voting config size | Quorum | How many can be lost? |
+| ------------------ | ------ | --------------------- |
+| 1                  | 1      | 0                     |
+| 2                  | 2      | 0 (no HA — lose one and you're dead) |
+| 3                  | 2      | 1                     |
+| 4                  | 3      | 1                     |
+| 5                  | 3      | 2                     |
+| 6                  | 4      | 2                     |
+| 7                  | 4      | 3                     |
+
+**Why should master-eligible nodes be an odd number?** Look at the table: voting configs of size 3 and 4 both tolerate 1 failure. But 4 costs more (one extra node) and requires a higher quorum (3). Odd numbers always give the best "tolerance / cost" ratio.
+
+Elasticsearch knows this and automatically **shrinks the voting config to an odd size**: if you have 4 master-eligible nodes, the cluster picks 3 of the 4 as the voting config; the 4th stays on standby, ready to be pulled into the voting config if another node dies.
+
+```
+GET /_cluster/state/metadata?filter_path=metadata.cluster_coordination
+```
+
+Response:
+
+```json
+{
+  "metadata": {
+    "cluster_coordination": {
+      "term": 12,
+      "last_committed_config": ["kZx2nQ...", "8mF3xY...", "pL9wQ..."],
+      "last_accepted_config":  ["kZx2nQ...", "8mF3xY...", "pL9wQ..."],
+      "voting_config_exclusions": []
+    }
+  }
+}
+```
+
+### 5.5. Master Election — How the Vote Works
+
+Election happens when:
+
+- The cluster just bootstrapped (no master yet)
+- The current master died or became unreachable
+- The master voluntarily "steps down" (e.g., when partitioned away from the majority)
+
+The process (simplified from Zen2's Raft-inspired algorithm):
+
+1. **Term increment** — every master-eligible node keeps a monotonically increasing `term` number. When it suspects the current master is dead, it bumps term by 1 and declares "I'm a candidate for this new term."
+
+2. **Pre-vote** — the candidate sends a "pre-vote" request to the other nodes in the voting config. If a majority responds "OK, your new term is greater than mine," the candidate proceeds to the formal vote.
+
+3. **Vote** — the candidate sends vote requests. Each voter votes only once per term, and votes for the first candidate whose log is "up-to-date" with its own.
+
+4. **Win** — if the candidate receives majority votes (≥ quorum), it **becomes the master for that term**. It immediately publishes a new cluster state (with the new term) so every node knows.
+
+5. **Heartbeat** — the new master periodically sends heartbeats (`cluster.fault_detection.leader_check.interval`, default 1s) to maintain its leadership.
+
+A typical master election in a healthy cluster completes in **under a second**. During that window, writes may be blocked; reads still work on available shards.
+
+<ExcalidrawDiagram
+  src="/elasticsearch-master-election.excalidraw"
+  alt="Master Election with a 5-node voting configuration — quorum = 3, one node is elected as master"
+/>
+
+### 5.6. Cluster State Publication — 2-Phase Commit
+
+When the master decides on a cluster state change (e.g., allocating a new shard), it doesn't just "broadcast and forget" — it uses **2-phase publication**, similar to two-phase commit:
+
+**Phase 1 — Publish**: The master sends the cluster state diff to all nodes. Each node receives, validates, but **does not apply** — it just acks "I received and am ready to apply."
+
+**Phase 2 — Commit**: When the master has received acks from a **majority of the voting config** (≥ quorum), it sends a "commit" message. Only then do all nodes actually apply the new state.
+
+If the timeout (`cluster.publish.timeout`, default 30s) passes without enough acks: the master **steps down** voluntarily, and a new election runs. This is the safeguard against partial network failure — if the master can't guarantee majority agreement, it withdraws rather than try to apply state that half the cluster doesn't see.
+
+Diff instead of full state: if you just added one index, the diff is a few KB instead of sending a multi-MB cluster state. Critical for large clusters.
+
+### 5.7. Split-Brain — The Classic Problem
+
+**Split-brain** is when the cluster gets "cut in half" and **both halves think they're the real cluster** with their own master. Consequence: both masters accept writes → unreconcilable data divergence. This is a nightmare scenario for any distributed system.
+
+Picture a 5-node cluster across 2 zones:
+
+- Zone A: 3 master-eligible nodes (m1, m2, m3) + 2 data nodes
+- Zone B: 2 master-eligible nodes (m4, m5) + 2 data nodes
+
+Suddenly the network between the zones goes down. Without **quorum protection**:
+
+- m1, m2, m3 in zone A see m4 and m5 as unreachable → elect a new master (say m1)
+- m4, m5 in zone B see m1, m2, m3 as unreachable → also elect a new master (say m4)
+- Clients route writes to both zones (DNS round-robin) → both m1 and m4 accept them → the data of various indices gets overwritten
+
+<ExcalidrawDiagram
+  src="/elasticsearch-split-brain-prevention.excalidraw"
+  alt="Split-Brain Prevention — partition A has 3 nodes (the majority, with quorum) and can elect a master; partition B has only 2 nodes (the minority), can't reach quorum, and can't elect a master"
+/>
+
+**Quorum-based voting** solves this:
+
+- Zone A has 3/5 nodes ≥ quorum 3 → **allowed** to elect a master → cluster A keeps running normally
+- Zone B has 2/5 nodes < quorum 3 → **not allowed** to elect a master → cluster B cannot accept writes (and even read consistency has limits)
+
+One and only one partition can "make progress." When the network heals, nodes in zone B will rejoin the cluster, receive the latest cluster state from the master in zone A, and discard any local state.
+
+**Best practice:** deploy master nodes across **3 zones**, one master per zone. With 3 masters and quorum 2, the cluster can tolerate losing one zone completely. **Never** put 2 masters in the same zone in a 3-master setup.
+
+### 5.8. Voting-Only Nodes — Optimization for Large Clusters
+
+In very large clusters, cluster state can be tens of MB and the master handles constant changes. You don't want the master to also serve data or search. But if you only have 3 masters and one slows down (e.g., due to GC), the cluster can stall.
+
+The solution: **voting-only node** — master-eligible but **never elected as active master**:
+
+```yaml
+node.roles: ['master', 'voting_only']
+```
+
+Voting-only nodes participate in voting (helping reach quorum) but cannot become the active master. Useful as a "tiebreaker" in 2-zone setups (one master per zone + one voting-only in a third zone to avoid split-brain).
+
+---
+
+## 6. Fault Tolerance & High Availability
+
+### 6.1. When a Data Node Dies
+
+The master detects this via **fault detection** (sending heartbeats to followers every 1s). If 3 consecutive heartbeats fail (default `cluster.fault_detection.follower_check.retry_count: 3`), the master considers the node dead and starts recovery:
+
+1. **Mark unassigned** — every shard on the dead node is marked `UNASSIGNED`
+2. **Promote replicas** — for each lost primary shard, the master finds an active replica and **promotes it to the new primary**
+3. **Re-allocate replicas** — after promotion, the master needs to create a new replica to maintain `number_of_replicas`. It picks another node to allocate to (peer recovery copies from the new primary)
+
+During that window:
+
+- Search still works on shards with surviving copies
+- Index/update is blocked on shards that no longer have a primary (very briefly — seconds to promote)
+- Cluster status flips to `yellow` (lost replicas) or `red` (lost a primary, if replicas = 0)
+
+### 6.2. When the Master Node Dies
+
+The master dies → the cluster loses the owner of its cluster state. Consequences:
+
+- All state changes (allocate shard, update mapping, ...) are blocked until a new master appears
+- Existing search and index requests keep working (they use the already-cached cluster state)
+- After a successful election (< 1s in a healthy cluster), the new master takes over
+
+The reason you need **3 dedicated master nodes**: with only 1 master, losing it = cluster death. With 2, losing 1 = quorum failure (needs 2/2). 3 is the minimum.
+
+### 6.3. Rolling Restart Best Practices
+
+When you need to upgrade Elasticsearch versions or change configuration, you have to restart nodes one by one with zero downtime. The sequence:
+
+```
+# Step 1: Pause allocation temporarily (only primaries allowed, to preserve availability)
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.enable": "primaries"
+  }
+}
+
+# Step 2: Flush + sync to reduce the translog that must be replayed after restart
+POST /_flush
+
+# Step 3: Stop indexing temporarily (optional, limits translog growth)
+# --- Restart node-1 ---
+
+# Step 4: Once node-1 is back up and has joined the cluster, re-enable allocation
+PUT /_cluster/settings
+{
+  "transient": {
+    "cluster.routing.allocation.enable": null
+  }
+}
+
+# Step 5: Wait for cluster status to return to `green` before restarting the next node
+GET /_cluster/health?wait_for_status=green&timeout=5m
+
+# --- Repeat for node-2, node-3, ... ---
+```
+
+Why pause allocation? Because otherwise, the moment node-1 leaves the cluster, the master starts creating new replicas of its shards on other nodes → wasting network and disk. A few minutes later when node-1 returns, the master has to spend more resources to "undo" and move the shards back — pointless work.
+
+Restarting master nodes needs extra care: restart the active master last, to minimize the number of elections. Before restarting non-master nodes, pause allocation. Before restarting the master, you don't need to pause allocation, but make sure at least 2 other master-eligible nodes are alive (enough for quorum).
+
+---
+
+## Wrapping Up — The Core Design Principles
+
+Back to the original problem: searching 50 million products. By now you can see why Elasticsearch is the answer:
+
+- **Indices are split into shards** spread across many nodes → 50 million records aren't stuck on one disk, and queries can fan out in parallel
+- **Replicas provide HA** — one node dying doesn't kill the cluster
+- **Allocation deciders + awareness** spread replicas across multi-AZ — surviving even an AZ failure
+- **Master + cluster state** are the single source of truth for every mapping/routing/setting, so every node has the same view
+- **Quorum-based voting (Zen2)** prevents split-brain, ensuring that even when the network is partitioned, only one partition can make progress
+
+Six design principles that run through everything we've covered:
+
+1. **Shard count is immutable** — you must estimate correctly from day one. 10–50GB per shard is the sweet spot.
+2. **Primary and replica never on the same node** — this is the foundation of HA.
+3. **The number of master-eligible nodes should be odd** — and at least 3 for real HA.
+4. **Use dedicated master nodes in production** — don't let the master also serve data or search load.
+5. **Deploy masters across multiple AZs** — the only real defense against zone failure.
+6. **Everything flows through the master** — cluster state changes use 2-phase commit to protect consistency.
+
+In the next posts in this series, we'll go deeper into **storage internals** — Lucene segments, translog, refresh/flush/merge —, **search internals** — inverted index, BM25 scoring, query DSL execution —, and **production tuning** — JVM heap sizing, index lifecycle management, snapshot/restore.
+
+For now, open a terminal, run `curl -X GET 'localhost:9200/_cluster/state?pretty'`, and scroll through the very cluster state we've been discussing this entire post. Everything you just read is right there — black on white.
