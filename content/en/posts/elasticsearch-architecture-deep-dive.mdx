@@ -234,8 +234,11 @@ The practical consequence: **you must estimate the shard count correctly from da
 The Elastic team recommends:
 
 - Each shard should be **10–50 GB** (search workloads) or **up to 65GB** (log/time-series)
-- A node should hold no more than **20 shards per GB of heap** (e.g., a node with 30GB heap → < 600 shards)
-- Total shards in the cluster shouldn't exceed **a few tens of thousands** (cluster state explosion)
+- **Up to ~200 million documents per shard** — beyond this, search performance and relevance scoring degrade due to intrinsic Lucene segment limits
+- **Up to ~1,000 shards per non-frozen data node** (new rule from Elasticsearch 8.3+; replaces the deprecated "20 shards per GB of heap" guideline)
+- Total shards in the cluster shouldn't exceed **a few tens of thousands** — a bloated cluster state slows down publication to every node
+
+**Why was the old rule replaced?** The "20 shards/GB heap" rule assumed a linear relationship between heap and per-shard overhead, but in practice overhead depends heavily on mapping size, field count, and search patterns. Starting with ES 8.3, Elastic switched to a per-node cap — easier to enforce and more predictable. You can check the actual number via `GET /_nodes/stats/indices` (look at `shard_count` per node).
 
 Working backwards: if you expect an index to hold **600GB** over 6 months and target **50GB per shard** → you need **12 primary shards**. With one replica = 24 shards. You need at least 4 data nodes to spread them well.
 
@@ -617,6 +620,8 @@ cluster.initial_master_nodes:
 
 This says: "Here are 3 initial master-eligible nodes, elect a master from among them." After the cluster has a master and has formed its **voting configuration** for the first time, this setting **must be removed** — if left in place, a future restart could cause an inconsistent voting config.
 
+**A note on the bootstrap quorum**: the cluster only needs a **quorum** of the nodes in `cluster.initial_master_nodes` to be online for bootstrap to succeed — e.g. with a list of 3 nodes, only 2 need to be up at the same time. Once the voting configuration has been formed for the first time, the remaining nodes can join later as normal. This setting **does not require every listed node to be online simultaneously**; it only constrains the set of nodes allowed in the initial bootstrap round.
+
 A very common mistake: leaving `cluster.initial_master_nodes` in the config after the first deploy. Later, when you scale to 5 master nodes, restarting will still reference the original 3-node list → confused elections. Always remove it after a successful deploy.
 
 ### 5.4. Voting Configuration — Who Gets to Vote?
@@ -674,7 +679,7 @@ The process (simplified from Zen2's Raft-inspired algorithm):
 
 2. **Pre-vote** — the candidate sends a "pre-vote" request to the other nodes in the voting config. If a majority responds "OK, your new term is greater than mine," the candidate proceeds to the formal vote.
 
-3. **Vote** — the candidate sends vote requests. Each voter votes only once per term, and votes for the first candidate whose log is "up-to-date" with its own.
+3. **Vote** — the candidate sends vote requests, including its current `term` and the latest **cluster state version** it knows about. Each voter votes only once per term, and only votes for a candidate whose **cluster state version ≥ the voter's own version** — ensuring the new master will not lose state that was previously committed. Unlike vanilla Raft (which uses a replicated log), Zen2 publishes cluster state directly via 2-phase commit, so it does not need a separate log replication mechanism; "up-to-date" here means **state version**, not log index.
 
 4. **Win** — if the candidate receives majority votes (≥ quorum), it **becomes the master for that term**. It immediately publishes a new cluster state (with the new term) so every node knows.
 
@@ -739,71 +744,6 @@ node.roles: ['master', 'voting_only']
 ```
 
 Voting-only nodes participate in voting (helping reach quorum) but cannot become the active master. Useful as a "tiebreaker" in 2-zone setups (one master per zone + one voting-only in a third zone to avoid split-brain).
-
----
-
-## 6. Fault Tolerance & High Availability
-
-### 6.1. When a Data Node Dies
-
-The master detects this via **fault detection** (sending heartbeats to followers every 1s). If 3 consecutive heartbeats fail (default `cluster.fault_detection.follower_check.retry_count: 3`), the master considers the node dead and starts recovery:
-
-1. **Mark unassigned** — every shard on the dead node is marked `UNASSIGNED`
-2. **Promote replicas** — for each lost primary shard, the master finds an active replica and **promotes it to the new primary**
-3. **Re-allocate replicas** — after promotion, the master needs to create a new replica to maintain `number_of_replicas`. It picks another node to allocate to (peer recovery copies from the new primary)
-
-During that window:
-
-- Search still works on shards with surviving copies
-- Index/update is blocked on shards that no longer have a primary (very briefly — seconds to promote)
-- Cluster status flips to `yellow` (lost replicas) or `red` (lost a primary, if replicas = 0)
-
-### 6.2. When the Master Node Dies
-
-The master dies → the cluster loses the owner of its cluster state. Consequences:
-
-- All state changes (allocate shard, update mapping, ...) are blocked until a new master appears
-- Existing search and index requests keep working (they use the already-cached cluster state)
-- After a successful election (< 1s in a healthy cluster), the new master takes over
-
-The reason you need **3 dedicated master nodes**: with only 1 master, losing it = cluster death. With 2, losing 1 = quorum failure (needs 2/2). 3 is the minimum.
-
-### 6.3. Rolling Restart Best Practices
-
-When you need to upgrade Elasticsearch versions or change configuration, you have to restart nodes one by one with zero downtime. The sequence:
-
-```
-# Step 1: Pause allocation temporarily (only primaries allowed, to preserve availability)
-PUT /_cluster/settings
-{
-  "transient": {
-    "cluster.routing.allocation.enable": "primaries"
-  }
-}
-
-# Step 2: Flush + sync to reduce the translog that must be replayed after restart
-POST /_flush
-
-# Step 3: Stop indexing temporarily (optional, limits translog growth)
-# --- Restart node-1 ---
-
-# Step 4: Once node-1 is back up and has joined the cluster, re-enable allocation
-PUT /_cluster/settings
-{
-  "transient": {
-    "cluster.routing.allocation.enable": null
-  }
-}
-
-# Step 5: Wait for cluster status to return to `green` before restarting the next node
-GET /_cluster/health?wait_for_status=green&timeout=5m
-
-# --- Repeat for node-2, node-3, ... ---
-```
-
-Why pause allocation? Because otherwise, the moment node-1 leaves the cluster, the master starts creating new replicas of its shards on other nodes → wasting network and disk. A few minutes later when node-1 returns, the master has to spend more resources to "undo" and move the shards back — pointless work.
-
-Restarting master nodes needs extra care: restart the active master last, to minimize the number of elections. Before restarting non-master nodes, pause allocation. Before restarting the master, you don't need to pause allocation, but make sure at least 2 other master-eligible nodes are alive (enough for quorum).
 
 ---
 

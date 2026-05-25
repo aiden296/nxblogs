@@ -234,8 +234,11 @@ Hệ quả thực tế: **phải estimate đúng shard count ngay từ đầu**.
 Elastic team đề xuất:
 
 - Mỗi shard nên ở mức **10-50 GB** (search workload) hoặc **lên đến 65GB** (log/time-series)
-- Mỗi node không nên giữ quá **20 shards mỗi GB heap** (vd: node 30GB heap → < 600 shards)
-- Tổng số shard trong cluster không nên vượt quá **vài chục nghìn** (cluster state explosion)
+- **Tối đa ~200 triệu documents per shard** — vượt ngưỡng này, search performance và relevance scoring bắt đầu xuống cấp do giới hạn nội tại của Lucene segment
+- **Tối đa ~1,000 shards per non-frozen data node** (rule mới từ Elasticsearch 8.3+; thay cho rule cũ "20 shards mỗi GB heap" đã bị deprecated)
+- Tổng số shard trong cluster không nên vượt quá **vài chục nghìn** — cluster state phình to làm chậm publication tới mọi node
+
+**Vì sao rule cũ bị thay?** Rule "20 shards/GB heap" giả định một quan hệ tuyến tính giữa heap và overhead per shard, nhưng thực tế overhead phụ thuộc nhiều vào mapping size, field count và search pattern. Từ ES 8.3, Elastic chuyển sang giới hạn theo node để dễ enforce và predictable hơn — bạn có thể check con số thực tế qua `GET /_nodes/stats/indices` (xem `shard_count` mỗi node).
 
 Tính ngược: nếu bạn dự đoán index sẽ lưu **600GB** trong 6 tháng, target shard size **50GB** → cần **12 primary shards**. Cộng thêm replica = 24 shards. Cần ít nhất 4 data node để spread tốt.
 
@@ -617,6 +620,8 @@ cluster.initial_master_nodes:
 
 Setting này nói: "Đây là 3 master-eligible node ban đầu, hãy bầu master từ trong này." Sau khi cluster đã có master và đã hình thành **voting configuration** lần đầu, setting này **phải được xoá đi** — nếu để lại và cluster restart trong tương lai, nó có thể gây ra inconsistent voting config.
 
+**Lưu ý về quorum khi bootstrap**: cluster chỉ cần **quorum** của các node trong `cluster.initial_master_nodes` start lên là đã có thể bootstrap thành công — ví dụ với list 3 nodes, chỉ cần 2 nodes online cùng lúc là đủ. Sau khi voting configuration được hình thành lần đầu, các node còn lại có thể join sau như bình thường. Setting này **không bắt buộc tất cả node phải online cùng lúc**, mà chỉ ràng buộc tập hợp node được phép tham gia round bootstrap đầu tiên.
+
 Một lỗi rất phổ biến: deploy lần đầu xong vẫn để lại `cluster.initial_master_nodes` trong config. Sau này khi scale cluster lên 5 master nodes, restart cũ vẫn dùng list 3 nodes ban đầu → election bị confused. Luôn xoá sau khi deploy thành công.
 
 ### 5.4. Voting Configuration — Ai có quyền vote?
@@ -674,7 +679,7 @@ Process (đơn giản hoá từ thuật toán Raft-inspired của Zen2):
 
 2. **Pre-vote** — ứng viên gửi request "pre-vote" đến các node khác trong voting config. Nếu majority responds "OK term mới của bạn lớn hơn tôi", ứng viên proceed đến vote chính thức.
 
-3. **Vote** — ứng viên gửi vote request. Mỗi voter chỉ vote 1 lần per term, vote cho ứng viên đầu tiên có log "up-to-date" so với mình.
+3. **Vote** — ứng viên gửi vote request kèm theo `term` hiện tại và **cluster state version** cuối cùng nó biết. Mỗi voter chỉ vote 1 lần per term, và chỉ vote cho ứng viên có **cluster state version ≥ version của voter** — đảm bảo master mới không bị mất state đã commit trước đó. Khác với Raft thuần (vốn dùng replicated log), Zen2 publish cluster state trực tiếp qua 2-phase commit nên không cần log replication riêng; "up-to-date" ở đây nghĩa là **state version**, không phải log index.
 
 4. **Win** — nếu ứng viên nhận majority votes (≥ quorum), nó **trở thành master mới cho term đó**. Publish ngay cluster state mới (với term mới) để mọi node biết.
 
@@ -739,71 +744,6 @@ node.roles: ['master', 'voting_only']
 ```
 
 Voting-only nodes tham gia voting (giúp đạt quorum) nhưng không thể trở thành active master. Có thể dùng làm "tiebreaker" trong setup 2-zone (mỗi zone 1 master + 1 voting-only ở zone thứ 3 để tránh split-brain).
-
----
-
-## 6. Fault Tolerance & High Availability
-
-### 6.1. Khi một Data Node chết
-
-Master phát hiện qua **fault detection** (mỗi 1s gửi heartbeat đến followers). Nếu 3 heartbeat liên tiếp thất bại (default `cluster.fault_detection.follower_check.retry_count: 3`), master coi node đã chết và bắt đầu recovery:
-
-1. **Mark unassigned** — mọi shard trên node chết được đánh dấu `UNASSIGNED`
-2. **Promote replicas** — với mỗi primary shard mất, master tìm một replica đang active và **promote thành primary mới**
-3. **Re-allocate replicas** — sau khi có primary mới, cần tạo thêm replica để duy trì `number_of_replicas`. Master chọn node khác để allocate (peer recovery copy từ primary mới)
-
-Trong thời gian đó:
-
-- Search vẫn hoạt động trên các shard còn copies
-- Index/update bị block trên các shard không còn primary (rất ngắn — vài giây để promote)
-- Cluster status chuyển sang `yellow` (mất replica) hoặc `red` (mất luôn primary nếu replicas = 0)
-
-### 6.2. Khi Master Node chết
-
-Master chết → cluster mất "owner" cluster state. Hệ quả:
-
-- Mọi thay đổi state (allocate shard, update mapping, ...) bị block cho đến khi có master mới
-- Existing search và index requests vẫn hoạt động (vì chúng dùng cluster state hiện đã cache)
-- Sau khi election thành công (< 1s ở cluster healthy), master mới take over
-
-Lý do cần **3 dedicated master nodes**: nếu chỉ có 1 master, mất master = cluster die. Nếu có 2, mất 1 thì không đủ quorum (cần 2/2). Phải tối thiểu 3.
-
-### 6.3. Rolling Restart Best Practices
-
-Khi cần update Elasticsearch version hoặc thay config, cần restart từng node một mà không downtime. Sequence:
-
-```
-# Bước 1: Tắt allocation tạm thời (chỉ cho phép primaries để giữ availability)
-PUT /_cluster/settings
-{
-  "transient": {
-    "cluster.routing.allocation.enable": "primaries"
-  }
-}
-
-# Bước 2: Flush + sync để giảm translog phải replay sau restart
-POST /_flush
-
-# Bước 3: Stop indexing tạm thời (optional, giảm translog growth)
-# --- Restart node-1 ---
-
-# Bước 4: Sau khi node-1 sống lại và join cluster, bật allocation
-PUT /_cluster/settings
-{
-  "transient": {
-    "cluster.routing.allocation.enable": null
-  }
-}
-
-# Bước 5: Đợi cluster status về `green` trước khi restart node tiếp theo
-GET /_cluster/health?wait_for_status=green&timeout=5m
-
-# --- Lặp lại cho node-2, node-3, ... ---
-```
-
-Tại sao tắt allocation? Vì nếu không, ngay khi node-1 leave cluster, master sẽ start tạo replica mới của các shard từng ở node-1 trên các node khác → tốn network/disk. Sau vài phút khi node-1 trở lại, master phải tốn thêm tài nguyên để "undo" và move shard về lại — vô ích.
-
-Restart master nodes cần thêm cẩn thận: restart cuối cùng node đang là active master, để giảm thiểu số lần election. Trước khi restart non-master nodes, tắt allocation. Trước khi restart master, không cần tắt allocation nhưng phải đảm bảo có ít nhất 2 master-eligible khác còn alive (đủ quorum).
 
 ---
 
