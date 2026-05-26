@@ -1,0 +1,440 @@
+---
+title: 'Deep Dive: PostgreSQL Partitioning — Khi 1 Bảng Lớn Trở Thành Nhiều Bảng Nhỏ'
+date: '2026-05-26'
+tags: ['Database']
+description: 'PostgreSQL partitioning từ A đến Z — declarative partitioning, RANGE/LIST/HASH types, cơ chế partition pruning, và 2 use cases thực tế: time-series và multi-tenant SaaS.'
+enableComment: true
+---
+
+# Deep Dive: PostgreSQL Partitioning — Khi 1 Bảng Lớn Trở Thành Nhiều Bảng Nhỏ
+
+Có một thời điểm trong vòng đời của hầu hết hệ thống production: bảng `events` (hoặc `logs`, hoặc `orders`) chạm mốc nửa tỷ dòng. Mọi thứ bắt đầu trở nên... khó chịu. Query trả về sau 30 giây thay vì 30 mili-giây. `VACUUM` chạy 6 tiếng đồng hồ và vẫn chưa xong. Bạn muốn xoá dữ liệu cũ hơn 12 tháng để giải phóng dung lượng — nhưng câu `DELETE` lại sinh ra hàng triệu **dead tuples** (xem [Deep Dive về Table Bloat](/posts/table-bloat)) khiến tình hình tệ hơn lúc chưa xoá. Indexes phình to lên 50GB. Backup mất cả đêm.
+
+Câu trả lời "đơn giản nhất" — tăng dung lượng ổ đĩa, nâng instance RAM — chỉ giúp bạn câu giờ. Vấn đề gốc rễ nằm ở chỗ: **một bảng đơn lẻ không phải là cấu trúc phù hợp để chứa nửa tỷ dòng dữ liệu có vòng đời rõ ràng**. Đây chính là lúc cần đến **Partitioning** — kỹ thuật chia một bảng logic thành nhiều bảng vật lý nhỏ hơn để PostgreSQL có thể quản lý chúng một cách hiệu quả hơn.
+
+<ExcalidrawDiagram src="/postgresql-partitioning-hero.excalidraw" alt="One logical table, many physical partitions" />
+
+Bài viết này là một deep dive về cách PostgreSQL partitioning hoạt động ở mức cơ chế, các chiến lược partition khác nhau, và 2 use cases thực tế mà bạn sẽ gặp khi làm việc với hệ thống có dữ liệu lớn.
+
+## 1. Partitioning là gì?
+
+**Partitioning** là kỹ thuật chia một bảng logic (logical table) thành nhiều bảng vật lý nhỏ hơn (gọi là **partitions** hoặc **child tables**) dựa trên giá trị của một hoặc nhiều cột — gọi là **partition key**.
+
+Khẩu hiệu cốt lõi: **"Single logical table, multiple physical tables"**. Application code không cần biết bảng đã được partition hay chưa. Cùng một câu `SELECT * FROM events WHERE ...` vẫn chạy đúng — chỉ khác là PostgreSQL tự động định tuyến nó đến đúng các partitions cần thiết, thay vì quét toàn bộ một bảng monolithic 500GB.
+
+### Một chút lịch sử
+
+Trước PostgreSQL 10, partitioning được làm bằng **table inheritance**: bạn tạo một bảng "cha" (parent) trống và nhiều bảng "con" (child) kế thừa từ nó, kèm theo `CHECK constraint` để giới hạn dữ liệu mỗi child, và **trigger** thủ công để định tuyến `INSERT` đến đúng child. Phương pháp này hoạt động được, nhưng tốn công, dễ sai, và performance không tối ưu vì PostgreSQL không hiểu được "ý đồ" partition của bạn.
+
+Từ PostgreSQL 10 trở đi, **declarative partitioning** được giới thiệu như một first-class feature. Bạn chỉ cần khai báo strategy bằng cú pháp `PARTITION BY`, và PostgreSQL tự xử lý phần routing, planning, pruning. Toàn bộ bài viết này tập trung vào declarative partitioning vì đây là cách làm hiện đại, ngắn gọn và được khuyến nghị.
+
+### Partitioning vs Sharding — đừng nhầm
+
+Đây là hai khái niệm khác nhau dù đôi khi được dùng lẫn lộn:
+- **Partitioning**: Tất cả các partitions vẫn nằm trong **cùng một PostgreSQL instance**. Bạn vẫn dùng một connection string, một transaction có thể đụng nhiều partitions.
+- **Sharding**: Các shards nằm trên **nhiều instances/server khác nhau**, thường có một layer routing ở trên (Citus, pg_shard, application-level routing). Phức tạp hơn nhiều và là một câu chuyện riêng.
+
+Bài viết này nói về partitioning. Một khi bạn đã partition một bảng đến giới hạn của 1 server, bước tiếp theo mới là sharding.
+
+## 2. Cơ chế: PostgreSQL tổ chức partitioned table như thế nào?
+
+<ExcalidrawDiagram src="/postgresql-partitioning-anatomy.excalidraw" alt="Anatomy of a partitioned table — parent metadata + child physical tables" />
+
+Khi bạn tạo một partitioned table, PostgreSQL thực sự tạo ra hai loại đối tượng rất khác nhau:
+
+### Parent table — chỉ là metadata
+
+**Parent table** (bảng cha) là bảng bạn khai báo với `PARTITION BY`. Một điểm quan trọng và thường bị hiểu nhầm: **parent table không chứa bất kỳ dòng dữ liệu nào**. Nó chỉ chứa metadata:
+- Schema (tên cột, kiểu dữ liệu, constraints chung).
+- **Partition strategy** (RANGE, LIST, hoặc HASH).
+- **Partition key** (cột nào dùng để routing).
+- Danh sách các child partitions hiện có và bounds của từng cái.
+
+Bạn không thể `INSERT` trực tiếp vào parent table dưới dạng vật lý — mọi INSERT đều bị PostgreSQL tự động chuyển hướng đến child partition phù hợp.
+
+### Child partitions — physical tables độc lập
+
+Mỗi **child partition** là một bảng vật lý hoàn chỉnh, đầy đủ tính năng. Nó có:
+- **Heap file** (file chứa data thực sự trên ổ đĩa) riêng.
+- **Indexes** riêng — index `CREATE` trên parent sẽ được propagate xuống tất cả children, nhưng mỗi child có index B-tree độc lập, lưu trữ độc lập.
+- **Statistics** riêng (số rows, distribution, etc.) — `ANALYZE` chạy độc lập trên mỗi child.
+- **Visibility map**, **free space map**, **TOAST tables** riêng.
+
+Hệ quả quan trọng: **mỗi partition là một "mini-table"** với toàn bộ cơ chế MVCC, VACUUM, REINDEX của riêng nó. Một `VACUUM` chạy trên `events_2026_03` không động đến `events_2026_04`. Đây chính là lý do partitioning giúp giảm tải maintenance overhead — autovacuum chạy theo scope nhỏ, không phải toàn bộ bảng monolithic.
+
+### Partition routing
+
+Khi bạn `INSERT INTO events VALUES (1, '2026-03-15', ...)`:
+1. PostgreSQL nhận INSERT vào parent table.
+2. Đọc giá trị của partition key trong row (`created_at = '2026-03-15'`).
+3. Tra cứu metadata để tìm child partition có bounds chứa giá trị đó (ở đây là `events_2026_03`, bounds `[2026-03-01, 2026-04-01)`).
+4. Định tuyến INSERT đến child partition đó.
+
+Nếu giá trị partition key không thuộc bất kỳ partition nào, PostgreSQL sẽ:
+- Ném lỗi `no partition of relation "events" found for row` (nếu không có DEFAULT partition).
+- Hoặc đẩy row vào **DEFAULT partition** (nếu có).
+
+### SQL tối thiểu
+
+Để dễ hình dung, đây là ví dụ tạo một partitioned table RANGE đơn giản nhất:
+
+```sql
+CREATE TABLE events (
+  id         BIGSERIAL,
+  user_id    BIGINT NOT NULL,
+  event_type TEXT   NOT NULL,
+  payload    JSONB,
+  created_at TIMESTAMPTZ NOT NULL
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE events_2026_01 PARTITION OF events
+  FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
+
+CREATE TABLE events_2026_02 PARTITION OF events
+  FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
+
+CREATE TABLE events_2026_03 PARTITION OF events
+  FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
+```
+
+### `PARTITION BY` không tự sinh partition — bạn phải tạo thủ công
+
+Một điểm rất quan trọng và dễ bị bỏ sót: **`CREATE TABLE ... PARTITION BY` một mình là chưa đủ**. Sau câu lệnh đó, bạn có một parent table "rỗng" với 0 child partitions. Mọi `INSERT` sẽ thất bại với lỗi:
+
+```
+ERROR: no partition of relation "events" found for row
+```
+
+Bạn **phải explicit tạo từng partition** bằng `CREATE TABLE ... PARTITION OF ... FOR VALUES ...` như 3 câu ở trên. Tại sao PostgreSQL không tự sinh partition? Vì nó không biết được logic bạn muốn — monthly hay weekly? 4 hash buckets hay 16? Đây là design choice: core cung cấp primitive, để công cụ ngoài lo automation.
+
+Hệ quả thực tế: với time-series partition theo tháng, **mỗi tháng mới đến bạn phải tạo trước partition cho tháng đó**, nếu không production sẽ down ngay 00:00:01 ngày mùng 1. Đây là một failure mode kinh điển khi mới làm partitioning. Có 3 cách giải quyết:
+
+1. **Cron job tự viết** chạy ngày mùng 1 hàng tháng, `CREATE TABLE IF NOT EXISTS events_YYYY_MM PARTITION OF ...`. Đơn giản, không cần extension.
+2. **`pg_cron` extension** để chạy cron trực tiếp trong Postgres.
+3. **`pg_partman` extension** — chuyên nghiệp nhất: tự pre-create N tháng tới, tự drop partitions cũ theo retention policy. Setup chuẩn cho production system.
+
+Pattern an toàn: dù chọn cách nào, luôn pre-create **ít nhất 2-3 tháng buffer** + **alert nếu cron fail**. Sẽ quay lại chi tiết hơn ở Section 5.1 (Time-series use case).
+
+## 3. Ba chiến lược partitioning
+
+PostgreSQL hỗ trợ 3 partition strategies. Việc chọn đúng strategy phụ thuộc vào **bản chất của dữ liệu** và **cách bạn truy vấn nó**.
+
+<ExcalidrawDiagram src="/postgresql-partitioning-types.excalidraw" alt="Three partitioning strategies — RANGE, LIST, HASH side by side" />
+
+### 3.1 RANGE
+
+**RANGE partitioning** chia dữ liệu thành các khoảng giá trị liên tục (continuous ranges). Strategy này phù hợp khi partition key có **thứ tự tự nhiên** — điển hình là `date`, `timestamp`, hoặc một numeric range nào đó (như ID đơn hàng).
+
+Use case kinh điển: **time-series data**. Bạn partition theo tháng (monthly), tuần (weekly), hoặc thậm chí ngày (daily) tuỳ theo volume.
+
+```sql
+CREATE TABLE application_logs (
+  id          BIGSERIAL,
+  service     TEXT NOT NULL,
+  level       TEXT NOT NULL,
+  message     TEXT,
+  created_at  TIMESTAMPTZ NOT NULL
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE application_logs_2026_03 PARTITION OF application_logs
+  FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
+
+CREATE TABLE application_logs_2026_04 PARTITION OF application_logs
+  FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
+
+CREATE TABLE application_logs_2026_05 PARTITION OF application_logs
+  FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
+```
+
+**Multi-column RANGE**: bạn có thể partition theo nhiều cột:
+
+```sql
+PARTITION BY RANGE (year, month)
+```
+
+Tuy nhiên, multi-column range hiếm khi cần thiết — một single column timestamp đã đủ cho 99% use cases time-series.
+
+**DEFAULT partition cho RANGE**:
+
+```sql
+CREATE TABLE application_logs_default PARTITION OF application_logs DEFAULT;
+```
+
+DEFAULT partition là nơi "trú ẩn" cho các rows không khớp với bất kỳ partition cụ thể nào. Có hai trường phái:
+- **Có DEFAULT partition**: An toàn — INSERT không bao giờ thất bại. Nhược điểm: bạn dễ "quên" tạo partition mới cho tháng tới, đến khi nhận ra thì rất nhiều rows đã rơi vào DEFAULT.
+- **Không có DEFAULT partition**: INSERT sẽ fail nếu chưa có partition phù hợp. Nhược điểm là cần cron job đảm bảo luôn pre-create partitions trước. Ưu điểm là bạn nhận lỗi ngay nếu cron job hỏng, thay vì âm thầm tích tụ rows vào DEFAULT.
+
+Hầu hết hệ thống production nghiêm túc sẽ không tạo default partition. Họ chủ động tạo các partition với cronjob (sử dụng `pg_partman` để tự động hoá)
+
+### 3.2 LIST
+
+**LIST partitioning** chia dữ liệu theo các giá trị rời rạc (discrete values) — phù hợp khi partition key là enum, category, hoặc một bộ giá trị cố định và biết trước.
+
+Use case điển hình: phân chia dữ liệu theo **region**, **country**, **status**, hoặc **tenant tier**.
+
+```sql
+CREATE TABLE orders (
+  id          BIGSERIAL,
+  region      TEXT NOT NULL,
+  customer_id BIGINT NOT NULL,
+  amount      NUMERIC(10,2) NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+) PARTITION BY LIST (region);
+
+CREATE TABLE orders_apac PARTITION OF orders FOR VALUES IN ('APAC');
+CREATE TABLE orders_emea PARTITION OF orders FOR VALUES IN ('EMEA');
+CREATE TABLE orders_amer PARTITION OF orders FOR VALUES IN ('AMER');
+CREATE TABLE orders_other PARTITION OF orders DEFAULT;
+```
+
+Một partition có thể nhận nhiều giá trị:
+
+```sql
+CREATE TABLE orders_americas PARTITION OF orders
+  FOR VALUES IN ('AMER', 'LATAM');
+```
+
+LIST partitioning phù hợp nhất khi:
+- Tập giá trị **cố định và biết trước** (không phải sinh ra động).
+- Số lượng category **ít** (dưới vài chục). Nếu bạn có hàng nghìn category, HASH partitioning là lựa chọn tốt hơn.
+- Bạn thường xuyên query theo category đó (để partition pruning phát huy).
+
+Một anti-pattern cần tránh: dùng LIST cho cột có cardinality cao (như `user_id`) — vì bạn sẽ phải tạo hàng triệu partitions, hệ thống không thể quản lý được. Cho cases như vậy, dùng HASH.
+
+### 3.3 HASH
+
+**HASH partitioning** dùng hash function lên partition key, sau đó dùng `MODULUS` chia cho số partitions để xác định partition nào. Nó phân bố dữ liệu **đều** giữa các partitions mà không cần partition key có ý nghĩa thứ tự hay phân loại tự nhiên.
+
+Use case: khi bạn cần chia tải đều mà không có partition key tự nhiên dạng range/list. Ví dụ: bảng `user_sessions` với hàng triệu users, không có pattern truy cập "theo tháng" hay "theo region" rõ ràng — bạn chỉ cần spread đều ra.
+
+```sql
+CREATE TABLE user_sessions (
+  id         BIGSERIAL,
+  user_id    BIGINT NOT NULL,
+  session    TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+) PARTITION BY HASH (user_id);
+
+CREATE TABLE user_sessions_0 PARTITION OF user_sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+
+CREATE TABLE user_sessions_1 PARTITION OF user_sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+
+CREATE TABLE user_sessions_2 PARTITION OF user_sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+
+CREATE TABLE user_sessions_3 PARTITION OF user_sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+```
+
+Mỗi row sẽ thuộc partition `i` nếu `hash(user_id) mod 4 == i`. Hash function của PostgreSQL được thiết kế để phân bố đều — bạn sẽ có khoảng ~25% rows ở mỗi partition.
+
+**Trade-off của HASH**:
+- Ưu điểm: **even distribution** — không có "hot partition" do skewed data.
+- Nhược điểm: **không có khái niệm "old"** — bạn không thể "drop partition cũ nhất" để archive vì các rows được spread theo hash chứ không theo thứ tự thời gian. HASH chủ yếu để **chia tải write/lookup**, không để quản lý lifecycle.
+- Số partitions thay đổi **rất khó**: nếu bạn quyết định từ 4 partitions lên 8 partitions, MODULUS thay đổi, tất cả rows phải được re-hash và move sang partition mới. Đây là một migration cực kỳ đắt.
+
+Lời khuyên: nếu chọn HASH, hãy chọn số partitions ngay từ đầu một cách thận trọng — thường là một số 2^N (4, 8, 16, 32) và lớn hơn nhu cầu hiện tại 2-4 lần để có chỗ phát triển.
+
+### Tổng hợp so sánh
+
+| Đặc điểm | RANGE | LIST | HASH |
+|----------|-------|------|------|
+| Partition key | Có thứ tự (date, numeric) | Discrete enum | Bất kỳ |
+| Distribution | Theo range (có thể skew) | Theo giá trị | Đều (~uniform) |
+| Drop "old" partition | ✅ Dễ | ⚠️ Theo category | ❌ Không có khái niệm "old" |
+| Use case chính | Time-series, lifecycle | Region, tenant tier | Even load distribution |
+| Thay đổi số partitions | Dễ (thêm range mới) | Dễ (thêm category) | Khó (re-hash all rows) |
+
+## 4. Partition Pruning — cơ chế giúp query nhanh hơn
+
+Đây là phần "magic" mà nhiều người mong đợi nhất khi nghe đến partitioning. **Partition pruning** là quá trình PostgreSQL **query planner** phân tích `WHERE` clause của câu query, đối chiếu với partition bounds, và quyết định chỉ scan các partitions có thể chứa kết quả — bỏ qua hoàn toàn các partitions còn lại.
+
+<ExcalidrawDiagram src="/postgresql-partition-pruning.excalidraw" alt="Partition pruning visualization with EXPLAIN output" />
+
+### Ví dụ thực tế
+
+Giả sử bạn có bảng `events` partition theo tháng từ 2026-01 đến 2026-12 (12 partitions). Một câu query:
+
+```sql
+EXPLAIN
+SELECT COUNT(*) FROM events
+WHERE created_at >= '2026-03-01' AND created_at < '2026-04-01';
+```
+
+Output (rút gọn):
+
+```
+Aggregate  (cost=42.50..42.51 rows=1 width=8)
+  ->  Seq Scan on events_2026_03 events_1
+        Filter: ((created_at >= '2026-03-01')
+                 AND (created_at < '2026-04-01'))
+Planning Time: 0.412 ms
+Execution Time: 18.337 ms
+```
+
+Chỉ duy nhất `events_2026_03` xuất hiện trong plan. 11 partitions khác (Jan, Feb, Apr ... Dec) không hề được mở ra. Trên một bảng 500M rows phân bố đều, bạn đã giảm khối lượng I/O **~12 lần** mà không thay đổi gì ở application code.
+
+### Plan-time pruning vs Run-time pruning
+
+Có hai thời điểm pruning có thể xảy ra:
+
+1. **Plan-time pruning** (lúc lập kế hoạch query):
+   - Khi WHERE clause chứa **literal values** (giá trị cụ thể, hard-coded trong query).
+   - Planner đánh giá ngay khi parse query, partitions bị loại bỏ trước cả khi execution bắt đầu.
+   - Đây là kịch bản lý tưởng — cực nhanh, không có overhead.
+
+2. **Run-time pruning** (lúc thực thi):
+   - Khi WHERE clause chứa **parameters** (prepared statement, `WHERE created_at = $1`).
+   - Hoặc khi value chỉ biết được trong runtime (ví dụ giá trị từ subquery, JOIN với bảng khác).
+   - Pruning được thực hiện trong quá trình execution — có overhead nhỏ nhưng vẫn cực kỳ hiệu quả so với scan tất cả.
+
+Một use case của run-time pruning là **nested loop join**: với mỗi row của bảng driving, partition target được xác định và chỉ partition đó được probe — bạn nhìn thấy `Subplans Removed: N` trong EXPLAIN.
+
+### Điều kiện để pruning hoạt động
+
+Đây là phần dễ "vấp" nhất:
+
+- **WHERE clause phải đụng partition key**. Bảng `events` partition theo `created_at`, query `WHERE user_id = 42` **không** được pruning — planner phải scan tất cả 12 partitions.
+- **Predicate phải "compatible" với partition bounds**. Pruning hoạt động tốt với `=`, `<`, `>`, `<=`, `>=`, `BETWEEN`, `IN (...)`. Các predicate dạng function như `WHERE date_trunc('month', created_at) = '2026-03-01'` **không** được pruning vì planner không "unwrap" được function.
+- **Setting `enable_partition_pruning`** (default ON từ PG 11+). Nếu vì lý do nào đó bị OFF, pruning sẽ không hoạt động.
+
+Lời khuyên thực tế khi viết query trên partitioned table: luôn include partition key vào WHERE clause nếu có thể. Nếu logic ứng dụng cho phép, đẩy ràng buộc thời gian xuống tận query SQL (`WHERE created_at >= NOW() - INTERVAL '7 days'`) thay vì lọc ở application layer.
+
+### Side benefit: indexes nhỏ hơn
+
+Pruning là phần nổi của tảng băng. Ngay cả khi query phải đụng nhiều partitions, một lợi ích khác âm thầm phát huy: **mỗi partition có index riêng, nhỏ hơn nhiều so với index trên monolithic table**.
+
+Index B-tree có chiều sâu (depth) tỉ lệ với `log(N)`. Một bảng 500M rows có index B-tree depth ~5-6 levels. Chia thành 12 partitions ~42M rows mỗi cái, B-tree depth giảm còn ~4-5. Mỗi lookup tiết kiệm được 1-2 page reads — không nhiều với một query đơn lẻ, nhưng nhân với hàng nghìn QPS thì tổng cộng I/O giảm đáng kể.
+
+## 5. Use Cases thực tế
+
+Lý thuyết đến đây là đủ. Phần này nói về 2 use cases bạn sẽ gặp trong production.
+
+### 5.1 Time-series data: logs, events, metrics
+
+Đây là use case **chiếm 80%** lý do người ta đụng đến partitioning. Bài toán điển hình:
+
+> Bảng `application_logs` của bạn ghi 100GB mỗi tháng. Retention policy là 12 tháng. Sau 1 năm, bảng đạt 1.2TB, indexes 200GB. Hàng tháng bạn cần xoá log cũ nhất để giải phóng dung lượng. `DELETE FROM application_logs WHERE created_at < NOW() - INTERVAL '12 months'` chạy mất 8 giờ, sinh ra ~100GB **dead tuples** (xem chi tiết tại [Deep Dive Table Bloat](/posts/table-bloat)), và sau đó `VACUUM` mất thêm 4 giờ nữa để dọn dẹp. Trong suốt 12 giờ này, write throughput giảm 50% vì I/O bị bão hoà.
+
+<ExcalidrawDiagram src="/postgresql-partitioning-time-series-lifecycle.excalidraw" alt="Time-series partition lifecycle — hot, warm, archived" />
+
+Với RANGE partitioning theo tháng, vấn đề biến mất:
+
+#### Drop partition — thao tác instant
+
+```sql
+DROP TABLE application_logs_2025_05;
+```
+
+Đây là một thao tác **metadata-only** ở mức catalog. PostgreSQL chỉ cần:
+1. Xoá entry partition khỏi catalog của parent.
+2. Unlink các heap files trên đĩa (mà OS sẽ xử lý bất đồng bộ).
+
+Thời gian: **mili-giây**, bất kể partition đó chứa 100GB hay 1TB. So với `DELETE` chạy 8 giờ + VACUUM 4 giờ — bạn vừa tiết kiệm được nửa ngày downtime, không sinh dead tuples, không có WAL records cho từng dòng bị xoá.
+
+#### Detach partition — tách ra để archive
+
+Đôi khi bạn muốn giữ lại dữ liệu cũ để audit nhưng không cần nó nằm trong bảng chính. Dùng `DETACH PARTITION`:
+
+```sql
+ALTER TABLE application_logs DETACH PARTITION application_logs_2025_05;
+```
+
+Partition `application_logs_2025_05` vẫn tồn tại như một bảng độc lập, nhưng không còn là phần của `application_logs`. Bạn có thể:
+- `pg_dump` partition đó ra file `.sql`, upload lên S3, sau đó `DROP TABLE`.
+- Move partition sang một tablespace khác trên ổ đĩa rẻ hơn (HDD thay vì SSD): `ALTER TABLE application_logs_2025_05 SET TABLESPACE archive_hdd;`
+- Để partition đó nằm im trong database làm bản backup nội bộ.
+
+Khi cần truy vấn lại lịch sử cũ:
+
+```sql
+ALTER TABLE application_logs ATTACH PARTITION application_logs_2025_05
+  FOR VALUES FROM ('2025-05-01') TO ('2025-06-01');
+```
+
+Lưu ý: `ATTACH PARTITION` cần scan toàn bộ partition để verify constraint khớp với bounds (trừ khi có `CHECK constraint` tương ứng được tạo trước — khi đó PostgreSQL bỏ qua scan).
+
+#### Pre-create partitions cho tương lai
+
+Nếu bạn không dùng DEFAULT partition (khuyến nghị), cần đảm bảo luôn có partition cho dữ liệu sắp đến:
+
+```sql
+-- Chạy hằng tháng (ví dụ qua cron hoặc pg_cron):
+CREATE TABLE application_logs_2026_06 PARTITION OF application_logs
+  FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
+```
+
+Tool như **`pg_partman` extension** giúp tự động hoá toàn bộ: tạo trước partitions cho N tháng tới, drop partitions cũ quá M tháng, move partitions trung tuổi sang archive tablespace. Đây là lựa chọn phổ biến cho production setup.
+
+### 5.2 Multi-tenant SaaS
+
+Trong một SaaS multi-tenant, bạn có dữ liệu của nhiều khách hàng (tenants) sống chung trong một database. Partitioning theo `tenant_id` mang lại hai lợi ích chính: **isolation về performance** và **operational flexibility**.
+
+Có hai cách phổ biến:
+
+#### Cách 1: LIST partition theo tenant_id (cho ít tenants lớn)
+
+Phù hợp khi bạn có vài enterprise tenants với volume khác biệt rõ rệt:
+
+```sql
+CREATE TABLE customer_events (
+  id          BIGSERIAL,
+  tenant_id   TEXT NOT NULL,
+  user_id     BIGINT NOT NULL,
+  event       JSONB,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+) PARTITION BY LIST (tenant_id);
+
+CREATE TABLE customer_events_acme    PARTITION OF customer_events
+  FOR VALUES IN ('acme');
+CREATE TABLE customer_events_globex  PARTITION OF customer_events
+  FOR VALUES IN ('globex');
+CREATE TABLE customer_events_initech PARTITION OF customer_events
+  FOR VALUES IN ('initech');
+CREATE TABLE customer_events_free    PARTITION OF customer_events DEFAULT;
+```
+
+Mỗi enterprise tenant có physical table riêng. Tenants nhỏ (free tier) gom chung vào DEFAULT partition.
+
+#### Cách 2: HASH partition theo tenant_id (cho nhiều tenants tương đương)
+
+Khi bạn có hàng trăm đến hàng nghìn tenants với volume tương đương:
+
+```sql
+CREATE TABLE customer_events (
+  ...
+) PARTITION BY HASH (tenant_id);
+
+-- Tạo 16 buckets phân bố đều
+CREATE TABLE customer_events_00 PARTITION OF customer_events
+  FOR VALUES WITH (MODULUS 16, REMAINDER 0);
+-- ... 15 partitions còn lại
+```
+
+Mỗi tenant vẫn nằm gọn trong 1 partition (vì hash(tenant_id) deterministic), nhưng tải được spread đều ra 16 buckets.
+
+#### Lợi ích trong cả 2 cách
+
+- **Physical isolation**: Mỗi tenant (hoặc nhóm tenants) có heap file riêng. Backup/restore từng tenant trở nên khả thi qua `pg_dump` partition đó.
+- **Per-tenant tuning**: Đặt partition của tenant lớn lên tablespace SSD riêng. Tenant đặc biệt? `ALTER TABLE customer_events_acme SET (fillfactor = 80);` áp dụng riêng cho họ.
+- **Noisy neighbor isolation**: `VACUUM` chạy trên partition của tenant A không lock partition của tenant B. Một query analytics nặng quét partition tenant X không gây cache pollution cho các tenants khác (vì shared_buffers cache theo page, mà pages thuộc partition X được isolated).
+- **Compliance**: Nếu một tenant yêu cầu xoá toàn bộ dữ liệu (GDPR), `DROP TABLE customer_events_acme` xong — không cần `DELETE` chạy mấy tiếng.
+
+Lưu ý: query trong app code cần luôn include `WHERE tenant_id = ?` để partition pruning hoạt động — đây cũng là practice tốt cho security (tránh leak data giữa tenants).
+
+## 6. Tổng kết
+
+PostgreSQL partitioning không phải là "magic optimization" — nó là một cách **tổ chức lại dữ liệu vật lý** để database có thể quản lý hiệu quả hơn. Những điểm cốt lõi cần nhớ:
+
+- **Partitioning chia 1 logical table thành nhiều physical tables** dựa trên partition key. Application code không cần biết — vẫn query như một bảng duy nhất.
+- **Parent table chỉ chứa metadata; child partitions là physical tables độc lập** với heap, indexes, statistics riêng. Mỗi partition được VACUUM/ANALYZE/REINDEX độc lập.
+- **Ba strategies**: **RANGE** cho time-series và data có thứ tự, **LIST** cho discrete categories, **HASH** cho even distribution.
+- **Partition pruning** là cơ chế giúp query nhanh hơn, nhưng **chỉ hoạt động khi WHERE clause dùng partition key**. Luôn include partition key trong query khi có thể.
+- **Time-series use case**: `DROP PARTITION` là thao tác metadata-only (mili-giây) thay vì `DELETE` (hàng giờ + dead tuples). `DETACH PARTITION` để archive sang cheap storage.
+- **Multi-tenant SaaS**: physical isolation + per-tenant tuning + noisy neighbor isolation + compliance-friendly (drop tenant data nhanh).
+
+Partitioning là một trong những kỹ thuật mạnh nhất mà PostgreSQL cung cấp cho các bảng lớn. Khi bạn thấy một bảng phình to vượt khả năng `VACUUM` kịp thời, hoặc cần lifecycle management (archive/drop), partitioning gần như chắc chắn là câu trả lời.
+
+Bước tiếp theo: thử áp dụng partitioning trên một bảng `application_logs` hoặc `events` trong project của bạn. Bắt đầu với RANGE theo tháng, pre-create partitions cho 3 tháng tới, viết một retention policy đơn giản (drop partitions > 12 tháng). Sau khi quen tay, khám phá tiếp `pg_partman` để tự động hoá toàn bộ vòng đời.

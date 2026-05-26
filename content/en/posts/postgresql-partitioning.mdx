@@ -1,0 +1,442 @@
+---
+title: 'Deep Dive: PostgreSQL Partitioning — When One Big Table Becomes Many Small Ones'
+date: '2026-05-26'
+tags: ['Database']
+description: 'PostgreSQL partitioning from A to Z — declarative partitioning, RANGE/LIST/HASH strategies, the mechanics of partition pruning, and two real-world use cases: time-series and multi-tenant SaaS.'
+enableComment: true
+---
+
+# Deep Dive: PostgreSQL Partitioning — When One Big Table Becomes Many Small Ones
+
+There comes a point in the life of nearly every production system: an `events` (or `logs`, or `orders`) table crosses the half-billion-row mark. Everything starts getting... uncomfortable. Queries return in 30 seconds instead of 30 milliseconds. `VACUUM` has been running for 6 hours and still hasn't finished. You'd like to delete data older than 12 months to reclaim disk space — but the `DELETE` itself produces millions of **dead tuples** (see [Deep Dive on Table Bloat](/posts/table-bloat)), making things worse than before you ran it. Indexes balloon to 50GB. Backups take all night.
+
+The "simplest" answer — bump up the disk, scale up the instance RAM — only buys time. The root cause is structural: **a single table is not the right shape to hold half a billion rows with a clear lifecycle**. This is where **partitioning** comes in — the technique of splitting one logical table into many smaller physical tables so PostgreSQL can manage them efficiently.
+
+<ExcalidrawDiagram src="/postgresql-partitioning-hero.excalidraw" alt="One logical table, many physical partitions" />
+
+This article is a deep dive into how PostgreSQL partitioning works at the mechanism level, the different partitioning strategies, and two real-world use cases you will encounter when operating systems with large data volumes.
+
+## 1. What is Partitioning?
+
+**Partitioning** is the technique of splitting one logical table into multiple smaller physical tables (called **partitions** or **child tables**), based on the value of one or more columns — the **partition key**.
+
+The core slogan: **"Single logical table, multiple physical tables."** Application code does not need to know whether the table has been partitioned. The same `SELECT * FROM events WHERE ...` keeps working — except now PostgreSQL automatically routes it to the right partitions instead of scanning a monolithic 500GB table.
+
+### A Brief History
+
+Before PostgreSQL 10, partitioning was done via **table inheritance**: you'd create an empty "parent" table and several "child" tables that inherited from it, along with `CHECK` constraints to bound each child, plus manual **triggers** to route `INSERT`s to the correct child. It worked, but it was tedious, error-prone, and the performance wasn't optimal because PostgreSQL didn't truly understand your partitioning intent.
+
+Starting with PostgreSQL 10, **declarative partitioning** was introduced as a first-class feature. You simply declare the strategy with `PARTITION BY` syntax, and PostgreSQL handles routing, planning, and pruning for you. This entire article focuses on declarative partitioning because it is the modern, concise, and recommended approach.
+
+### Partitioning vs Sharding — Don't Mix Them Up
+
+These are two distinct concepts, even though people sometimes conflate them:
+- **Partitioning**: All partitions still live in the **same PostgreSQL instance**. You still use one connection string; a single transaction can touch multiple partitions.
+- **Sharding**: Shards live on **multiple instances/servers**, typically with a routing layer on top (Citus, pg_shard, application-level routing). Much more complex, and a story for another day.
+
+This article is about partitioning. Once you've partitioned a table to the limits of a single server, sharding is the next step.
+
+## 2. The Mechanism: How PostgreSQL Organizes a Partitioned Table
+
+<ExcalidrawDiagram src="/postgresql-partitioning-anatomy.excalidraw" alt="Anatomy of a partitioned table — parent metadata + child physical tables" />
+
+When you create a partitioned table, PostgreSQL actually creates two very different kinds of objects:
+
+### Parent Table — Metadata Only
+
+The **parent table** is the one you declare with `PARTITION BY`. A crucial point that often gets misunderstood: **the parent table holds no row data of its own**. It only stores metadata:
+- The schema (column names, types, shared constraints).
+- The **partition strategy** (RANGE, LIST, or HASH).
+- The **partition key** (which column drives routing).
+- The list of existing child partitions and the bounds of each.
+
+You cannot physically `INSERT` into the parent table directly — every INSERT is automatically rerouted by PostgreSQL to the matching child partition.
+
+### Child Partitions — Independent Physical Tables
+
+Each **child partition** is a fully-fledged physical table. It has:
+- Its own **heap file** (the file on disk that holds actual row data).
+- Its own **indexes** — an index `CREATE`d on the parent is propagated down to all children, but each child has its own independent B-tree, stored separately.
+- Its own **statistics** (row count, distribution, etc.) — `ANALYZE` runs independently per child.
+- Its own **visibility map**, **free space map**, and **TOAST tables**.
+
+The crucial implication: **each partition is a "mini-table"** with its own complete MVCC, VACUUM, and REINDEX machinery. A `VACUUM` running on `events_2026_03` doesn't touch `events_2026_04`. This is exactly why partitioning reduces maintenance overhead — autovacuum operates with a small scope, instead of scanning the whole monolithic table.
+
+### Partition Routing
+
+When you `INSERT INTO events VALUES (1, '2026-03-15', ...)`:
+1. PostgreSQL receives the INSERT into the parent table.
+2. Reads the partition key value from the row (`created_at = '2026-03-15'`).
+3. Looks up metadata to find the child partition whose bounds contain that value (here, `events_2026_03`, with bounds `[2026-03-01, 2026-04-01)`).
+4. Routes the INSERT to that child partition.
+
+If the partition key value doesn't fall into any partition, PostgreSQL will either:
+- Throw `no partition of relation "events" found for row` (when there's no DEFAULT partition).
+- Or push the row into the **DEFAULT partition** (if one exists).
+
+### Minimal SQL
+
+To make this concrete, here is the simplest possible RANGE partitioned table:
+
+```sql
+CREATE TABLE events (
+  id         BIGSERIAL,
+  user_id    BIGINT NOT NULL,
+  event_type TEXT   NOT NULL,
+  payload    JSONB,
+  created_at TIMESTAMPTZ NOT NULL
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE events_2026_01 PARTITION OF events
+  FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
+
+CREATE TABLE events_2026_02 PARTITION OF events
+  FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
+
+CREATE TABLE events_2026_03 PARTITION OF events
+  FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
+```
+
+Note: the FROM bound is **inclusive**, the TO bound is **exclusive**. So `events_2026_01` holds rows where `created_at >= '2026-01-01' AND created_at < '2026-02-01'`. This convention ensures partitions never overlap — a hard requirement of declarative partitioning.
+
+### `PARTITION BY` Does Not Auto-Create Partitions — You Must Do It Manually
+
+A crucial point that's easy to miss: **`CREATE TABLE ... PARTITION BY` alone is not enough**. After that statement, you have an "empty" parent table with zero child partitions. Every `INSERT` will fail with:
+
+```
+ERROR: no partition of relation "events" found for row
+```
+
+You **must explicitly create each partition** with `CREATE TABLE ... PARTITION OF ... FOR VALUES ...` like the three statements above. Why doesn't PostgreSQL auto-create partitions? Because it doesn't know your intended logic — monthly or weekly? 4 hash buckets or 16? This is a deliberate design choice: the core provides primitives, leaves automation to external tools.
+
+The practical consequence: with time-series partitioning by month, **you must pre-create each new month's partition before it begins**, or production will go down at 00:00:01 on day 1. This is a classic failure mode for newcomers to partitioning. Three ways to solve it:
+
+1. **A homegrown cron job** running on day 1 of each month, `CREATE TABLE IF NOT EXISTS events_YYYY_MM PARTITION OF ...`. Simple, no extension required.
+2. **The `pg_cron` extension** to run cron jobs directly inside Postgres.
+3. **The `pg_partman` extension** — most professional: auto pre-creates N months ahead, auto-drops old partitions per your retention policy. The standard setup for serious production systems.
+
+Safety pattern: whatever you choose, always pre-create **at least 2–3 months of buffer** + **alert on cron failures**. We'll come back to this in more detail in Section 5.1 (Time-series use case).
+
+## 3. Three Partitioning Strategies
+
+PostgreSQL supports three partition strategies. Choosing the right one depends on **the nature of the data** and **how you query it**.
+
+<ExcalidrawDiagram src="/postgresql-partitioning-types.excalidraw" alt="Three partitioning strategies — RANGE, LIST, HASH side by side" />
+
+### 3.1 RANGE
+
+**RANGE partitioning** splits data into continuous value ranges. This strategy fits when the partition key has **natural ordering** — typically a `date`, `timestamp`, or some numeric range (like order ID).
+
+The canonical use case: **time-series data**. You partition by month (monthly), week (weekly), or even day (daily) depending on volume.
+
+```sql
+CREATE TABLE application_logs (
+  id          BIGSERIAL,
+  service     TEXT NOT NULL,
+  level       TEXT NOT NULL,
+  message     TEXT,
+  created_at  TIMESTAMPTZ NOT NULL
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE application_logs_2026_03 PARTITION OF application_logs
+  FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
+
+CREATE TABLE application_logs_2026_04 PARTITION OF application_logs
+  FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
+
+CREATE TABLE application_logs_2026_05 PARTITION OF application_logs
+  FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
+```
+
+**Multi-column RANGE**: you can partition by multiple columns:
+
+```sql
+PARTITION BY RANGE (year, month)
+```
+
+But multi-column ranges are rarely necessary — a single timestamp column already covers 99% of time-series use cases.
+
+**DEFAULT partition for RANGE**:
+
+```sql
+CREATE TABLE application_logs_default PARTITION OF application_logs DEFAULT;
+```
+
+The DEFAULT partition catches rows that don't match any explicit partition. There are two schools of thought:
+- **With a DEFAULT partition**: Safe — INSERTs never fail. Downside: it's easy to "forget" to create next month's partition, and by the time you notice, a lot of rows have piled up in DEFAULT.
+- **Without a DEFAULT partition**: INSERTs fail when there's no matching partition. Downside: you need a cron job to pre-create partitions. Upside: you get an immediate error if the cron job breaks, instead of silently accumulating rows in DEFAULT.
+
+Most serious production systems don't create a default partition. They proactively create partitions via a cron job (often automated with **`pg_partman`**).
+
+### 3.2 LIST
+
+**LIST partitioning** splits data by discrete values — a good fit when the partition key is an enum, a category, or a fixed, known-in-advance set of values.
+
+Typical use case: dividing data by **region**, **country**, **status**, or **tenant tier**.
+
+```sql
+CREATE TABLE orders (
+  id          BIGSERIAL,
+  region      TEXT NOT NULL,
+  customer_id BIGINT NOT NULL,
+  amount      NUMERIC(10,2) NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+) PARTITION BY LIST (region);
+
+CREATE TABLE orders_apac PARTITION OF orders FOR VALUES IN ('APAC');
+CREATE TABLE orders_emea PARTITION OF orders FOR VALUES IN ('EMEA');
+CREATE TABLE orders_amer PARTITION OF orders FOR VALUES IN ('AMER');
+CREATE TABLE orders_other PARTITION OF orders DEFAULT;
+```
+
+A single partition can accept multiple values:
+
+```sql
+CREATE TABLE orders_americas PARTITION OF orders
+  FOR VALUES IN ('AMER', 'LATAM');
+```
+
+LIST partitioning is best when:
+- The value set is **fixed and known in advance** (not generated dynamically).
+- The number of categories is **small** (under a few dozen). If you have thousands of categories, HASH is a better fit.
+- You frequently query by that category (so partition pruning kicks in).
+
+One anti-pattern to avoid: using LIST on a high-cardinality column (like `user_id`) — you'd end up with millions of partitions, which the system simply cannot manage. For such cases, use HASH.
+
+### 3.3 HASH
+
+**HASH partitioning** applies a hash function to the partition key, then uses `MODULUS` to determine which partition. It distributes data **evenly** across partitions without needing the partition key to carry any natural ordering or category meaning.
+
+Use case: when you need even load distribution and have no natural range/list partition key. For example, a `user_sessions` table with millions of users where there's no clear "by month" or "by region" access pattern — you just want to spread out evenly.
+
+```sql
+CREATE TABLE user_sessions (
+  id         BIGSERIAL,
+  user_id    BIGINT NOT NULL,
+  session    TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+) PARTITION BY HASH (user_id);
+
+CREATE TABLE user_sessions_0 PARTITION OF user_sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+
+CREATE TABLE user_sessions_1 PARTITION OF user_sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+
+CREATE TABLE user_sessions_2 PARTITION OF user_sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+
+CREATE TABLE user_sessions_3 PARTITION OF user_sessions
+  FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+```
+
+Each row belongs to partition `i` if `hash(user_id) mod 4 == i`. PostgreSQL's hash function is designed to distribute uniformly — you'll get roughly ~25% of rows in each partition.
+
+**Trade-offs of HASH**:
+- Pro: **even distribution** — no "hot partition" caused by skewed data.
+- Con: **no concept of "old"** — you can't "drop the oldest partition" to archive, because rows are spread by hash, not by time. HASH is mainly for **load balancing**, not lifecycle management.
+- Changing the number of partitions is **very hard**: if you decide to go from 4 partitions to 8, MODULUS changes, all rows must be re-hashed and moved to new partitions. That's an extremely expensive migration.
+
+Advice: if you choose HASH, pick the number of partitions carefully upfront — typically a power of 2 (4, 8, 16, 32) and 2–4× larger than your current need, to leave room for growth.
+
+### Comparison Summary
+
+| Aspect | RANGE | LIST | HASH |
+|--------|-------|------|------|
+| Partition key | Ordered (date, numeric) | Discrete enum | Anything |
+| Distribution | By range (can be skewed) | By value | Even (~uniform) |
+| Drop "old" partition | ✅ Easy | ⚠️ By category | ❌ No concept of "old" |
+| Main use case | Time-series, lifecycle | Region, tenant tier | Even load distribution |
+| Changing partition count | Easy (add new range) | Easy (add category) | Hard (re-hash all rows) |
+
+## 4. Partition Pruning — How Queries Get Faster
+
+This is the "magic" most people are looking forward to when they hear about partitioning. **Partition pruning** is the process where the PostgreSQL **query planner** analyzes the `WHERE` clause of a query, compares it against partition bounds, and decides to scan only the partitions that could possibly contain matching rows — skipping the rest entirely.
+
+<ExcalidrawDiagram src="/postgresql-partition-pruning.excalidraw" alt="Partition pruning visualization with EXPLAIN output" />
+
+### A Concrete Example
+
+Suppose you have an `events` table partitioned by month from 2026-01 through 2026-12 (12 partitions). A query:
+
+```sql
+EXPLAIN
+SELECT COUNT(*) FROM events
+WHERE created_at >= '2026-03-01' AND created_at < '2026-04-01';
+```
+
+Output (trimmed):
+
+```
+Aggregate  (cost=42.50..42.51 rows=1 width=8)
+  ->  Seq Scan on events_2026_03 events_1
+        Filter: ((created_at >= '2026-03-01')
+                 AND (created_at < '2026-04-01'))
+Planning Time: 0.412 ms
+Execution Time: 18.337 ms
+```
+
+Only `events_2026_03` shows up in the plan. The other 11 partitions (Jan, Feb, Apr ... Dec) are never opened. On a 500M-row table evenly distributed, you've cut I/O by roughly **~12×** without changing a single line of application code.
+
+### Plan-Time vs Run-Time Pruning
+
+There are two possible moments for pruning:
+
+1. **Plan-time pruning** (during query planning):
+   - When the WHERE clause contains **literal values** (specific values hard-coded in the query).
+   - The planner evaluates this at parse time, partitions are excluded before execution even starts.
+   - This is the ideal case — extremely fast, no overhead.
+
+2. **Run-time pruning** (during execution):
+   - When the WHERE clause contains **parameters** (prepared statement, `WHERE created_at = $1`).
+   - Or when the value is only known at runtime (e.g., a value from a subquery or a JOIN with another table).
+   - Pruning happens during execution — small overhead, but still vastly better than scanning everything.
+
+One use case for run-time pruning is **nested loop join**: for each row of the driving table, the target partition is determined and only that partition is probed — you'll see `Subplans Removed: N` in the EXPLAIN.
+
+### Conditions for Pruning to Work
+
+This is the easiest place to stumble:
+
+- **The WHERE clause must reference the partition key**. An `events` table partitioned by `created_at`, queried with `WHERE user_id = 42`, **cannot** be pruned — the planner has to scan all 12 partitions.
+- **Predicates must be "compatible" with partition bounds**. Pruning works well with `=`, `<`, `>`, `<=`, `>=`, `BETWEEN`, `IN (...)`. Predicates wrapped in functions, like `WHERE date_trunc('month', created_at) = '2026-03-01'`, **cannot** be pruned because the planner can't "unwrap" the function.
+- **The setting `enable_partition_pruning`** (default ON since PG 11). If it's somehow OFF, pruning is disabled.
+
+Practical advice when writing queries against partitioned tables: always include the partition key in the WHERE clause whenever possible. If application logic permits, push the time-range constraint all the way down to the SQL (`WHERE created_at >= NOW() - INTERVAL '7 days'`) instead of filtering at the application layer.
+
+### Side Benefit: Smaller Indexes
+
+Pruning is just the tip of the iceberg. Even when a query has to touch multiple partitions, another quieter benefit kicks in: **each partition has its own index, much smaller than an index on a monolithic table**.
+
+A B-tree index has depth proportional to `log(N)`. A 500M-row table has a B-tree depth of ~5–6 levels. Split into 12 partitions of ~42M rows each, the B-tree depth drops to ~4–5. Each lookup saves 1–2 page reads — not much for a single query, but multiplied by thousands of QPS, the total I/O savings are significant.
+
+## 5. Real-World Use Cases
+
+That's enough theory. This section is about two use cases you'll meet in production.
+
+### 5.1 Time-Series Data: Logs, Events, Metrics
+
+This is the use case that accounts for **80%** of why people reach for partitioning. The canonical scenario:
+
+> Your `application_logs` table writes 100GB per month. Retention policy is 12 months. After a year, the table reaches 1.2TB, with 200GB of indexes. Every month you need to delete the oldest logs to free disk. `DELETE FROM application_logs WHERE created_at < NOW() - INTERVAL '12 months'` takes 8 hours, produces ~100GB of **dead tuples** (see [Deep Dive on Table Bloat](/posts/table-bloat) for details), and then `VACUUM` takes another 4 hours to clean up. Throughout those 12 hours, write throughput drops 50% because I/O is saturated.
+
+<ExcalidrawDiagram src="/postgresql-partitioning-time-series-lifecycle.excalidraw" alt="Time-series partition lifecycle — hot, warm, archived" />
+
+With monthly RANGE partitioning, the problem disappears:
+
+#### Drop Partition — Instant Operation
+
+```sql
+DROP TABLE application_logs_2025_05;
+```
+
+This is a **metadata-only** operation at the catalog level. PostgreSQL only needs to:
+1. Remove the partition entry from the parent's catalog.
+2. Unlink the heap files on disk (which the OS handles asynchronously).
+
+Time: **milliseconds**, regardless of whether that partition contains 100GB or 1TB. Compared with `DELETE` running 8 hours + VACUUM running 4 hours — you've just saved half a day of degraded operation, produced zero dead tuples, and emitted no WAL records for individual deleted rows.
+
+#### Detach Partition — Pull It Out to Archive
+
+Sometimes you want to keep old data for audit but don't need it in the main table. Use `DETACH PARTITION`:
+
+```sql
+ALTER TABLE application_logs DETACH PARTITION application_logs_2025_05;
+```
+
+`application_logs_2025_05` continues to exist as an independent table, but is no longer part of `application_logs`. You can then:
+- `pg_dump` the partition to a `.sql` file, upload to S3, then `DROP TABLE`.
+- Move the partition to a different tablespace on cheaper disk (HDD instead of SSD): `ALTER TABLE application_logs_2025_05 SET TABLESPACE archive_hdd;`
+- Just leave the partition sitting in the database as an internal backup.
+
+When you need to query historical data again:
+
+```sql
+ALTER TABLE application_logs ATTACH PARTITION application_logs_2025_05
+  FOR VALUES FROM ('2025-05-01') TO ('2025-06-01');
+```
+
+Note: `ATTACH PARTITION` needs to scan the entire partition to verify the data fits the bounds (unless an equivalent `CHECK` constraint is pre-defined — in which case PostgreSQL skips the scan).
+
+#### Pre-Create Partitions for the Future
+
+If you're not using a DEFAULT partition (recommended), you need to ensure there is always a partition for incoming data:
+
+```sql
+-- Run monthly (e.g., via cron or pg_cron):
+CREATE TABLE application_logs_2026_06 PARTITION OF application_logs
+  FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
+```
+
+A tool like the **`pg_partman` extension** automates the full lifecycle: pre-create partitions for N months ahead, drop partitions older than M months, move middle-aged partitions to an archive tablespace. It's a popular choice for production setups.
+
+### 5.2 Multi-Tenant SaaS
+
+In a multi-tenant SaaS, you have data for many customers (tenants) living together in one database. Partitioning by `tenant_id` brings two main benefits: **performance isolation** and **operational flexibility**.
+
+There are two common approaches:
+
+#### Approach 1: LIST partition by tenant_id (for a few large tenants)
+
+A good fit when you have a few enterprise tenants with very different volumes:
+
+```sql
+CREATE TABLE customer_events (
+  id          BIGSERIAL,
+  tenant_id   TEXT NOT NULL,
+  user_id     BIGINT NOT NULL,
+  event       JSONB,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+) PARTITION BY LIST (tenant_id);
+
+CREATE TABLE customer_events_acme    PARTITION OF customer_events
+  FOR VALUES IN ('acme');
+CREATE TABLE customer_events_globex  PARTITION OF customer_events
+  FOR VALUES IN ('globex');
+CREATE TABLE customer_events_initech PARTITION OF customer_events
+  FOR VALUES IN ('initech');
+CREATE TABLE customer_events_free    PARTITION OF customer_events DEFAULT;
+```
+
+Each enterprise tenant gets its own physical table. Small tenants (free tier) all bucket into the DEFAULT partition.
+
+#### Approach 2: HASH partition by tenant_id (for many comparable tenants)
+
+When you have hundreds to thousands of tenants of roughly similar size:
+
+```sql
+CREATE TABLE customer_events (
+  ...
+) PARTITION BY HASH (tenant_id);
+
+-- 16 evenly-distributed buckets
+CREATE TABLE customer_events_00 PARTITION OF customer_events
+  FOR VALUES WITH (MODULUS 16, REMAINDER 0);
+-- ... 15 more
+```
+
+Each tenant still lives entirely in one partition (since hash(tenant_id) is deterministic), but the load is spread evenly across 16 buckets.
+
+#### Benefits in Either Approach
+
+- **Physical isolation**: Each tenant (or group of tenants) has its own heap file. Per-tenant backup/restore via `pg_dump` of that one partition becomes practical.
+- **Per-tenant tuning**: Place a large tenant's partition on dedicated SSD tablespace. Special tenant? `ALTER TABLE customer_events_acme SET (fillfactor = 80);` applies only to them.
+- **Noisy neighbor isolation**: `VACUUM` running on tenant A's partition doesn't lock tenant B's partition. A heavy analytics query scanning tenant X's partition doesn't pollute the cache for the others (because shared_buffers caches by page, and pages belong to a specific partition).
+- **Compliance**: If a tenant requests data deletion (GDPR), `DROP TABLE customer_events_acme` and you're done — no multi-hour `DELETE`.
+
+Note: queries in application code should always include `WHERE tenant_id = ?` for partition pruning to kick in — which is also good practice for security (avoid cross-tenant leaks).
+
+## 6. Takeaways
+
+PostgreSQL partitioning is not "magic optimization" — it is a way to **reorganize physical data layout** so the database can manage it more efficiently. The core points to remember:
+
+- **Partitioning splits one logical table into multiple physical tables** based on a partition key. Application code is none the wiser — it still queries as if it were a single table.
+- **The parent table holds only metadata; child partitions are independent physical tables** with their own heap, indexes, and statistics. Each partition is VACUUMed, ANALYZEd, and REINDEXed independently.
+- **Three strategies**: **RANGE** for time-series and ordered data, **LIST** for discrete categories, **HASH** for even distribution.
+- **Partition pruning** is the mechanism that makes queries faster, but **it only works when the WHERE clause uses the partition key**. Always include the partition key in queries when possible.
+- **Time-series use case**: `DROP PARTITION` is a metadata-only operation (milliseconds) instead of `DELETE` (hours + dead tuples). `DETACH PARTITION` to archive to cheap storage.
+- **Multi-tenant SaaS**: physical isolation + per-tenant tuning + noisy neighbor isolation + compliance-friendly (drop tenant data fast).
+
+Partitioning is one of the most powerful techniques PostgreSQL offers for large tables. When you see a table balloon past what `VACUUM` can keep up with, or when you need lifecycle management (archive/drop), partitioning is almost certainly the answer.
+
+Next step: try partitioning on an `application_logs` or `events` table in your own project. Start with monthly RANGE, pre-create partitions for the next 3 months, write a simple retention policy (drop partitions > 12 months old). Once you're comfortable, explore `pg_partman` to automate the full lifecycle.

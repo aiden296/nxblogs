@@ -12,6 +12,11 @@ Gần đây tôi có nghiên cứu sâu về cách PostgreSQL quản lý lưu tr
 
 Dưới đây là tổng hợp những ghi chép (notes) của tôi dựa trên bài viết gốc từ Tiger Data về cơ chế lưu trữ và cách xử lý Bloat.
 
+<ExcalidrawDiagram
+  src="/postgresql-database-architecture.excalidraw"
+  alt="Kiến trúc PostgreSQL: từ Client đến Page trên disk"
+/>
+
 ## 1. Tại sao phải quan tâm đến Storage Optimization?
 
 Ngoài bài toán chi phí (Cost) hiển nhiên, vấn đề cốt lõi của việc phình to dữ liệu nằm ở **Hiệu năng (Performance)**.
