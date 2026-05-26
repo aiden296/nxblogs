@@ -426,7 +426,44 @@ Each tenant still lives entirely in one partition (since hash(tenant_id) is dete
 
 Note: queries in application code should always include `WHERE tenant_id = ?` for partition pruning to kick in — which is also good practice for security (avoid cross-tenant leaks).
 
-## 6. Takeaways
+## 6. Do you actually need partitioning?
+
+Knowing about partitioning is great, but the truth is **most projects will never need it**. Partitioning adds a meaningful layer of complexity: cron jobs to pre-create future partitions, the rule that every unique constraint must include the partition key, planning overhead when the partition count is high, and some `ALTER TABLE` operations become trickier. You should only take on these costs when the dataset is genuinely large enough that the problems partitioning solves are actually painful.
+
+### 6.1 Quantitative thresholds — how big is "big enough"?
+
+There is no single magic number, but the PostgreSQL community has a few rules of thumb worth remembering:
+
+- **PostgreSQL official docs**: consider partitioning when *the table size exceeds the physical memory of the database server*. This is the core threshold — once the hot index no longer fits in `shared_buffers` (typically configured at 25–40% of RAM), every index probe becomes random I/O to disk.
+- **Practical "hurts now" zone**: 100 GB – 1 TB. Below this range, most problems can be fixed by tuning indexes, autovacuum, or simply giving the instance more RAM.
+- **Ideal partition size**: 1–100 GB per partition. Smaller → too many partitions, planning overhead climbs. Larger → you lose some of the lifecycle benefit (dropping one partition still frees meaningful space).
+- **Recommended partition count**: under 1,000 (practical ceiling around 5,000). Past that, the planner slows down and the relcache memory of every connection balloons.
+- **GEQO cutoff**: when a query touches more than 12 partitions, the planner switches to its genetic algorithm (GEQO) — plans become less deterministic and sometimes pick suboptimal shapes.
+
+### 6.2 Concrete pain points that signal "time to partition"
+
+When you see at least 2–3 of the symptoms below happening together, partitioning is almost certainly the right answer:
+
+- **Autovacuum can't keep up**: the table absorbs millions of writes per day and `pg_stat_user_tables.n_dead_tup` grows faster than vacuum can reclaim. On-disk size keeps inflating while the row count stays flat.
+- **Deleting old data takes hours**: a TTL/retention job produces tens of GB of dead tuples, followed by `VACUUM` running for half a day and blocking write throughput.
+- **Indexes too large for RAM**: `pg_stat_user_indexes` shows abnormally high `idx_blks_read` and the cache hit ratio drops. Every lookup reads pages from disk instead of `shared_buffers`.
+- **Maintenance window too small**: `pg_dump` overruns the nightly backup window, `REINDEX CONCURRENTLY` takes many hours, `ALTER TABLE ADD COLUMN` (the rewrite variety) gets rejected because the lock would last too long.
+- **XID wraparound looming**: aggressive-mode vacuum grabs `AccessExclusiveLock` — a stop-the-world risk on tables this large.
+- **Clear lifecycle**: data has a natural lifetime (logs, events, metrics, audit trails) and you regularly need to archive or drop by time.
+
+### 6.3 Anti-signals — when NOT to partition
+
+Conversely, the following signals tell you partitioning will make things worse:
+
+- **Small table that fits in RAM**: < 100M rows, < 50 GB, VACUUM completes in under 30 minutes — partitioning only adds complexity without solving any real problem.
+- **No natural partition key**: if your queries don't routinely filter by the same column (such as `created_at` or `tenant_id`), pruning never kicks in — partitioning doesn't help the read path and only slows the planner.
+- **OLTP workload with heavy prepared-statement use**: planning overhead on a partitioned table with hundreds of children can exceed execution time. Lukas Fittl (pganalyze) has measured planning-to-execution ratios as high as 3× in some cases.
+- **You need a UNIQUE constraint or FOREIGN KEY that doesn't include the partition key**: PostgreSQL requires every unique constraint to include the partition key. If your schema needs a global unique on some other column (e.g. `email`), partitioning will block you.
+- **Team doesn't yet have operational maturity**: a failed pre-create job = production goes down at 00:00:01 on the 1st of the month. If you don't have monitoring/alerting for partition automation in place, don't rush in.
+
+> A compact heuristic: if you've **never** opened a ticket because of VACUUM, because a DELETE ran for hours, or because backups blew through the window — you **don't need** partitioning yet. More RAM, autovacuum tuning, or a sensible index is almost always enough. When those tools stop working, come back to this article.
+
+## 7. Takeaways
 
 PostgreSQL partitioning is not "magic optimization" — it is a way to **reorganize physical data layout** so the database can manage it more efficiently. The core points to remember:
 
@@ -436,6 +473,7 @@ PostgreSQL partitioning is not "magic optimization" — it is a way to **reorgan
 - **Partition pruning** is the mechanism that makes queries faster, but **it only works when the WHERE clause uses the partition key**. Always include the partition key in queries when possible.
 - **Time-series use case**: `DROP PARTITION` is a metadata-only operation (milliseconds) instead of `DELETE` (hours + dead tuples). `DETACH PARTITION` to archive to cheap storage.
 - **Multi-tenant SaaS**: physical isolation + per-tenant tuning + noisy neighbor isolation + compliance-friendly (drop tenant data fast).
+- **Most projects don't need partitioning** — only reach for it once the table outgrows server RAM and you have concrete pain around VACUUM, DELETE, or the backup window.
 
 Partitioning is one of the most powerful techniques PostgreSQL offers for large tables. When you see a table balloon past what `VACUUM` can keep up with, or when you need lifecycle management (archive/drop), partitioning is almost certainly the answer.
 

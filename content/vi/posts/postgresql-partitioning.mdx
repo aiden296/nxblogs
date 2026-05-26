@@ -424,7 +424,44 @@ Mỗi tenant vẫn nằm gọn trong 1 partition (vì hash(tenant_id) determinis
 
 Lưu ý: query trong app code cần luôn include `WHERE tenant_id = ?` để partition pruning hoạt động — đây cũng là practice tốt cho security (tránh leak data giữa tenants).
 
-## 6. Tổng kết
+## 6. Khi nào thực sự cần partition?
+
+Việc biết về partitioning là rất tốt, nhưng sự thật là **hầu hết dự án sẽ không cần đến nó**. Partition thêm vào một lớp phức tạp đáng kể: cron job pre-create partition cho tương lai, ràng buộc rằng mọi unique constraint phải chứa partition key, planning overhead khi số partition lớn, và một số `ALTER TABLE` trở nên phức tạp hơn. Bạn chỉ nên đánh đổi những chi phí này khi tập dữ liệu thực sự đủ lớn để các vấn đề mà partitioning giải quyết trở nên đau.
+
+### 6.1 Ngưỡng định lượng — bao nhiêu là "đủ lớn"?
+
+Không có con số chính xác tuyệt đối, nhưng cộng đồng PostgreSQL có vài rule-of-thumb đáng tham khảo:
+
+- **PostgreSQL official docs**: cân nhắc partition khi *kích thước bảng vượt RAM của database server*. Đây là ngưỡng cốt lõi — một khi index hot không còn fit trong `shared_buffers` (thường cấu hình 25–40% RAM), mỗi index probe sẽ trở thành random I/O xuống đĩa.
+- **Practical "đau ngay" zone**: 100 GB – 1 TB. Dưới ngưỡng này, hầu hết vấn đề có thể giải quyết bằng tuning index, autovacuum, hoặc đơn giản là tăng RAM cho instance.
+- **Kích thước partition lý tưởng**: 1–100 GB mỗi partition. Nhỏ hơn → quá nhiều partition, planning overhead tăng. Lớn hơn → mất bớt lợi ích lifecycle (drop một partition vẫn release được nhiều dung lượng).
+- **Số partition khuyến nghị**: dưới 1.000 (ceiling thực tế khoảng 5.000). Vượt ngưỡng đó, planner bắt đầu chậm và relcache memory của mỗi connection phình to.
+- **GEQO cutoff**: khi query đụng > 12 partition, planner chuyển sang genetic algorithm (GEQO) — plan trở nên ít deterministic hơn, đôi khi chọn phương án không tối ưu.
+
+### 6.2 Pain points cụ thể báo hiệu nên partition
+
+Khi bạn thấy ít nhất 2–3 trong số các triệu chứng dưới đây xuất hiện cùng lúc, partition gần như chắc chắn là câu trả lời:
+
+- **Autovacuum không theo kịp**: bảng ghi hàng triệu rows/ngày, `pg_stat_user_tables.n_dead_tup` tăng nhanh hơn tốc độ vacuum dọn được. On-disk size tiếp tục phình dù row count đứng yên.
+- **DELETE dữ liệu cũ chạy hàng giờ**: TTL/retention job sinh hàng chục GB dead tuples, theo sau là `VACUUM` chạy nửa ngày, blocking write throughput.
+- **Index quá lớn không fit RAM**: `pg_stat_user_indexes` cho thấy `idx_blks_read` cao bất thường, cache hit ratio giảm. Mỗi lookup phải đọc page từ đĩa thay vì từ `shared_buffers`.
+- **Cửa sổ maintenance không đủ**: `pg_dump` chạy vượt window backup đêm, `REINDEX CONCURRENTLY` mất nhiều giờ, `ALTER TABLE ADD COLUMN` (loại cần rewrite) bị từ chối vì lock quá lâu.
+- **XID wraparound đáng lo**: vacuum chạy ở aggressive mode chiếm `AccessExclusiveLock` — nguy cơ stop-the-world cho bảng quá lớn.
+- **Lifecycle rõ ràng**: dữ liệu có vòng đời tự nhiên (logs, events, metrics, audit trails) và bạn cần thường xuyên archive hoặc drop theo thời gian.
+
+### 6.3 Anti-signals — khi KHÔNG nên partition
+
+Ngược lại, các dấu hiệu sau cho thấy partition sẽ làm cho mọi thứ tệ hơn:
+
+- **Bảng nhỏ fit gọn trong RAM**: < 100M rows, < 50 GB, VACUUM hoàn tất dưới 30 phút — partition chỉ thêm phức tạp mà không giải quyết vấn đề nào.
+- **Không có partition key tự nhiên**: nếu queries không thường xuyên filter theo cùng 1 column (như `created_at` hay `tenant_id`), pruning không kích hoạt — partition không giúp gì cho read path, mà còn làm planner chậm hơn.
+- **Workload OLTP nhiều prepared statement**: planning overhead trên partitioned table với hàng trăm children có thể vượt cả execution time. Lukas Fittl (pganalyze) từng đo được tỉ lệ planning/execution lên đến 3× trong một số case.
+- **Cần UNIQUE constraint hoặc FOREIGN KEY không chứa partition key**: PostgreSQL bắt buộc mọi unique constraint phải include partition key. Nếu schema cần global unique trên một cột khác (ví dụ `email`), partition sẽ chặn bạn.
+- **Đội ngũ chưa có operational maturity**: pre-create partition fail = production down lúc 00:00:01 ngày mùng 1. Nếu chưa có monitoring/alerting cho partition automation, đừng vội nhảy vào.
+
+> Một heuristic gọn: nếu bạn **chưa từng** mở một ticket vì VACUUM, vì DELETE chạy hàng giờ, hoặc vì backup quá window — bạn **chưa cần** partition. Tăng RAM, tuning autovacuum, hoặc thêm index hợp lý hầu như đủ. Khi nào những công cụ đó hết tác dụng, hãy quay lại bài viết này.
+
+## 7. Tổng kết
 
 PostgreSQL partitioning không phải là "magic optimization" — nó là một cách **tổ chức lại dữ liệu vật lý** để database có thể quản lý hiệu quả hơn. Những điểm cốt lõi cần nhớ:
 
@@ -434,6 +471,7 @@ PostgreSQL partitioning không phải là "magic optimization" — nó là một
 - **Partition pruning** là cơ chế giúp query nhanh hơn, nhưng **chỉ hoạt động khi WHERE clause dùng partition key**. Luôn include partition key trong query khi có thể.
 - **Time-series use case**: `DROP PARTITION` là thao tác metadata-only (mili-giây) thay vì `DELETE` (hàng giờ + dead tuples). `DETACH PARTITION` để archive sang cheap storage.
 - **Multi-tenant SaaS**: physical isolation + per-tenant tuning + noisy neighbor isolation + compliance-friendly (drop tenant data nhanh).
+- **Đa số dự án không cần partition** — chỉ đụng đến khi bảng vượt RAM của server và đã có pain point cụ thể về VACUUM, DELETE, hoặc backup window.
 
 Partitioning là một trong những kỹ thuật mạnh nhất mà PostgreSQL cung cấp cho các bảng lớn. Khi bạn thấy một bảng phình to vượt khả năng `VACUUM` kịp thời, hoặc cần lifecycle management (archive/drop), partitioning gần như chắc chắn là câu trả lời.
 
