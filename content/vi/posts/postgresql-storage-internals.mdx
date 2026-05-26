@@ -1,0 +1,376 @@
+---
+title: 'Deep Dive: PostgreSQL Storage Internals — Từ Heap File Đến Lifecycle Của INSERT/UPDATE/DELETE'
+date: '2026-05-26'
+tags: ['Database']
+description: 'Mổ xẻ cách PostgreSQL tổ chức bảng trên disk, cách shared buffer load page lên RAM, và chính xác chuyện gì xảy ra ở mức byte khi bạn chạy INSERT, UPDATE hoặc DELETE.'
+enableComment: true
+---
+
+# Deep Dive: PostgreSQL Storage Internals — Từ Heap File Đến Lifecycle Của INSERT/UPDATE/DELETE
+
+Khi bạn chạy `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM users WHERE id = 42;`, PostgreSQL trả về một dòng kiểu như `Buffers: shared hit=3 read=1`. Con số đó nghĩa là gì? Tại sao cùng một câu `UPDATE`, lần này chạy 2 ms, lần khác lại 80 ms — dù bảng không hề bị lock? Tại sao sau một câu `DELETE` thì dung lượng file của bảng vẫn không hề giảm? Và cụ thể thì "shared buffer" mà mọi tài liệu hướng dẫn tune luôn nhắc đến — bên trong nó thực sự chứa gì?
+
+Trả lời được những câu hỏi đó đòi hỏi bạn phải đi xuống một tầng dưới SQL: **storage engine layer**. Đây là bài deep dive về cách PostgreSQL tổ chức dữ liệu trên đĩa (heap files, pages, tuples), cách dữ liệu được kéo lên RAM thông qua **Shared Buffer Manager**, và chính xác trình tự xảy ra ở mức byte khi một câu `INSERT`, `UPDATE`, hay `DELETE` được thực thi. Bài này bổ sung cho [Deep Dive về Table Bloat](/posts/table-bloat) (tập trung vào hậu quả là dead tuples và vacuum) và [Deep Dive về PostgreSQL Partitioning](/posts/postgresql-partitioning) (tập trung vào chia bảng lớn) — cả hai bài đó đứng trên những concepts mà bài này mổ xẻ.
+
+<ExcalidrawDiagram
+  src="/postgresql-storage-internals-overview.excalidraw"
+  alt="End-to-end write path: Backend → Shared Buffer Manager → Heap files; WAL buffer → WAL files on COMMIT"
+/>
+
+## 1. Tổ chức file của một bảng trên disk
+
+Mọi bảng trong PostgreSQL cuối cùng đều quy về **một tập file trên hệ thống tệp**. Khi bạn cài đặt PostgreSQL, biến môi trường `PGDATA` trỏ tới thư mục dữ liệu (ví dụ `/var/lib/postgresql/16/main`). Bên trong đó, đường dẫn của heap file một bảng có dạng:
+
+```
+$PGDATA/base/<database_oid>/<relfilenode>
+```
+
+Bạn có thể tự kiểm chứng bằng query này:
+
+```sql
+SELECT pg_relation_filepath('users');
+-- base/16384/24576
+```
+
+`16384` là OID của database, `24576` là **relfilenode** của bảng `users`. Lưu ý: `relfilenode` **khác** với `oid` của bảng. Khi bạn chạy `VACUUM FULL`, `CLUSTER`, `REINDEX` hay `TRUNCATE`, PostgreSQL viết lại data sang một file mới và đổi `relfilenode` — nhưng `oid` (cách bảng được tham chiếu trong system catalog) giữ nguyên. Điều này quan trọng khi monitoring: nếu bạn cache đường dẫn file rồi 30 phút sau dùng lại, có thể nó đã trỏ tới một file đã bị xóa.
+
+### Ba forks của một relation
+
+Một bảng không phải chỉ một fork mà tận 3 forks. **Fork** là một khái niệm mượn từ "file fork" trong filesystem cũ. Bạn có thể hiểu đơn giản nó là file.
+
+<ExcalidrawDiagram
+  src="/postgresql-heap-file-hierarchy.excalidraw"
+  alt="PGDATA layout — base/ → database OID dir → relfilenode with main / _fsm / _vm forks and segment splits"
+/>
+
+- **Main fork** (`<relfilenode>`): heap data thực sự — các tuple bạn đã `INSERT`.
+- **FSM fork** (`<relfilenode>_fsm`): **Free Space Map** — một cấu trúc dữ liệu tree-like nhỏ ghi nhận từng page còn bao nhiêu byte trống. Khi `INSERT`, PostgreSQL tra cứu FSM trước để tìm page có đủ chỗ thay vì phải scan tuần tự.
+- **VM fork** (`<relfilenode>_vm`): **Visibility Map** — 2 bit cho mỗi page, đánh dấu (a) page có toàn live tuples không, và (b) page đã được frozen chưa. Index-only scan dựa vào bit (a) để bỏ qua bước check heap; VACUUM dựa vào để bỏ qua những page không có dead tuple.
+
+Khi bảng vượt quá **1 GB**, main fork được chia thành nhiều **segment files** liên tiếp: `<relfilenode>`, `<relfilenode>.1`, `<relfilenode>.2`, … Lý do lịch sử: nhiều filesystem cũ (HFS, FAT32, ext2 với block size nhỏ) có giới hạn 2 GB hoặc 4 GB cho một file. PostgreSQL giữ giới hạn segment 1 GB cho đến nay vì nó hoạt động tốt và không có lý do để thay đổi.
+
+Cuối cùng, nếu một row có cột text/bytea/jsonb dài hơn ~2 KB, PostgreSQL không nhét trực tiếp vào page chính. Nó dùng **TOAST** (The Oversized-Attribute Storage Technique): cột bị nén và/hoặc tách ra một bảng phụ tên `pg_toast.pg_toast_<oid>` — bảng này cũng là một relation đầy đủ với main/FSM/VM forks riêng. Hệ quả: SELECT một cột TOAST có thể tốn I/O thêm để fetch các "chunks" từ bảng phụ.
+
+---
+
+## 2. Page anatomy — đơn vị I/O 8 KB
+
+PostgreSQL không đọc/ghi từng byte, từng tuple, hay từng row. Đơn vị I/O cơ bản là **page** (còn gọi là **block**), mặc định **8 KB**. Mọi thao tác đọc từ disk hay ghi xuống disk đều xảy ra ở granularity này. Đây là lý do bài [table-bloat](/posts/table-bloat) nhấn mạnh chuyện "muốn lấy 1 tuple, phải kéo cả container 8 KB lên RAM".
+
+<ExcalidrawDiagram
+  src="/postgresql-page-anatomy.excalidraw"
+  alt="Heap page anatomy — PageHeader at top, line pointers grow down, free space in middle, tuples grow up, special area at bottom"
+/>
+
+Layout của một page, từ offset 0 đến 8191:
+
+1. **PageHeaderData (24 byte)** — header chứa metadata của page:
+   - `pd_lsn` (8 B): **Log Sequence Number** của WAL record gần nhất chạm vào page này. Dùng cho recovery và checkpoint coordination.
+   - `pd_checksum` (2 B): checksum data integrity (nếu bật `data_checksums`).
+   - `pd_flags` (2 B): flags như `PD_HAS_FREE_LINES`, `PD_PAGE_FULL`, `PD_ALL_VISIBLE`.
+   - `pd_lower` (2 B), `pd_upper` (2 B): hai con trỏ định nghĩa vùng free space — `pd_lower` là cuối line pointer array, `pd_upper` là đỉnh của vùng tuple.
+   - `pd_special` (2 B): offset đến đầu special area (chỉ index dùng).
+   - `pd_pagesize_version` (2 B), `pd_prune_xid` (4 B).
+
+2. **ItemIdData array** — mảng các **line pointer** 4 byte. Mỗi line pointer = `(offset, length, flags)` trỏ tới một tuple trong cùng page. Index entries trỏ tới tuple **không phải bằng offset trực tiếp** mà thông qua line pointer, gọi là `CTID = [block_num, line_pointer_index]`. Lý do: khi tuple bị xóa và dọn dẹp, line pointer có thể được redirect đến vị trí mới mà không invalidate index.
+
+3. **Free space** — khoảng giữa `pd_lower` và `pd_upper`. Đây là vùng chưa dùng. INSERT mới sẽ ăn vào vùng này từ cả hai đầu.
+
+4. **Tuples** — dữ liệu thật, xếp từ cuối page hướng lên. Mỗi tuple = HeapTupleHeader + (optional) null bitmap + user data.
+
+5. **Special space** — dành cho indexes (B-tree, GIN, GiST,…). Heap pages không dùng vùng này.
+
+### Tại sao two-direction layout?
+
+Thiết kế "line pointers grow down, tuples grow up" có một mục tiêu cụ thể: cho phép thêm tuple mới **mà không phải shift toàn bộ dữ liệu**. Khi INSERT, line pointer được append vào cuối array (tăng `pd_lower`), tuple được prepend vào đỉnh tuple area (giảm `pd_upper`). Page chỉ "đầy" khi `pd_lower` chạm `pd_upper`. Đây là lý do INSERT vào một page có sẵn rẻ — không có memmove, chỉ là hai con trỏ.
+
+Bạn có thể inspect trực tiếp page bằng extension `pageinspect`:
+
+```sql
+CREATE EXTENSION pageinspect;
+SELECT lp, lp_off, lp_len, t_xmin, t_xmax, t_ctid
+FROM heap_page_items(get_raw_page('users', 0))
+LIMIT 5;
+```
+
+---
+
+## 3. Tuple anatomy — HeapTupleHeader
+
+Mỗi tuple vật lý là một block byte gồm ba phần: **header (23 byte + padding)**, **null bitmap (tùy chọn)**, và **user data (aligned)**.
+
+<ExcalidrawDiagram
+  src="/postgresql-tuple-header-anatomy.excalidraw"
+  alt="HeapTupleHeader fields — t_xmin, t_xmax, t_cid, t_ctid, t_infomask2, t_infomask, t_hoff — plus null bitmap and user data"
+/>
+
+Header chứa toàn bộ metadata mà MVCC cần để biết tuple này có visible với một transaction nào đó hay không. Đây là các field quan trọng:
+
+- **`t_xmin` (4 B)** — **Transaction ID** đã INSERT tuple này. Một row mới có `t_xmin = current_xid`.
+- **`t_xmax` (4 B)** — XID đã DELETE hoặc UPDATE tuple này. Nếu = 0 nghĩa là tuple đang live, chưa bị ai xóa. Khi bạn `DELETE` một row, PostgreSQL chỉ set `t_xmax = current_xid` và để nguyên tuple ở đó — đây là bản chất của MVCC (Multi-Version Concurrency Control — cơ chế cho phép reader và writer hoạt động song song mà không block nhau bằng cách giữ nhiều phiên bản dữ liệu).
+- **`t_cid` / `t_xvac` (4 B)** — Command ID trong cùng transaction; phân biệt các statement khác nhau trong cùng một BEGIN/COMMIT.
+- **`t_ctid` (6 B = 4 B block_num + 2 B offset)** — con trỏ tới chính tuple này (sau INSERT) hoặc tới phiên bản mới nhất sau UPDATE. Đây là cơ chế xây dựng **HOT chain** mà chúng ta sẽ gặp ở section 7.
+- **`t_infomask2` (2 B)** — số lượng attribute và một số flag (như `HEAP_KEYS_UPDATED`).
+- **`t_infomask` (2 B)** — flags vital. Bao gồm:
+  - `HEAP_HASNULL`: tuple có cột NULL → có null bitmap.
+  - `HEAP_HOT_UPDATED`, `HEAP_ONLY_TUPLE`: đánh dấu HOT chain (section 7).
+  - **Hint bits** — `HEAP_XMIN_COMMITTED`, `HEAP_XMIN_INVALID`, `HEAP_XMAX_COMMITTED`, `HEAP_XMAX_INVALID`: cache trạng thái commit/abort của xmin/xmax để visibility check không phải đi tra `pg_xact` mỗi lần.
+- **`t_hoff` (1 B)** — offset từ đầu tuple đến đầu user data (qua header + null bitmap).
+
+**Null bitmap** chỉ tồn tại khi `HEAP_HASNULL = 1`. Mỗi cột chiếm 1 bit; bit = 0 nghĩa cột đó NULL. Cách này tiết kiệm hơn nhiều so với việc lưu một byte/flag riêng cho mỗi cột.
+
+**User data** — giá trị các cột, **được căn chỉnh (aligned)** theo `typalign` của type. `int8` align 8 byte, `int4` align 4 byte, `bool` align 1 byte. Hệ quả: thứ tự cột trong CREATE TABLE ảnh hưởng đến storage. Bảng có columns `(a bool, b int8, c bool)` lớn hơn bảng `(b int8, a bool, c bool)` vì padding chèn vào để align `b`. Chi tiết về tối ưu này được nói kỹ ở [table-bloat](/posts/table-bloat).
+
+---
+
+## 4. Shared Buffer Manager — cầu nối giữa RAM và disk
+
+Đọc page từ disk mỗi lần là cực kỳ chậm. PostgreSQL maintain một **buffer pool trong RAM** chia thành các slot 8 KB — mỗi slot có thể chứa một page. Tham số `shared_buffers` (mặc định 128 MB, production thường 25% RAM) quyết định kích thước pool này.
+
+<ExcalidrawDiagram
+  src="/postgresql-shared-buffer-architecture.excalidraw"
+  alt="Shared buffer architecture — BufferTag lookup through hash table to buffer descriptor and buffer slot, clock-sweep eviction"
+/>
+
+### BufferTag — khóa tra cứu
+
+Khi backend muốn đọc page block 42 của bảng `users` (fork main), nó tạo một **BufferTag**:
+
+```
+BufferTag = (relfilenode = 24576, fork = MAIN_FORKNUM, blockNum = 42)
+```
+
+PostgreSQL maintain một **hash table** map `BufferTag → buffer_id` (index trong buffer pool). Backend tra hash table:
+
+- **HIT**: page đã có trong pool. Backend tăng `refcount` (pin buffer) và đi tiếp.
+- **MISS**: phải đọc từ disk. Backend chọn một victim buffer (thuật toán clock-sweep, dưới đây), nếu nó dirty thì flush trước, rồi `read(2)` page từ disk vào slot đó.
+
+### Buffer descriptor — metadata per-buffer
+
+Mỗi slot có một **buffer descriptor** đi kèm với các field:
+
+- **`refcount`** — bao nhiêu backend đang giữ buffer này. Tăng khi pin, giảm khi unpin. Buffer với `refcount > 0` không bị evict.
+- **`usage_count`** — đếm số lần buffer được access gần đây. Cap ở 5. Dùng cho thuật toán eviction.
+- **Flags**: `BM_DIRTY` (đã modify, cần ghi xuống disk), `BM_VALID` (đã load xong), `BM_IO_IN_PROGRESS` (đang đọc/ghi disk).
+- **`content_lock`** — LWLock điều phối read/write tuple data trong buffer. Shared cho reader, exclusive cho writer.
+- **`io_in_progress_lock`** — đảm bảo không có hai backend cùng load page này.
+
+### Clock-sweep eviction
+
+LRU thuần là quá đắt khi có hàng trăm backend cùng access buffer pool. PostgreSQL dùng **clock-sweep**: một background sweeper xoay vòng qua các buffer như kim đồng hồ:
+
+- Tại mỗi vị trí: nếu `usage_count > 0`, decrement nó và đi tiếp; nếu `usage_count = 0` và `refcount = 0`, đây là victim.
+- Khi backend access một buffer, nó tăng `usage_count` (cap 5).
+
+Hệ quả: page nóng có `usage_count` cao luôn, sống sót qua nhiều vòng sweep. Page lạnh nhanh chóng về 0 và bị evict. Tốn O(1) trên hot path, không cần global lock như LRU list.
+
+### Dirty page lifecycle
+
+Khi một backend ghi tuple lên buffer, nó set `BM_DIRTY`. Ai sẽ flush nó xuống disk?
+
+- **`bgwriter`** — process background flush dirty pages từ từ, dựa trên `bgwriter_delay`, `bgwriter_lru_maxpages`. Mục tiêu: san đều I/O.
+- **`checkpointer`** — process định kỳ flush **tất cả** dirty pages tại thời điểm checkpoint (`checkpoint_timeout` mặc định 5 phút, hoặc khi WAL chạm `max_wal_size`).
+- **Backend tự flush** — nếu phải evict một dirty victim và bgwriter chưa kịp, backend tự ghi. Đây là "backend writes" — thường là dấu hiệu của bgwriter tune sai.
+
+Bạn đo hiệu quả của buffer pool qua **cache hit ratio**:
+
+```sql
+SELECT relname,
+       heap_blks_read AS disk_reads,
+       heap_blks_hit  AS cache_hits,
+       round(100.0 * heap_blks_hit / NULLIF(heap_blks_hit + heap_blks_read, 0), 2) AS hit_pct
+FROM pg_statio_user_tables
+ORDER BY hit_pct ASC;
+```
+
+Hit ratio < 95% trên bảng OLTP thường là dấu hiệu `shared_buffers` quá nhỏ hoặc working set quá lớn.
+
+---
+
+## 5. WAL — Write-Ahead Log
+
+Có một quy tắc bất di bất dịch của PostgreSQL: **trước khi modify một page trong buffer, phải ghi xong WAL record vào WAL buffer**. Cụm từ này — "write-ahead" — chính là tên của log. Nếu không có nó, một crash sau khi buffer đã modify nhưng trước khi page kịp flush xuống disk sẽ dẫn đến mất dữ liệu.
+
+<ExcalidrawDiagram
+  src="/postgresql-wal-write-path.excalidraw"
+  alt="WAL write path — backend modifies buffer + appends WAL record; COMMIT fsyncs WAL; bgwriter/checkpoint flush data pages lazily"
+/>
+
+### LSN và WAL files
+
+**LSN (Log Sequence Number)** là vị trí byte trong WAL stream — một số 64-bit monotonic increase. Mỗi WAL record có một LSN. Khi PostgreSQL modify một page, nó set `pd_lsn` trong page header = LSN của WAL record vừa ghi. Đây là cách hệ thống biết "page này đã reflect WAL tới đâu".
+
+WAL được lưu thành các file 16 MB trong `pg_wal/` (trước đây gọi là `pg_xlog/` ở PG 10 trở về trước): `000000010000000000000001`, `000000010000000000000002`,… Định danh = `<timeline_id>_<segment_id_hi>_<segment_id_lo>`.
+
+### Commit lifecycle
+
+Trình tự khi một transaction commit:
+
+1. Backend modify buffer trong RAM — set `BM_DIRTY`, update `pd_lsn`.
+2. Backend append một WAL record vào **WAL buffer** (vùng RAM riêng cho WAL).
+3. Lệnh `COMMIT` đến: backend ghi thêm `XLOG_XACT_COMMIT` record, rồi gọi `fsync` trên WAL file đến LSN của commit record.
+4. Khi `fsync` return, backend báo thành công cho client.
+
+Lưu ý quan trọng: **data page chưa cần được flush** ở bước này. Nó vẫn nằm dirty trong shared_buffers. Nếu hệ thống crash ngay sau khi return cho client, WAL có đủ thông tin để recovery replay lại modification — không có dữ liệu nào mất, vì commit chỉ trả về khi WAL đã persist.
+
+### Checkpoint và recovery
+
+Định kỳ (theo `checkpoint_timeout`, mặc định 5 phút; hoặc khi WAL volume chạm `max_wal_size`), checkpointer chạy:
+
+- Flush tất cả dirty pages trong shared_buffers xuống data files.
+- Ghi một `CHECKPOINT` record vào WAL với LSN làm "redo point".
+- WAL trước redo point có thể được archive hoặc recycle.
+
+Khi crash recovery, PostgreSQL replay WAL từ redo point của checkpoint cuối cùng. Mọi modification chưa kịp flush sẽ được apply lại.
+
+### Tại sao WAL nhanh
+
+Câu hỏi tự nhiên: "Tại sao ghi WAL + ghi data sẽ nhanh hơn ghi data trực tiếp?"
+
+Câu trả lời gồm ba phần:
+
+- **Sequential write**: WAL là append-only. Disk (đặc biệt là HDD và NVMe ở các tier rẻ) nhanh hơn nhiều với sequential write so với random write tới các page rải rác.
+- **One fsync per transaction**: một transaction có thể chạm hàng chục page; thay vì fsync 10 lần (một lần cho mỗi page), ta chỉ fsync WAL một lần.
+- **Group commit**: nhiều concurrent transaction có thể chia sẻ chung một `fsync` — `commit_delay` và `commit_siblings` điều chỉnh hành vi này.
+
+---
+
+## 6. INSERT lifecycle — trace từng bước
+
+Bây giờ đến phần thú vị: ghép tất cả thành một trace cụ thể. Chuyện gì xảy ra khi bạn chạy `INSERT INTO users (id, name) VALUES (1001, 'Alice')`?
+
+1. **Lookup FSM**: backend hỏi Free Space Map "page nào còn ít nhất N byte trống cho tuple này?". FSM trả về block_num (ví dụ block 42).
+2. **Buffer lookup**: backend tạo `BufferTag(relfilenode, MAIN_FORKNUM, 42)`, tra hash table:
+   - HIT: pin buffer, tăng `usage_count`.
+   - MISS: pick victim qua clock-sweep. Nếu victim `BM_DIRTY`, ghi nó xuống disk trước (sau khi đảm bảo WAL liên quan đã persisted — quy tắc "WAL before data"). Sau đó `read()` page 42 vào slot này, set `BM_VALID`.
+3. **Acquire exclusive `content_lock`** trên buffer — chặn các backend khác sửa page này song song.
+4. **Write tuple**:
+   - Tìm hoặc append một line pointer (ItemId) trong array.
+   - Ghi `HeapTupleHeader` với `t_xmin = current_xid`, `t_xmax = 0`, `t_ctid = (42, lp_index)` (trỏ tới chính nó).
+   - Copy user data ngay dưới.
+   - Update `pd_lower` (line pointer area grow xuống), `pd_upper` (tuple area grow lên).
+5. **Write WAL record** `XLOG_HEAP_INSERT` vào WAL buffer — gồm BufferTag, offset, và bytes của tuple. Lấy LSN trả về.
+6. **Set page dirty**, update `pd_lsn = <wal_record_lsn>`.
+7. **Release `content_lock`**.
+8. **Unpin buffer** (giảm `refcount`).
+9. **COMMIT**: backend ghi `XLOG_XACT_COMMIT` vào WAL buffer, gọi `fsync` lên WAL file tới LSN này.
+10. Trả về client.
+
+Tổng cộng: 1 lần lookup FSM, có thể 1 lần đọc disk (nếu MISS), 1 lần ghi WAL (`fsync` chỉ flush WAL chứ không phải data page). Page có thể stay dirty trong shared_buffers hàng phút trước khi bgwriter hay checkpoint flush nó — và điều này hoàn toàn an toàn nhờ WAL.
+
+---
+
+## 7. UPDATE lifecycle — DELETE + INSERT, và HOT optimization
+
+`UPDATE` về mặt logic là `DELETE old + INSERT new`. PostgreSQL không bao giờ ghi đè in-place — nó luôn tạo phiên bản mới.
+
+Trình tự cụ thể cho `UPDATE users SET age = 31 WHERE id = 1001`:
+
+1. Locate tuple cũ (qua index hoặc seq scan). Pin và acquire exclusive `content_lock` page chứa nó.
+2. Find space cho new version — cùng page nếu có chỗ, page khác nếu không.
+3. Write tuple mới với `t_xmin = current_xid`, `t_xmax = 0`.
+4. Update tuple cũ: `t_xmax = current_xid`, `t_ctid = <vị trí tuple mới>`. Tuple cũ giờ là "dead" với mọi transaction bắt đầu sau commit này.
+5. Write WAL (`XLOG_HEAP_UPDATE` hoặc `XLOG_HEAP_HOT_UPDATE`).
+6. Commit + fsync như INSERT.
+
+Cho đến đây, vấn đề nghiêm trọng: nếu bảng có 5 index, mỗi UPDATE bình thường phải ghi 5 index entry mới trỏ tới tuple mới. Đây là I/O đáng kể trên bảng có nhiều index. Đây là lúc HOT vào cuộc.
+
+### HOT — Heap-Only Tuple
+
+**HOT (Heap-Only Tuple)** là tối ưu cực kỳ quan trọng của PostgreSQL từ phiên bản 8.3. Nó kích hoạt khi **hai điều kiện** cùng đúng:
+
+1. **New version fit vào cùng page** với old version.
+2. **Không có cột được indexed nào thay đổi**.
+
+Khi đó:
+
+- Set flag `HEAP_HOT_UPDATED` trên tuple cũ.
+- Set flag `HEAP_ONLY_TUPLE` trên tuple mới.
+- **Không ghi index entry mới** — index cũ vẫn trỏ tới tuple cũ.
+
+Khi một query sau này dùng index để tìm row đó, nó đến tuple cũ qua index, thấy flag `HEAP_HOT_UPDATED`, follow `t_ctid` đến tuple mới — toàn bộ trong cùng page (chỉ tốn một page read). Đây gọi là **HOT chain**.
+
+Lợi ích thực tế rất lớn: với bảng có 5 index, HOT UPDATE tiết kiệm 5 index writes per row. Với bảng dạng "key-value với nhiều index phụ" (rất phổ biến trong OLTP), tỉ lệ HOT đạt 80-90% có thể giảm write throughput cần thiết một bậc.
+
+Điều kiện tiên quyết: page phải còn space cho new version. Đây là lý do `fillfactor` mặc định cho bảng là 100 (không chừa chỗ) — nhưng với bảng nhiều UPDATE, bạn nên giảm xuống 80-90:
+
+```sql
+ALTER TABLE users SET (fillfactor = 85);
+```
+
+Bạn theo dõi tỉ lệ HOT qua `pg_stat_user_tables.n_tup_hot_upd / n_tup_upd`.
+
+Khi VACUUM dọn HOT chain, nó "prune" chain: cập nhật line pointer của tuple đầu chain thành **redirect** trỏ thẳng tới tuple cuối chain, rồi xóa các tuple trung gian. Index entry không bị invalidate vì nó vẫn trỏ đến cùng line pointer.
+
+### Non-HOT update
+
+Nếu một trong hai điều kiện trên không thỏa, đây là **non-HOT** (còn gọi là cold) update:
+
+- Ghi index entry mới cho **tất cả** index trên bảng — kể cả những index không liên quan đến cột đang update.
+- Tuple cũ vẫn được mark `t_xmax`, nhưng không có HEAP_HOT_UPDATED.
+
+Đây là một trong những lý do **nhiều index làm UPDATE chậm**. Mỗi index nói thêm "tôi sẽ tốn của bạn một write per non-HOT update".
+
+---
+
+## 8. DELETE lifecycle
+
+`DELETE FROM users WHERE id = 1001` đơn giản hơn nhiều:
+
+1. Locate tuple. Pin + exclusive `content_lock`.
+2. Set `t_xmax = current_xid` trên tuple.
+3. Write `XLOG_HEAP_DELETE` vào WAL.
+4. Release lock, unpin, commit.
+
+Tuple **vẫn ở nguyên đó về mặt vật lý**. Chỉ là `t_xmax` giờ là một xid đã commit, nên với mọi transaction bắt đầu sau commit này, tuple không còn visible. Đây là **dead tuple**.
+
+Index entry trỏ tới tuple cũng không bị xóa ngay — index không lưu visibility info, nó chỉ là "có một row tên Alice ở (block 42, line pointer 7)". Khi traversal qua index, executor đến heap tuple, đọc `t_xmax`, kiểm tra với snapshot hiện tại, quyết định bỏ qua nếu tuple invisible.
+
+Hệ quả: `DELETE` không hề giảm dung lượng bảng. Vacuum mới là người dọn (xem section 10).
+
+---
+
+## 9. SELECT — visibility check và hint bits
+
+Khi backend scan và gặp một tuple, làm sao nó biết tuple đó có visible với snapshot của transaction hiện tại không?
+
+Mỗi transaction lấy một **snapshot** tại thời điểm bắt đầu (hoặc tại lệnh đầu tiên với READ COMMITTED) gồm:
+
+- `xmin` — XID nhỏ nhất đang active.
+- `xmax` — XID lớn nhất + 1 đã được cấp.
+- `xip[]` — danh sách XID đang in-progress tại thời điểm chụp.
+
+Tuple visible khi:
+
+- `t_xmin` đã commit, AND committed-before-snapshot (không trong `xip`, và `< snapshot.xmax`).
+- AND (`t_xmax = 0`, OR `t_xmax` chưa commit, OR `t_xmax` đã abort, OR `t_xmax` committed-after-snapshot).
+
+Để check một xid đã commit chưa, hệ thống tra cứu **`pg_xact`** (trước đây là `pg_clog`) — một bitmap nhỏ trên disk. Truy `pg_xact` mỗi lần check thì rất đắt. Đây là lúc **hint bits** ra mặt.
+
+Lần đầu tiên một query đụng tới tuple sau khi xmin/xmax đã commit, backend update vào `t_infomask`:
+
+- `HEAP_XMIN_COMMITTED` hoặc `HEAP_XMIN_INVALID`
+- `HEAP_XMAX_COMMITTED` hoặc `HEAP_XMAX_INVALID`
+
+Các lần check sau chỉ cần đọc flag, không cần `pg_xact`. Tuy nhiên, việc set hint bits sẽ làm page **dirty** — đây là lý do một câu `SELECT` đầu tiên sau bulk INSERT có thể bất ngờ phát sinh write I/O. Đây không phải bug; đây là PostgreSQL "warming up" tuples.
+
+Khi gặp tuple với `HEAP_HOT_UPDATED`, scan follow `t_ctid` đến phiên bản tiếp theo, lặp lại visibility check, đến khi tìm thấy version visible — hoặc kết luận không có (toàn bộ chain đã chết).
+
+---
+
+## 10. Putting it together
+
+Tổng kết end-to-end: khi client gửi một câu DML đến PostgreSQL, query đi qua parser/planner/executor, đến storage layer mà bạn vừa đọc về. Backend tra `BufferTag` qua hash table; pin buffer trong shared_buffers; lock page; modify tuple bytes; ghi WAL record với LSN; mark page dirty; release lock; commit fsyncs WAL. bgwriter và checkpointer dọn dẹp dirty pages về data files trong background.
+
+Hiểu sâu storage layer giúp bạn:
+
+- **Đọc và tune `EXPLAIN (ANALYZE, BUFFERS)`**: `shared hit` là buffer pool hit, `shared read` là phải đọc từ disk (qua OS page cache hoặc xa hơn). `shared dirtied` là page bị set dirty bởi query — chú ý hint bits.
+- **Tune `shared_buffers` có ý thức**: chú ý working set thay vì tăng đại; 25% RAM là điểm khởi đầu, không phải đáp án.
+- **Hiểu fillfactor**: bảng nhiều UPDATE → giảm fillfactor để chừa chỗ cho HOT updates; bảng read-only → giữ 100.
+- **Hiểu tại sao bảng to nhanh dù `DELETE` nhiều**: dead tuples chỉ là tuple với `t_xmax` set, vẫn chiếm chỗ trên page. Đây là chủ đề của [Deep Dive về Table Bloat](/posts/table-bloat) — VACUUM thu hồi space của dead tuples bằng cách prune line pointer; VACUUM FULL viết lại toàn bộ heap; pg_repack làm tương tự nhưng không lock.
+- **Hiểu tại sao non-HOT update đắt**: ghi N index entry mới. Giảm số index, hoặc đảm bảo index không cover cột đang update.
+- **Biết khi nào nên scale sang partitioning**: khi một bảng quá lớn để vacuum/maintain hợp lý nữa, [partitioning](/posts/postgresql-partitioning) cho phép mỗi child có heap/index/vacuum scope riêng.
+
+PostgreSQL storage engine có thể được học từ trên xuống (SQL → query plan → I/O) hoặc từ dưới lên (byte trong file → page → buffer → tuple → MVCC → SQL). Cách thứ hai khó hơn nhưng cho hiểu biết bền vững hơn — bạn không còn lệ thuộc vào "best practice từng nghe nói" mà có thể đọc bất cứ tài liệu nào và suy ra trade-off bằng những nguyên lý đã nắm vững.
+
+Bài tiếp theo trong loạt deep-dive này có thể là về **B-tree index internals** (page structure, page splits, deduplication, bottom-up index deletion) hoặc **vacuum/autovacuum mechanics** (visibility horizon, xid wraparound, freezing). Cả hai đều đi sâu hơn vào những gì bài này mới chạm tới ở mặt ngoài.

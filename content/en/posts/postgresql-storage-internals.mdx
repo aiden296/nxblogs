@@ -1,0 +1,376 @@
+---
+title: 'Deep Dive: PostgreSQL Storage Internals — From Heap Files to the INSERT/UPDATE/DELETE Lifecycle'
+date: '2026-05-26'
+tags: ['Database']
+description: 'A byte-level tour of how PostgreSQL lays a table out on disk, how pages move between disk and shared buffers, and exactly what happens when you run INSERT, UPDATE, or DELETE.'
+enableComment: true
+---
+
+# Deep Dive: PostgreSQL Storage Internals — From Heap Files to the INSERT/UPDATE/DELETE Lifecycle
+
+When you run `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM users WHERE id = 42;`, PostgreSQL prints something like `Buffers: shared hit=3 read=1`. What does that mean exactly? Why does the same `UPDATE` run in 2 ms one time and 80 ms the next, even though the table isn't being locked? Why doesn't your table get smaller after a big `DELETE`? And what does the **shared buffer** — the thing every tuning guide tells you to size — actually contain?
+
+Answering those questions takes you one layer below SQL: the **storage engine**. This is a deep dive into how PostgreSQL organises a table on disk (heap files, pages, tuples), how that data is pulled into RAM by the **Shared Buffer Manager**, and exactly what happens at the byte level when an `INSERT`, `UPDATE`, or `DELETE` is executed. It complements [the Table Bloat deep dive](/posts/table-bloat) (which focuses on the consequence — dead tuples and vacuum) and [the PostgreSQL Partitioning deep dive](/posts/postgresql-partitioning) (which focuses on splitting big tables) — both of those posts stand on top of the concepts this one dissects.
+
+<ExcalidrawDiagram
+  src="/postgresql-storage-internals-overview.excalidraw"
+  alt="End-to-end write path — Backend → Shared Buffer Manager → Heap files; WAL buffer → WAL files on COMMIT"
+/>
+
+## 1. How a table is laid out on disk
+
+Every PostgreSQL table eventually reduces to **a set of files on the filesystem**. The `PGDATA` environment variable points to the data directory (e.g. `/var/lib/postgresql/16/main`). Inside it, the heap file path for a given table follows this pattern:
+
+```
+$PGDATA/base/<database_oid>/<relfilenode>
+```
+
+You can verify directly:
+
+```sql
+SELECT pg_relation_filepath('users');
+-- base/16384/24576
+```
+
+`16384` is the database OID, `24576` is the **relfilenode** of the `users` table. Note: `relfilenode` is **not** the same as the table's `oid`. When you run `VACUUM FULL`, `CLUSTER`, `REINDEX`, or `TRUNCATE`, PostgreSQL rewrites the data into a new file and changes the `relfilenode` — but the `oid` (the catalog reference) stays the same. This matters for monitoring: if you cache a file path and reuse it 30 minutes later, it may point at a file that no longer exists.
+
+### The three forks of a relation
+
+A table isn't just one fork — it's three. **Fork** is a term borrowed from the "file fork" concept in older filesystems. For practical purposes, you can think of it as a file.
+
+<ExcalidrawDiagram
+  src="/postgresql-heap-file-hierarchy.excalidraw"
+  alt="PGDATA layout — base/ → database OID dir → relfilenode with main / _fsm / _vm forks and segment splits"
+/>
+
+- **Main fork** (`<relfilenode>`): the actual heap data — the tuples you've `INSERT`ed.
+- **FSM fork** (`<relfilenode>_fsm`): the **Free Space Map** — a small tree-like data structure that records how many free bytes each page has left. On `INSERT`, PostgreSQL consults the FSM to find a page with enough room, instead of scanning sequentially.
+- **VM fork** (`<relfilenode>_vm`): the **Visibility Map** — 2 bits per page, recording whether (a) the page contains only live tuples, and (b) the page has been frozen. Index-only scans rely on (a) to skip the heap-visibility check; VACUUM relies on it to skip pages that have no dead tuples.
+
+When the table grows past **1 GB**, the main fork is split into consecutive **segment files**: `<relfilenode>`, `<relfilenode>.1`, `<relfilenode>.2`, … The historical reason: many older filesystems (HFS, FAT32, ext2 with small block sizes) had per-file size limits of 2 GB or 4 GB. PostgreSQL kept the 1 GB segment ceiling since it works fine and there's no reason to change.
+
+Finally, if a row has a text/bytea/jsonb column longer than ~2 KB, PostgreSQL doesn't shove it into the main page. It uses **TOAST** (The Oversized-Attribute Storage Technique): the column gets compressed and/or sliced into a side table called `pg_toast.pg_toast_<oid>` — itself a full relation with its own main/FSM/VM forks. The implication: SELECTing a TOASTed column may incur extra I/O fetching chunks from the side table.
+
+---
+
+## 2. Page anatomy — the 8 KB I/O unit
+
+PostgreSQL never reads or writes single bytes, tuples, or rows. The fundamental I/O unit is a **page** (also called a **block**), default size **8 KB**. Every disk read or write happens at this granularity. This is the reason [the table-bloat post](/posts/table-bloat) emphasises that "to fetch one tuple, you must haul up the entire 8 KB container."
+
+<ExcalidrawDiagram
+  src="/postgresql-page-anatomy.excalidraw"
+  alt="Heap page anatomy — PageHeader at top, line pointers grow down, free space in middle, tuples grow up, special area at bottom"
+/>
+
+A page's layout, from offset 0 to 8191:
+
+1. **PageHeaderData (24 bytes)** — page-level metadata:
+   - `pd_lsn` (8 B): the **Log Sequence Number** of the most recent WAL record that touched this page. Used for recovery and checkpoint coordination.
+   - `pd_checksum` (2 B): integrity checksum (when `data_checksums` is enabled).
+   - `pd_flags` (2 B): flags like `PD_HAS_FREE_LINES`, `PD_PAGE_FULL`, `PD_ALL_VISIBLE`.
+   - `pd_lower` (2 B), `pd_upper` (2 B): two pointers that delimit free space — `pd_lower` is the end of the line pointer array; `pd_upper` is the top of the tuple area.
+   - `pd_special` (2 B): offset to the start of the special area (used only by indexes).
+   - `pd_pagesize_version` (2 B), `pd_prune_xid` (4 B).
+
+2. **ItemIdData array** — an array of 4-byte **line pointers**. Each line pointer = `(offset, length, flags)` pointing at a tuple within the same page. Index entries reference a tuple **not by raw offset** but through this line pointer, called `CTID = [block_num, line_pointer_index]`. Why: when a tuple is removed and the page is cleaned up, the line pointer can be redirected to a new position without invalidating the index.
+
+3. **Free space** — the gap between `pd_lower` and `pd_upper`. This is the unused area. New INSERTs consume it from both ends.
+
+4. **Tuples** — the actual data, stacked from the bottom of the page upward. Each tuple = HeapTupleHeader + (optional) null bitmap + user data.
+
+5. **Special space** — reserved for indexes (B-tree, GIN, GiST, …). Heap pages don't use it.
+
+### Why the two-direction layout?
+
+The "line pointers grow down, tuples grow up" design has a specific purpose: it lets you add a new tuple **without shifting any existing data**. On INSERT, a line pointer is appended at the end of the array (advancing `pd_lower`), and the tuple is prepended to the top of the tuple area (decreasing `pd_upper`). The page is only "full" when `pd_lower` meets `pd_upper`. This is why INSERTing into a page with room is cheap — no memmove, just two pointer updates.
+
+You can inspect a page directly with the `pageinspect` extension:
+
+```sql
+CREATE EXTENSION pageinspect;
+SELECT lp, lp_off, lp_len, t_xmin, t_xmax, t_ctid
+FROM heap_page_items(get_raw_page('users', 0))
+LIMIT 5;
+```
+
+---
+
+## 3. Tuple anatomy — HeapTupleHeader
+
+Each physical tuple is a byte blob made of three parts: the **header (23 bytes + padding)**, an **optional null bitmap**, and the **user data (aligned)**.
+
+<ExcalidrawDiagram
+  src="/postgresql-tuple-header-anatomy.excalidraw"
+  alt="HeapTupleHeader fields — t_xmin, t_xmax, t_cid, t_ctid, t_infomask2, t_infomask, t_hoff — plus null bitmap and user data"
+/>
+
+The header holds everything MVCC needs to decide whether the tuple is visible to a given transaction. The important fields:
+
+- **`t_xmin` (4 B)** — the **Transaction ID** that INSERTed this tuple. A fresh row has `t_xmin = current_xid`.
+- **`t_xmax` (4 B)** — the XID that DELETEd or UPDATEd this tuple. `0` means the tuple is live, not yet touched by anyone. When you `DELETE` a row, PostgreSQL only sets `t_xmax = current_xid` and leaves the tuple in place — this is the essence of MVCC (Multi-Version Concurrency Control — a mechanism that lets readers and writers operate concurrently without blocking, by keeping multiple versions of each row).
+- **`t_cid` / `t_xvac` (4 B)** — Command ID within the same transaction; distinguishes statements inside one BEGIN/COMMIT.
+- **`t_ctid` (6 B = 4 B block_num + 2 B offset)** — a pointer to this tuple itself (right after INSERT) or to the latest version after UPDATE. This is the mechanism that builds the **HOT chain** discussed in section 7.
+- **`t_infomask2` (2 B)** — attribute count plus a handful of flags (e.g. `HEAP_KEYS_UPDATED`).
+- **`t_infomask` (2 B)** — vital flags, including:
+  - `HEAP_HASNULL`: the tuple has a NULL column → there's a null bitmap.
+  - `HEAP_HOT_UPDATED`, `HEAP_ONLY_TUPLE`: HOT chain markers (section 7).
+  - **Hint bits** — `HEAP_XMIN_COMMITTED`, `HEAP_XMIN_INVALID`, `HEAP_XMAX_COMMITTED`, `HEAP_XMAX_INVALID`: cached commit/abort status of xmin/xmax so visibility checks don't need to consult `pg_xact` every time.
+- **`t_hoff` (1 B)** — offset from the start of the tuple to the user data (past the header + null bitmap).
+
+The **null bitmap** is only present when `HEAP_HASNULL = 1`. Each column gets one bit; bit = 0 means the column is NULL. This is much more efficient than storing a flag byte per column.
+
+The **user data** holds the column values, **aligned** according to each type's `typalign`. `int8` aligns on 8 bytes, `int4` on 4 bytes, `bool` on 1 byte. The consequence: the order of columns in CREATE TABLE affects storage size. A table with columns `(a bool, b int8, c bool)` is larger than `(b int8, a bool, c bool)` because padding has to be inserted to align `b`. [The table-bloat post](/posts/table-bloat) covers this optimization in depth.
+
+---
+
+## 4. The Shared Buffer Manager — the bridge between RAM and disk
+
+Reading a page from disk every time is brutally slow. PostgreSQL maintains a **buffer pool in RAM** sliced into 8 KB slots — each slot can hold one page. The `shared_buffers` parameter (default 128 MB, typically 25% of RAM in production) determines the pool's size.
+
+<ExcalidrawDiagram
+  src="/postgresql-shared-buffer-architecture.excalidraw"
+  alt="Shared buffer architecture — BufferTag lookup through hash table to buffer descriptor and buffer slot, clock-sweep eviction"
+/>
+
+### BufferTag — the lookup key
+
+When a backend wants to read block 42 of the `users` main fork, it constructs a **BufferTag**:
+
+```
+BufferTag = (relfilenode = 24576, fork = MAIN_FORKNUM, blockNum = 42)
+```
+
+PostgreSQL maintains a **hash table** mapping `BufferTag → buffer_id` (the index into the buffer pool). The backend probes the hash:
+
+- **HIT**: the page is already pooled. The backend increments `refcount` (pins the buffer) and proceeds.
+- **MISS**: the page must be read from disk. The backend picks a victim buffer (via the clock-sweep algorithm below), flushes it if it's dirty, then `read(2)`s the page from disk into that slot.
+
+### Buffer descriptor — per-buffer metadata
+
+Each slot has an associated **buffer descriptor** with these fields:
+
+- **`refcount`** — how many backends currently hold the buffer. Incremented on pin, decremented on unpin. A buffer with `refcount > 0` cannot be evicted.
+- **`usage_count`** — counts recent accesses. Capped at 5. Used by the eviction algorithm.
+- **Flags**: `BM_DIRTY` (modified, needs to be written), `BM_VALID` (load complete), `BM_IO_IN_PROGRESS` (mid-read or mid-write).
+- **`content_lock`** — an LWLock arbitrating reads/writes of tuple data within the buffer. Shared for readers, exclusive for writers.
+- **`io_in_progress_lock`** — ensures two backends don't try to load the same page concurrently.
+
+### Clock-sweep eviction
+
+True LRU is too expensive with hundreds of concurrent backends. PostgreSQL uses **clock-sweep**: a background sweeper rotates through buffers like a clock hand:
+
+- At each position: if `usage_count > 0`, decrement it and move on; if `usage_count = 0` and `refcount = 0`, that buffer is the victim.
+- When a backend accesses a buffer, it increments `usage_count` (capped at 5).
+
+The effect: hot pages keep a high `usage_count` and survive many sweep rotations. Cold pages quickly drop to 0 and get evicted. The hot path costs O(1), with no global LRU lock contention.
+
+### Dirty page lifecycle
+
+When a backend writes to a buffer, it sets `BM_DIRTY`. Who flushes it?
+
+- **`bgwriter`** — a background process that slowly trickles dirty pages to disk, governed by `bgwriter_delay` and `bgwriter_lru_maxpages`. Goal: smooth out I/O.
+- **`checkpointer`** — periodically flushes **all** dirty pages at checkpoint time (`checkpoint_timeout` defaults to 5 minutes, or whenever WAL exceeds `max_wal_size`).
+- **Backend itself** — if it has to evict a dirty victim and bgwriter hasn't kept up, the backend writes the page. These "backend writes" usually mean bgwriter is mistuned.
+
+You measure how effective the pool is via the **cache hit ratio**:
+
+```sql
+SELECT relname,
+       heap_blks_read AS disk_reads,
+       heap_blks_hit  AS cache_hits,
+       round(100.0 * heap_blks_hit / NULLIF(heap_blks_hit + heap_blks_read, 0), 2) AS hit_pct
+FROM pg_statio_user_tables
+ORDER BY hit_pct ASC;
+```
+
+A hit ratio under 95% on an OLTP table usually signals that `shared_buffers` is too small, or the working set has outgrown RAM.
+
+---
+
+## 5. WAL — the Write-Ahead Log
+
+There is one inviolable rule in PostgreSQL: **before modifying a page in the buffer, the WAL record describing the modification must be written into the WAL buffer**. The name itself — "write-ahead" — describes this. Without it, a crash that strikes after the buffer was modified but before the page was flushed to disk would cause data loss.
+
+<ExcalidrawDiagram
+  src="/postgresql-wal-write-path.excalidraw"
+  alt="WAL write path — backend modifies buffer + appends WAL record; COMMIT fsyncs WAL; bgwriter/checkpoint flush data pages lazily"
+/>
+
+### LSN and WAL files
+
+The **LSN (Log Sequence Number)** is a position (byte offset) in the WAL stream — a 64-bit monotonically increasing number. Every WAL record has an LSN. When PostgreSQL modifies a page, it sets the page's `pd_lsn` to the LSN of the WAL record it just wrote. That's how the system knows "this page has been brought up to date with the WAL through LSN X."
+
+WAL is stored as 16 MB files in `pg_wal/` (formerly `pg_xlog/` before PG 10): `000000010000000000000001`, `000000010000000000000002`, … The naming = `<timeline_id>_<segment_id_hi>_<segment_id_lo>`.
+
+### Commit lifecycle
+
+The sequence for committing a transaction:
+
+1. Backend modifies the buffer in RAM — sets `BM_DIRTY`, updates `pd_lsn`.
+2. Backend appends a WAL record to the **WAL buffer** (a RAM area dedicated to WAL).
+3. The `COMMIT` arrives: backend appends an `XLOG_XACT_COMMIT` record, then calls `fsync` on the WAL file up to the LSN of the commit record.
+4. Once `fsync` returns, the backend tells the client the commit succeeded.
+
+The critical point: **data pages do not need to be flushed yet**. They can sit dirty in shared_buffers indefinitely. If the server crashes immediately after returning to the client, the WAL has enough information for recovery to replay the modification — nothing is lost, because the commit only returned after WAL was persisted.
+
+### Checkpoint and recovery
+
+Periodically (per `checkpoint_timeout`, default 5 minutes; or when WAL volume reaches `max_wal_size`), the checkpointer runs:
+
+- Flush every dirty page from shared_buffers down to the data files.
+- Write a `CHECKPOINT` record into the WAL with its LSN marked as the "redo point."
+- WAL preceding the redo point may now be archived or recycled.
+
+On crash recovery, PostgreSQL replays WAL forward from the last checkpoint's redo point. Every modification that wasn't yet flushed is re-applied.
+
+### Why WAL is fast
+
+A natural question: "If we have to write WAL and the data, isn't that strictly more work than writing the data directly?"
+
+The answer has three parts:
+
+- **Sequential write**: WAL is append-only. Disks (especially HDDs and budget-tier NVMe) handle sequential writes much faster than random writes scattered across the data files.
+- **One fsync per transaction**: a transaction can touch dozens of pages; instead of fsyncing 10 times (one per page), we fsync WAL once.
+- **Group commit**: multiple concurrent transactions can share a single `fsync` — `commit_delay` and `commit_siblings` tune this behaviour.
+
+---
+
+## 6. INSERT lifecycle — step by step
+
+Now the fun part: stitching everything together into a concrete trace. What happens when you run `INSERT INTO users (id, name) VALUES (1001, 'Alice')`?
+
+1. **FSM lookup**: the backend asks the Free Space Map "which page has at least N bytes free for this tuple?" The FSM returns a block_num (say block 42).
+2. **Buffer lookup**: the backend builds `BufferTag(relfilenode, MAIN_FORKNUM, 42)` and probes the hash table:
+   - HIT: pin the buffer, bump `usage_count`.
+   - MISS: pick a victim via clock-sweep. If the victim is `BM_DIRTY`, write it out (after ensuring the associated WAL has been persisted — the "WAL before data" rule). Then `read()` block 42 into the slot, set `BM_VALID`.
+3. **Acquire the exclusive `content_lock`** on the buffer — blocks other backends from concurrently modifying this page.
+4. **Write the tuple**:
+   - Find or append a line pointer (ItemId) in the array.
+   - Write the `HeapTupleHeader` with `t_xmin = current_xid`, `t_xmax = 0`, `t_ctid = (42, lp_index)` (points to itself).
+   - Copy the user data right below.
+   - Update `pd_lower` (line pointer area grows downward) and `pd_upper` (tuple area grows upward).
+5. **Write a WAL record** `XLOG_HEAP_INSERT` into the WAL buffer — includes BufferTag, offset, and the tuple bytes. Receive the assigned LSN.
+6. **Mark the page dirty**, update `pd_lsn = <wal_record_lsn>`.
+7. **Release the `content_lock`**.
+8. **Unpin the buffer** (decrement `refcount`).
+9. **COMMIT**: backend writes `XLOG_XACT_COMMIT` to the WAL buffer, calls `fsync` on the WAL up through that LSN.
+10. Return to the client.
+
+Total: one FSM lookup, possibly one disk read (on MISS), one WAL write (`fsync` only flushes WAL, not the data page). The page can stay dirty in shared_buffers for minutes before bgwriter or checkpoint flushes it — and that's completely safe thanks to WAL.
+
+---
+
+## 7. UPDATE lifecycle — DELETE + INSERT, plus HOT
+
+`UPDATE` is logically `DELETE old + INSERT new`. PostgreSQL never overwrites a tuple in place — it always creates a new version.
+
+The sequence for `UPDATE users SET age = 31 WHERE id = 1001`:
+
+1. Locate the old tuple (through an index or sequential scan). Pin the page and acquire the exclusive `content_lock`.
+2. Find space for the new version — same page if possible, another page otherwise.
+3. Write the new tuple with `t_xmin = current_xid`, `t_xmax = 0`.
+4. Update the old tuple: `t_xmax = current_xid`, `t_ctid = <location of the new tuple>`. The old tuple is now dead to every transaction that begins after this commit.
+5. Write WAL (`XLOG_HEAP_UPDATE` or `XLOG_HEAP_HOT_UPDATE`).
+6. Commit + fsync, same as INSERT.
+
+So far so good — but here's the catch: if the table has 5 indexes, a normal UPDATE has to write 5 new index entries that point to the new tuple. On a table with many indexes, this is significant I/O. That's where HOT comes in.
+
+### HOT — Heap-Only Tuple
+
+**HOT (Heap-Only Tuple)** is a crucial optimization introduced in PostgreSQL 8.3. It kicks in when **two conditions** both hold:
+
+1. **The new version fits on the same page** as the old version.
+2. **No indexed column was changed**.
+
+When it does:
+
+- Set the `HEAP_HOT_UPDATED` flag on the old tuple.
+- Set the `HEAP_ONLY_TUPLE` flag on the new tuple.
+- **Skip writing new index entries** — the existing index entry still points at the old tuple.
+
+Later, when a query uses the index to find that row, it lands on the old tuple via the index, sees the `HEAP_HOT_UPDATED` flag, follows `t_ctid` to the new tuple — all within the same page (just one page read). This is the **HOT chain**.
+
+The practical payoff is large. On a table with 5 indexes, a HOT UPDATE saves 5 index writes per row. For "key-value with many secondary indexes" patterns common in OLTP, achieving 80–90% HOT can reduce required write throughput by an order of magnitude.
+
+Prerequisite: the page must have room for the new version. This is why the default `fillfactor` for tables is 100 (no reserved room) — but for update-heavy tables, you should lower it to 80–90:
+
+```sql
+ALTER TABLE users SET (fillfactor = 85);
+```
+
+Track your HOT ratio via `pg_stat_user_tables.n_tup_hot_upd / n_tup_upd`.
+
+When VACUUM tidies up a HOT chain, it "prunes" the chain: the line pointer at the head of the chain is converted into a **redirect** pointing directly at the final tuple, and intermediate tuples are removed. Index entries don't need to be invalidated, because they still point to the same line pointer.
+
+### Non-HOT updates
+
+If either condition fails, the update is **non-HOT** (also called cold):
+
+- A new index entry must be written for **every** index on the table — including indexes that have nothing to do with the columns being updated.
+- The old tuple still gets its `t_xmax` set, but without HEAP_HOT_UPDATED.
+
+This is one of the main reasons **many indexes make UPDATEs slow**. Every index adds "I'll cost you a write per non-HOT update."
+
+---
+
+## 8. DELETE lifecycle
+
+`DELETE FROM users WHERE id = 1001` is much simpler:
+
+1. Locate the tuple. Pin + acquire the exclusive `content_lock`.
+2. Set `t_xmax = current_xid` on the tuple.
+3. Write `XLOG_HEAP_DELETE` to the WAL.
+4. Release the lock, unpin, commit.
+
+The tuple **physically stays where it is**. It's just that `t_xmax` is now a committed XID, so for every transaction that begins after this commit, the tuple is no longer visible. That's a **dead tuple**.
+
+The index entry pointing to the tuple isn't deleted either — the index doesn't carry visibility info, it just knows "there's a row named Alice at (block 42, line pointer 7)." When a query traverses the index, the executor reaches the heap tuple, reads `t_xmax`, checks it against the current snapshot, and decides to skip the tuple if invisible.
+
+Consequence: `DELETE` does not shrink the table at all. Vacuum is what cleans it up (see section 10).
+
+---
+
+## 9. SELECT — visibility checks and hint bits
+
+When a backend scans and encounters a tuple, how does it know whether the tuple is visible to the current transaction's snapshot?
+
+Every transaction takes a **snapshot** at start time (or at the first statement under READ COMMITTED), comprising:
+
+- `xmin` — the smallest currently-active XID.
+- `xmax` — one past the largest XID ever assigned.
+- `xip[]` — the list of XIDs in progress at the moment of capture.
+
+A tuple is visible when:
+
+- `t_xmin` has committed, AND committed-before-snapshot (not in `xip`, and `< snapshot.xmax`).
+- AND (`t_xmax = 0`, OR `t_xmax` hasn't committed, OR `t_xmax` aborted, OR `t_xmax` committed-after-snapshot).
+
+To know whether a given XID has committed, the system consults **`pg_xact`** (formerly `pg_clog`) — a small on-disk bitmap. Hitting `pg_xact` per visibility check would be expensive. That's where **hint bits** come in.
+
+The first query to touch a tuple after its xmin/xmax has committed updates `t_infomask` with:
+
+- `HEAP_XMIN_COMMITTED` or `HEAP_XMIN_INVALID`
+- `HEAP_XMAX_COMMITTED` or `HEAP_XMAX_INVALID`
+
+Subsequent checks just read the flags; no `pg_xact` lookup needed. However, setting the hint bits **dirties the page** — this is why a `SELECT` immediately after a bulk INSERT can surprisingly produce write I/O. It's not a bug; PostgreSQL is "warming up" the tuples.
+
+When the scan hits a tuple marked `HEAP_HOT_UPDATED`, it follows `t_ctid` to the next version and re-checks visibility, until it either finds a visible version or concludes none exists (the whole chain is dead).
+
+---
+
+## 10. Putting it together
+
+End-to-end recap: when a client sends a DML statement to PostgreSQL, the query traverses the parser, planner, and executor and arrives at the storage layer you've just read about. The backend probes a `BufferTag` through the hash table; pins a buffer in shared_buffers; locks the page; modifies tuple bytes; writes a WAL record with an LSN; marks the page dirty; releases the lock; commit fsyncs WAL. bgwriter and checkpointer move dirty pages to data files in the background.
+
+Understanding the storage layer lets you:
+
+- **Read and tune `EXPLAIN (ANALYZE, BUFFERS)`**: `shared hit` is a buffer pool hit; `shared read` means we had to go to disk (possibly hitting the OS page cache or further); `shared dirtied` is a page the query marked dirty — beware of hint bits.
+- **Tune `shared_buffers` deliberately**: chase the working set rather than scaling blindly; 25% of RAM is a starting point, not the answer.
+- **Understand fillfactor**: update-heavy tables → lower fillfactor to leave room for HOT updates; read-mostly tables → keep it at 100.
+- **Understand why tables grow fast even with frequent `DELETE`s**: dead tuples are just tuples with `t_xmax` set, still occupying their page. That's the topic of [the Table Bloat deep dive](/posts/table-bloat) — VACUUM reclaims dead-tuple space by pruning line pointers; VACUUM FULL rewrites the entire heap; pg_repack does the same without long locks.
+- **Understand why non-HOT updates are expensive**: every secondary index costs a write. Reduce index count, or ensure the indexes don't cover the columns being updated.
+- **Know when to scale up to partitioning**: once a table is too large to vacuum and maintain cleanly, [partitioning](/posts/postgresql-partitioning) gives each child its own heap, indexes, and vacuum scope.
+
+You can learn the PostgreSQL storage engine top-down (SQL → query plan → I/O) or bottom-up (bytes in a file → pages → buffers → tuples → MVCC → SQL). The second path is harder but gives you more durable understanding — instead of relying on "best practices I once heard," you can read any documentation and reason about the trade-offs from first principles.
+
+A natural follow-up in this deep-dive series would be **B-tree index internals** (page structure, page splits, deduplication, bottom-up index deletion) or **vacuum/autovacuum mechanics** (visibility horizon, XID wraparound, freezing). Both go deeper into territory this post has only grazed.
