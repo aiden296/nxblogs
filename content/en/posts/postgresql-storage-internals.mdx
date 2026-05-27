@@ -135,7 +135,7 @@ To support those three questions, the buffer manager is built from three paralle
 
 - **Buffer table** — a hash table that maps `BufferTag → buffer_id`. This is the index that tells you whether a given page is currently pooled.
 - **Buffer descriptor array** — a metadata array that runs parallel to the buffer pool; each entry describes one slot via `tag`, `buf_id`, `refcount` (pin count), `usage_count`, and a `state` word holding flags such as `BM_DIRTY`, `BM_VALID`, `BM_IO_IN_PROGRESS`.
-- **Buffer pool** — the array of 8 KB slots that actually holds page bytes. The `buffer_id` *is* the index into this array. Crucially, descriptor `[i]` and pool slot `[i]` always describe the same page — they march in lockstep.
+- **Buffer pool** — the array of 8 KB slots that actually holds page bytes. The `buffer_id` _is_ the index into this array. Crucially, descriptor `[i]` and pool slot `[i]` always describe the same page — they march in lockstep.
 
 <ExcalidrawDiagram
   src="/postgresql-shared-buffer-architecture.excalidraw"
@@ -196,9 +196,9 @@ loop:
   d = descriptors[nextVictimBuffer]
   if d.refcount == 0:
     if d.usage_count == 0:
-      return d                              // victim found
+      return d
     else:
-      d.usage_count -= 1                    // give it another chance
+      d.usage_count -= 1
   nextVictimBuffer = (nextVictimBuffer + 1) mod N
 ```
 
