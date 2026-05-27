@@ -57,8 +57,6 @@ Khi bảng vượt quá **1 GB**, main fork được chia thành nhiều **segme
 
 > Lý do lịch sử: nhiều filesystem cũ (HFS, FAT32, ext2 với block size nhỏ) có giới hạn 2 GB hoặc 4 GB cho một file. PostgreSQL giữ giới hạn segment 1 GB cho đến nay vì nó hoạt động tốt và không có lý do để thay đổi.
 
-Cuối cùng, nếu một row có cột text/bytea/jsonb dài hơn ~2 KB, PostgreSQL không nhét trực tiếp vào page chính. Nó dùng **TOAST** (The Oversized-Attribute Storage Technique): cột bị nén và/hoặc tách ra một bảng phụ tên `pg_toast.pg_toast_<oid>` — bảng này cũng là một relation đầy đủ với main/FSM/VM forks riêng. Hệ quả: SELECT một cột TOAST có thể tốn I/O thêm để fetch các "chunks" từ bảng phụ.
-
 ---
 
 ## 2. Page anatomy — đơn vị I/O 8 KB
@@ -90,7 +88,12 @@ Layout của một page, từ offset 0 đến 8191:
 
 ### Tại sao two-direction layout?
 
-Thiết kế "line pointers grow down, tuples grow up" có một mục tiêu cụ thể: cho phép thêm tuple mới **mà không phải shift toàn bộ dữ liệu**. Khi INSERT, line pointer được append vào cuối array (tăng `pd_lower`), tuple được prepend vào đỉnh tuple area (giảm `pd_upper`). Page chỉ "đầy" khi `pd_lower` chạm `pd_upper`.
+Thiết kế "line pointers grow down, tuples grow up" có một mục tiêu cụ thể: cho phép thêm tuple mới **mà không phải shift toàn bộ dữ liệu**.
+
+Khi INSERT:
+- Line pointer được append vào cuối array (tăng `pd_lower`)
+- Tuple được prepend vào đỉnh tuple area (giảm `pd_upper`)
+- Page chỉ "đầy" khi `pd_lower` chạm `pd_upper`.
 
 ---
 
@@ -119,6 +122,22 @@ Header chứa toàn bộ metadata mà MVCC cần để biết tuple này có vis
 **Null bitmap** chỉ tồn tại khi `HEAP_HASNULL = 1`. Mỗi cột chiếm 1 bit; bit = 0 nghĩa cột đó NULL. Cách này tiết kiệm hơn nhiều so với việc lưu riêng một byte/flag cho mỗi cột.
 
 **User data** — giá trị các cột, **được căn chỉnh (aligned)** theo `typalign` của type. `int8` align 8 byte, `int4` align 4 byte, `bool` align 1 byte. Hệ quả: thứ tự cột trong CREATE TABLE ảnh hưởng đến storage. Bảng có columns `(a bool, b int8, c bool)` lớn hơn bảng `(b int8, a bool, c bool)` vì padding chèn vào để align `b`. Chi tiết về tối ưu này được nói kỹ ở [table-bloat](/posts/table-bloat).
+
+### Giới hạn kích thước tuple — con số 2 KB đến từ đâu?
+
+Mỗi tuple có giới hạn kích thước là 2KB.
+
+Một câu hỏi thường gặp: **"Vì sao lại là 2 KB, có phải hằng số cố định không?"**
+
+Câu trả lời là **không**. Con số đó được PostgreSQL tính ra theo công thức `TOAST_TUPLE_THRESHOLD ≈ BLCKSZ / 4`, tức **cố nhét ít nhất 4 tuple vào mỗi page**. Với `BLCKSZ = 8 KB` mặc định, ngưỡng rơi vào khoảng 2 KB.
+
+Khi tuple vượt ngưỡng này, **TOAST** (The Oversized-Attribute Storage Technique — cơ chế nén và/hoặc đẩy các cột lớn ra một bảng phụ riêng) kích hoạt: PostgreSQL nén các cột variable-length hoặc tách chúng ra 1 bảng phụ, chỉ để lại một con trỏ inline.
+
+Ngưỡng này có thể chỉnh ở mức bảng bằng storage parameter `toast_tuple_target` (từ PG 11):
+
+```sql
+ALTER TABLE my_table SET (toast_tuple_target = 4080);
+```
 
 ---
 

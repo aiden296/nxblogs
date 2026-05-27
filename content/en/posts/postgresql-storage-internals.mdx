@@ -57,8 +57,6 @@ When the table grows past **1 GB**, the main fork is split into consecutive **se
 
 > Historical reason: many older filesystems (HFS, FAT32, ext2 with small block sizes) had per-file size limits of 2 GB or 4 GB. PostgreSQL has kept the 1 GB segment ceiling ever since because it still works fine and there's no reason to change.
 
-Finally, if a row has a text/bytea/jsonb column longer than ~2 KB, PostgreSQL doesn't shove it into the main page. It uses **TOAST** (The Oversized-Attribute Storage Technique): the column gets compressed and/or sliced into a side table called `pg_toast.pg_toast_<oid>` — itself a full relation with its own main/FSM/VM forks. The implication: SELECTing a TOASTed column may incur extra I/O fetching chunks from the side table.
-
 ---
 
 ## 2. Page anatomy — the 8 KB I/O unit
@@ -119,6 +117,22 @@ The header holds everything MVCC needs to decide whether the tuple is visible to
 The **null bitmap** is only present when `HEAP_HASNULL = 1`. Each column gets one bit; bit = 0 means the column is NULL. This is much more efficient than storing a flag byte per column.
 
 The **user data** holds the column values, **aligned** according to each type's `typalign`. `int8` aligns on 8 bytes, `int4` on 4 bytes, `bool` on 1 byte. The consequence: the order of columns in CREATE TABLE affects storage size. A table with columns `(a bool, b int8, c bool)` is larger than `(b int8, a bool, c bool)` because padding has to be inserted to align `b`. [The table-bloat post](/posts/table-bloat) covers this optimization in depth.
+
+### Tuple size cap — where the 2 KB number comes from
+
+Each tuple is capped at around 2 KB.
+
+A common question: **"Why 2 KB — is that a hard-coded constant?"**
+
+The answer is **no**. PostgreSQL derives the number from the formula `TOAST_TUPLE_THRESHOLD ≈ BLCKSZ / 4`, i.e. **fit at least 4 tuples into every page**. With the default `BLCKSZ = 8 KB`, the threshold lands around 2 KB.
+
+When a tuple exceeds this threshold, **TOAST** (The Oversized-Attribute Storage Technique — a mechanism that compresses and/or moves large columns to a separate side table) kicks in: PostgreSQL compresses variable-length columns or relocates them to a side table, leaving only an inline pointer behind.
+
+The threshold can be tuned per table via the `toast_tuple_target` storage parameter (PG 11+):
+
+```sql
+ALTER TABLE my_table SET (toast_tuple_target = 4080);
+```
 
 ---
 
