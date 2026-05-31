@@ -38,7 +38,7 @@ Một index được thiết kế theo cấu trúc bảng (ví dụ "cứ index 
 
 ## 2. Cấu trúc B-tree: internal node định tuyến, leaf node giữ (key, ctid)
 
-**B-tree** (Balanced Tree — cây cân bằng) là một cấu trúc cây mà **mọi đường đi từ gốc xuống lá đều có cùng độ dài**. "Cân bằng" ở đây nghĩa là cây không bao giờ bị lệch một bên; thêm/xóa phần tử luôn giữ cho mọi lá ở cùng một độ sâu. Đây là tính chất nền tảng cho hiệu năng mà ta sẽ thấy ở mục 4.
+<Tooltip content="Balanced Tree — cây cân bằng">B-tree</Tooltip> là một cấu trúc cây mà **mọi đường đi từ gốc xuống lá đều có cùng độ dài**. "Cân bằng" ở đây nghĩa là cây không bao giờ bị lệch một bên; thêm/xóa phần tử luôn giữ cho mọi lá ở cùng một độ sâu. Đây là tính chất nền tảng cho hiệu năng mà ta sẽ thấy ở mục 4.
 
 Chính xác hơn, index của PostgreSQL là một biến thể **B+ tree**: toàn bộ dữ liệu (key + con trỏ) nằm ở **leaf node** (nút lá), còn các node bên trên chỉ chứa **separator key** (khóa phân tách) để định tuyến. PostgreSQL hiện thực phiên bản **Lehman & Yao B-link tree** — một biến thể thêm con trỏ "right-link" nối các node cùng tầng, cho phép nhiều transaction đọc/ghi đồng thời mà hạn chế khóa (lock). Bạn không cần nhớ tên này, chỉ cần nắm ba tầng vai trò:
 
@@ -61,7 +61,7 @@ Yếu tố làm B-tree mạnh là **fanout** (số con tối đa của một nod
 
 Đây là cơ chế cốt lõi của index trong PostgreSQL, và cũng là gốc rễ của vấn đề random I/O ở mục 6.
 
-Trong PostgreSQL, mỗi entry ở leaf node là một cặp **`(giá trị key, ctid)`**. **`ctid`** (Current Tuple ID) là địa chỉ vật lý của row trong heap, gồm hai phần: **`(block_number, item_offset)`**.
+Trong PostgreSQL, mỗi entry ở leaf node là một cặp **`(giá trị key, ctid)`**. <Tooltip content="Current Tuple ID">`ctid`</Tooltip> là địa chỉ vật lý của row trong heap, gồm hai phần: **`(block_number, item_offset)`**.
 
 Khi cần lấy row thật từ một entry leaf, PostgreSQL làm đúng hai bước:
 

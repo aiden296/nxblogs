@@ -420,7 +420,7 @@ Khi consumer request dữ liệu, Kafka cần đọc từ disk và gửi qua net
 
 Kafka sử dụng **`sendfile()` system call** (trên Linux) để loại bỏ hoàn toàn bước copy qua user space
 
-Kết quả: **giảm ~60% CPU usage** cho data transfer. Đây là lý do Kafka broker có thể phục vụ hàng GB dữ liệu mỗi giây mà CPU vẫn nhàn rỗi — vì nó gần như không "chạm" vào dữ liệu. Kafka không serialize/deserialize message ở tầng broker — nó nhận bytes từ producer và gửi nguyên bytes đó cho consumer. Broker coi message là **opaque bytes** (dữ liệu mờ — broker không hiểu nội dung bên trong), chỉ lưu và chuyển tiếp.
+Kết quả: **giảm ~60% CPU usage** cho data transfer. Đây là lý do Kafka broker có thể phục vụ hàng GB dữ liệu mỗi giây mà CPU vẫn nhàn rỗi — vì nó gần như không "chạm" vào dữ liệu. Kafka không serialize/deserialize message ở tầng broker — nó nhận bytes từ producer và gửi nguyên bytes đó cho consumer. Broker coi message là <Tooltip content="Dữ liệu mờ — broker không hiểu nội dung bên trong">opaque bytes</Tooltip>, chỉ lưu và chuyển tiếp.
 
 Đây là điều mà message broker như RabbitMQ không làm được, vì RabbitMQ dùng smart broker, dữ liệu cần được serialize tại broker để định tuyến dữ liệu đến consumer.
 

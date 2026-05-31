@@ -246,6 +246,11 @@ Immediately after the opening hook paragraphs, before the first `## 1.` section:
      - Before: `Đây cũng là lý do **UUID v7** (và **ULID** — Universally Unique Lexicographically Sortable Identifier, một format tương tự ra đời sớm hơn) được sinh ra.`
      - After: `Đây cũng là lý do **UUID v7** (và <Tooltip content="Universally Unique Lexicographically Sortable Identifier — một format tương tự ra đời sớm hơn">ULID</Tooltip>) được sinh ra.`
      - The Tooltip component already styles its trigger as bold + dashed underline, so drop the `**...**` around the term *inside* the Tooltip. Inline code backticks (e.g., `` `BIGSERIAL` ``) work fine inside the Tooltip trigger and should be preserved for SQL keywords / identifiers.
+     - **Also covers nested-paren patterns** — when the parenthetical itself contains an em-dash separating a full-name expansion from a translation/clarification. Treat the *whole* parenthetical content as the tooltip content:
+       - Before: `**B-tree** (Balanced Tree — cây cân bằng) là một cấu trúc cây mà...`
+       - After: `<Tooltip content="Balanced Tree — cây cân bằng">B-tree</Tooltip> là một cấu trúc cây mà...`
+       - Before: `Broker coi message là **opaque bytes** (dữ liệu mờ — broker không hiểu nội dung bên trong), chỉ lưu và chuyển tiếp.`
+       - After: `Broker coi message là <Tooltip content="Dữ liệu mờ — broker không hiểu nội dung bên trong">opaque bytes</Tooltip>, chỉ lưu và chuyển tiếp.`
      - **When NOT to tooltip:** illustrative asides that elaborate *why* something matters (rather than defining a term) read more naturally as parentheticals. E.g., keep `riêng tư (ID liên tiếp lộ thông tin business — đơn hàng số 7000 hôm nay tiết lộ doanh nghiệp xử lý 7000 đơn/ngày)` inline — it's elaborating context, not defining "riêng tư".
 
 2. **Use analogies for complex concepts**:

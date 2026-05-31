@@ -420,7 +420,7 @@ When a consumer requests data, Kafka needs to read from disk and send it over th
 
 Kafka uses the **`sendfile()` system call** (on Linux) to completely bypass the user space copy
 
-The result: **~60% reduction in CPU usage** for data transfer. This is why a Kafka broker can serve gigabytes of data per second while the CPU remains mostly idle — because it barely "touches" the data. Kafka doesn't serialize/deserialize messages at the broker level — it receives bytes from the producer and sends those exact bytes to the consumer. The broker treats messages as **opaque bytes** (the broker doesn't understand the content inside), only storing and forwarding them.
+The result: **~60% reduction in CPU usage** for data transfer. This is why a Kafka broker can serve gigabytes of data per second while the CPU remains mostly idle — because it barely "touches" the data. Kafka doesn't serialize/deserialize messages at the broker level — it receives bytes from the producer and sends those exact bytes to the consumer. The broker treats messages as <Tooltip content="The broker doesn't understand the content inside">opaque bytes</Tooltip>, only storing and forwarding them.
 
 This is something that message brokers like RabbitMQ cannot do, because RabbitMQ uses the smart broker model — data needs to be serialized at the broker in order to route it to the appropriate consumer.
 
