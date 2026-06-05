@@ -2,7 +2,7 @@
 title: 'Deep Dive: PostgreSQL Index — Vì Sao Index Tăng Tốc Query, Và Khi Nào Postgres Bỏ Qua Nó'
 date: '2026-05-29'
 tags: ['Database']
-description: 'Mổ xẻ B-tree index trong PostgreSQL — từ cấu trúc cây, leaf node và ctid, sức mạnh duyệt cây logarit, đơn vị đọc page, đến cách planner cân nhắc random I/O để chọn giữa Index Scan, Bitmap Heap Scan và Seq Scan.'
+description: 'Mổ xẻ B-tree index trong PostgreSQL — từ cấu trúc cây, leaf node và ctid, sức mạnh duyệt cây logarit, đơn vị đọc page, đến cách planner cân nhắc random I/O để quyết định có dùng index hay không.'
 enableComment: true
 ---
 
@@ -30,7 +30,7 @@ Vậy quyết định tạo index dựa trên cái gì? Câu trả lời quan tr
 
 > Thông tin quan trọng nhất để lập chỉ mục **không phải** là cấu trúc bảng, mà là **cách ứng dụng của bạn truy vấn dữ liệu** — những cột nào xuất hiện trong `WHERE`, `JOIN`, `ORDER BY`, và với độ chọn lọc (selectivity) ra sao.
 
-Một index được thiết kế theo cấu trúc bảng (ví dụ "cứ index mọi khóa ngoại") thường lãng phí; một index được thiết kế theo *query pattern thực tế* mới tạo ra khác biệt. Ta sẽ quay lại nguyên tắc này ở mục 8.
+Một index được thiết kế theo cấu trúc bảng (ví dụ "cứ index mọi khóa ngoại") thường lãng phí; một index được thiết kế theo *query pattern thực tế* mới tạo ra khác biệt.
 
 > PostgreSQL có nhiều loại index khác nhau — Hash, GiST, GIN, BRIN, SP-GiST — mỗi loại tối ưu cho một kiểu truy vấn riêng. Bài này tập trung hoàn toàn vào **B-tree**, loại index mặc định (`CREATE INDEX` không chỉ định loại sẽ tạo B-tree) và chiếm đại đa số index trong thực tế.
 
@@ -173,134 +173,7 @@ Bây giờ là mấu chốt: **khi số row khớp đủ lớn, tổng chi phí 
 
 ---
 
-## 7. Planner quyết định thế nào: Seq Scan vs Index Scan vs Bitmap Heap Scan
-
-Query planner của PostgreSQL là một **cost-based optimizer** (bộ tối ưu dựa trên chi phí): với mỗi cách thực thi khả dĩ, nó ước lượng một con số "chi phí" và chọn cách rẻ nhất. Hai đầu vào quyết định:
-
-1. **Selectivity (độ chọn lọc):** ước lượng *bao nhiêu phần trăm* row sẽ khớp điều kiện. Lấy từ thống kê trong `pg_statistic`, được cập nhật bởi `ANALYZE` (và autovacuum). Selectivity sai (thống kê cũ) là nguyên nhân số một của việc chọn nhầm scan.
-2. **Chi phí mỗi loại scan:** tính từ `seq_page_cost`, `random_page_cost`, `cpu_tuple_cost`, số page, số row ước lượng, và correlation.
-
-PostgreSQL có ba chiến lược chính để đọc dữ liệu theo điều kiện:
-
-<ExcalidrawDiagram
-  src="/postgresql-index-scan-strategies.excalidraw"
-  alt="Three scan strategies — Index Scan fetches one random heap page per matched row (best for few rows / high correlation); Bitmap Heap Scan collects all matching TIDs, sorts them by page, then reads each page once (best for medium selectivity); Seq Scan streams every page sequentially ignoring the index (best when many rows match)"
-/>
-
-### Index Scan
-
-Duyệt index, và **với mỗi entry khớp, lập tức fetch row từ heap theo `ctid`**. Vì fetch xen kẽ với duyệt index, mỗi row khớp thường là một random page read. **Tốt nhất khi:** số row khớp ít (selectivity cao), hoặc correlation cao (các row khớp gom cụm). Đây là kịch bản `customer_id = 12345` — chỉ vài chục đơn, fetch vài page là xong.
-
-### Bitmap Heap Scan
-
-Đây là lời giải thông minh của PostgreSQL cho vùng "selectivity trung bình". Nó tách làm hai pha:
-
-1. **Bitmap Index Scan:** duyệt index, gom **tất cả** `ctid` khớp vào một bitmap (bản đồ bit) đánh dấu *những page nào* cần đọc — chưa fetch row nào.
-2. **Bitmap Heap Scan:** đọc các page đó **theo thứ tự vật lý tăng dần**, mỗi page **đúng một lần**.
-
-Mẹo ở đây là **biến random I/O thành gần-sequential I/O**: thay vì nhảy tới page 7, rồi page 2, rồi page 9 (theo thứ tự index), nó sắp lại thành page 2, 7, 9 và đọc xuôi. Nếu nhiều row khớp nằm chung page, page đó cũng chỉ đọc một lần. **Tốt nhất khi:** selectivity trung bình — quá nhiều cho Index Scan, nhưng chưa đủ nhiều để phải quét cả bảng. Trong `EXPLAIN` bạn sẽ thấy cặp `Bitmap Heap Scan` + `Bitmap Index Scan`.
-
-### Seq Scan
-
-Bỏ qua index, đọc **toàn bộ** heap tuần tự từ đầu đến cuối, lọc từng row. Nghe có vẻ "ngu ngốc" nhưng với sequential I/O + read-ahead, nó cực nhanh trên mỗi page. **Tốt nhất khi:** số row khớp lớn (selectivity thấp) — như `status = 'pending'` chiếm 40% bảng. Lúc đó dù sao bạn cũng phải chạm gần hết các page, nên đọc tuần tự một lần rẻ hơn nhiều so với hàng triệu lần random fetch.
-
-### Đọc EXPLAIN để thấy quyết định
-
-```sql
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT * FROM orders WHERE customer_id = 12345;
--- Index Scan using idx_orders_customer_id ...
---   Buffers: shared hit=4 read=3
-
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT * FROM orders WHERE status = 'pending';
--- Seq Scan on orders ...
---   Filter: (status = 'pending')
---   Rows Removed by Filter: ...
-```
-
-Với `customer_id` (cardinality cao, ít row khớp) → Index Scan. Với `status` (cardinality thấp, 40% row khớp) → Seq Scan. **Cùng một thao tác `CREATE INDEX`, nhưng planner chọn khác nhau vì selectivity khác nhau.** Index trên `status` không sai về mặt kỹ thuật — nó chỉ vô dụng cho query này, và planner đủ thông minh để không dùng nó.
-
-> Bạn có thể *tạm thời* ép planner thử dùng index để so sánh, bằng `SET enable_seqscan = off;` rồi chạy lại `EXPLAIN ANALYZE`. Nếu thời gian thực tế *tệ hơn*, planner đã đúng. Đừng để `enable_seqscan = off` trong production — nó chỉ là công cụ chẩn đoán.
-
----
-
-## 8. Cardinality, selectivity, và nghệ thuật chọn cột để index
-
-Giờ ta khép lại nguyên tắc ở mục 1: **index theo cách ứng dụng query, và ưu tiên cột có độ chọn lọc cao.**
-
-**Cardinality (lực lượng)** là số lượng giá trị *phân biệt* trong một cột. Nó quyết định selectivity:
-
-- **Cardinality cao** (ví dụ `email`, `user_id`, `order_id`): mỗi giá trị khớp rất ít row → selectivity cao → index B-tree rất hiệu quả. Đây là "đất diễn" lý tưởng của index.
-- **Cardinality thấp** (ví dụ `status` với 3–4 giá trị, hay cột boolean `is_active`): mỗi giá trị khớp một phần lớn bảng → selectivity thấp → index thường *bị bỏ qua* (như mục 7). Index trên cột cardinality thấp thường chỉ đáng giá khi phân bố lệch (skewed) và bạn dùng **partial index**.
-
-### Multi-column index và quy tắc leftmost prefix
-
-Một index nhiều cột `(a, b, c)` sắp xếp các entry theo `a`, rồi `b`, rồi `c`. Vì thứ tự đó, index dùng được cho điều kiện trên **tiền tố trái liên tục (leftmost prefix)**: `(a)`, `(a, b)`, `(a, b, c)` — nhưng **không** dùng hiệu quả cho riêng `(b)` hay `(c)`. Quy tắc thực dụng:
-
-- Đặt cột dùng cho so sánh bằng (`=`) **trước**, cột dùng cho dải (`>`, `<`, `BETWEEN`) hoặc `ORDER BY` **sau**.
-- Trong các cột `=`, đặt cột **selectivity cao** trước để loại bỏ row sớm.
-
-### Partial, expression, và covering index
-
-- **Partial index** — chỉ index một phần row thỏa điều kiện:
-
-```sql
-CREATE INDEX idx_orders_pending ON orders (created_at)
-WHERE status = 'pending';
-```
-
-Index này nhỏ xíu (chỉ chứa đơn `pending`) và biến một cột cardinality thấp thành index hữu ích cho đúng truy vấn cần nó.
-
-- **Expression index** — index trên kết quả của một hàm, để query dùng hàm đó vẫn tận dụng được index:
-
-```sql
-CREATE INDEX idx_users_lower_email ON users (lower(email));
--- phục vụ: WHERE lower(email) = 'a@b.com'
-```
-
-- **Covering index** (`INCLUDE`) — đính kèm thêm cột vào leaf để query lấy đủ dữ liệu *ngay trong index*, không cần fetch heap:
-
-```sql
-CREATE INDEX idx_orders_customer ON orders (customer_id) INCLUDE (status, total);
-```
-
-Khi mọi cột query cần đều nằm trong index, planner có thể dùng **Index-Only Scan** — bỏ hẳn bước fetch heap. Nó dựa vào **Visibility Map** để biết page nào toàn live tuple mà bỏ qua việc kiểm tra visibility ở heap (cơ chế VM được mô tả trong [Storage Internals](/posts/postgresql-storage-internals)).
-
-### Hãy để query pattern dẫn đường
-
-Trong thực tế, bạn nhìn vào code truy vấn của ứng dụng để quyết định index. Ví dụ một repository điển hình với thư viện `pg` trong Node.js:
-
-```typescript
-import { Pool } from 'pg'
-
-const pool = new Pool()
-
-async function findRecentOrdersForCustomer(customerId: number, limit: number) {
-  const { rows } = await pool.query(
-    `SELECT id, status, total, created_at
-     FROM orders
-     WHERE customer_id = $1
-     ORDER BY created_at DESC
-     LIMIT $2`,
-    [customerId, limit]
-  )
-  return rows
-}
-```
-
-Query này lọc theo `customer_id` (bằng) rồi sắp theo `created_at` (dải/thứ tự). Index phục vụ nó tốt nhất là multi-column, đặt cột `=` trước, cột `ORDER BY` sau:
-
-```sql
-CREATE INDEX idx_orders_customer_created
-ON orders (customer_id, created_at DESC);
-```
-
-Với index này, PostgreSQL nhảy thẳng tới nhánh của `customer_id`, rồi vì các entry đã được sắp theo `created_at DESC` ngay trong leaf, nó đọc `LIMIT` dòng đầu tiên là xong — không cần sort, không cần quét thừa. Index được *thiết kế theo query*, chứ không theo cấu trúc bảng.
-
----
-
-## 9. Index cũng bloat — một chút về bảo trì
+## 7. Index cũng bloat — một chút về bảo trì
 
 Index không phải "tạo xong là quên". Giống như bảng, index B-tree cũng **bloat** (phình to vì không gian lãng phí). Nhưng index có một mầm bloat *riêng của cấu trúc B-tree*, không dính tới MVCC, và phải mổ xẻ trước khi nói tới `VACUUM`.
 
@@ -348,8 +221,8 @@ Những điều cốt lõi cần mang theo:
 - **Index là bản sao dư thừa, đã sắp xếp, trỏ về bảng** — đọc nhanh hơn, đổi lấy ghi chậm hơn và tốn đĩa. Nó không thay đổi dữ liệu bảng.
 - **Duyệt cây là sức mạnh thứ nhất:** nhờ cây cân bằng và độ sâu tăng theo cấp logarit, một tỉ row vẫn chỉ ~5 tầng. Bước này gần như luôn rẻ.
 - **Chi phí thật nằm ở bước fetch heap.** PostgreSQL đọc theo **page 8 KB**, không theo row — nên **correlation** (thứ tự vật lý) quyết định một range query chạm bao nhiêu page. `CLUSTER` ép correlation cao nhưng không tự duy trì.
-- **Random I/O là gót chân Achilles.** Khi row khớp rải rác và đủ nhiều, planner chọn **Seq Scan**; ở vùng giữa, **Bitmap Heap Scan** sắp `ctid` theo page để biến random thành gần-sequential.
-- **Thiết kế index theo cách ứng dụng query**, ưu tiên cột **cardinality cao**; dùng multi-column (leftmost prefix), partial, expression, và covering index (`INCLUDE` → Index-Only Scan) cho đúng pattern.
+- **Random I/O là gót chân Achilles.** Khi row khớp rải rác và đủ nhiều, planner bỏ index và chọn **Seq Scan** — quét tuần tự cả bảng một lần rẻ hơn hàng triệu lần fetch `ctid` ngẫu nhiên.
+- **Thiết kế index theo cách ứng dụng query**, ưu tiên cột **cardinality cao** — những cột xuất hiện trong `WHERE`, `JOIN`, và `ORDER BY`.
 - **Bảo trì index:** xóa index `idx_scan = 0`, `REINDEX CONCURRENTLY` khi bloat.
 
 Index không phải nút "làm cho nhanh". Nó là một đánh đổi mà bạn thiết kế — và planner, với phép tính chi phí của nó, sẽ là người quyết định cuối cùng có dùng hay không.

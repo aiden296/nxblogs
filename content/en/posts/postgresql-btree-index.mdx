@@ -2,7 +2,7 @@
 title: 'Deep Dive: PostgreSQL Index — Why Indexes Speed Up Queries, And When Postgres Ignores Them'
 date: '2026-05-29'
 tags: ['Database']
-description: 'A dissection of the B-tree index in PostgreSQL — from the tree structure, leaf nodes and ctid, the logarithmic power of tree descent, the page-as-unit read model, to how the planner weighs random I/O when choosing between Index Scan, Bitmap Heap Scan, and Seq Scan.'
+description: 'A dissection of the B-tree index in PostgreSQL — from the tree structure, leaf nodes and ctid, the logarithmic power of tree descent, the page-as-unit read model, to how the planner weighs random I/O when deciding whether to use an index at all.'
 enableComment: true
 ---
 
@@ -30,7 +30,7 @@ So what should drive the decision to create an index? The single most important 
 
 > The most important input to indexing is **not** the table's structure but **how your application queries the data** — which columns appear in `WHERE`, `JOIN`, `ORDER BY`, and at what selectivity.
 
-An index designed around the table's structure (e.g. "just index every foreign key") is usually wasteful; an index designed around the *actual query pattern* is what makes the difference. We will return to this principle in section 8.
+An index designed around the table's structure (e.g. "just index every foreign key") is usually wasteful; an index designed around the *actual query pattern* is what makes the difference.
 
 > PostgreSQL has many index types — Hash, GiST, GIN, BRIN, SP-GiST — each tuned for a particular kind of query. This article focuses entirely on **B-tree**, the default index type (`CREATE INDEX` without specifying a type produces a B-tree) and the one that dominates real-world usage.
 
@@ -173,134 +173,7 @@ Now the punchline: **once the number of matching rows is large enough, the cumul
 
 ---
 
-## 7. How the planner decides: Seq Scan vs Index Scan vs Bitmap Heap Scan
-
-PostgreSQL's query planner is a **cost-based optimizer**: for every viable execution path, it estimates a "cost" number and picks the cheapest. Two inputs drive the decision:
-
-1. **Selectivity:** the estimated *percentage* of rows that will match the predicate. Sourced from statistics in `pg_statistic`, refreshed by `ANALYZE` (and autovacuum). Bad selectivity (stale stats) is the number-one cause of wrong scan choice.
-2. **Per-scan cost:** computed from `seq_page_cost`, `random_page_cost`, `cpu_tuple_cost`, page count, estimated row count, and correlation.
-
-PostgreSQL has three main strategies for reading data by predicate:
-
-<ExcalidrawDiagram
-  src="/postgresql-index-scan-strategies.excalidraw"
-  alt="Three scan strategies — Index Scan fetches one random heap page per matched row (best for few rows / high correlation); Bitmap Heap Scan collects all matching TIDs, sorts them by page, then reads each page once (best for medium selectivity); Seq Scan streams every page sequentially ignoring the index (best when many rows match)"
-/>
-
-### Index Scan
-
-Walks the index, and **for each matching entry, immediately fetches the row from the heap via `ctid`**. Because fetches are interleaved with the index walk, each match is typically a random page read. **Best when:** few rows match (high selectivity), or correlation is high (matching rows cluster together). This is the `customer_id = 12345` scenario — only a few dozen orders, a few page fetches and you're done.
-
-### Bitmap Heap Scan
-
-This is PostgreSQL's clever answer for the "medium selectivity" zone. It splits into two phases:
-
-1. **Bitmap Index Scan:** walk the index, gather **all** matching `ctid`s into a bitmap marking *which pages* must be read — no rows fetched yet.
-2. **Bitmap Heap Scan:** read those pages **in ascending physical order**, each page **exactly once**.
-
-The trick is **turning random I/O into near-sequential I/O**: instead of jumping to page 7, then 2, then 9 (in index order), it sorts to 2, 7, 9 and reads forward. If multiple matching rows live on the same page, that page is still read just once. **Best when:** medium selectivity — too many for Index Scan, but not enough to justify a full table scan. In `EXPLAIN` you'll see the `Bitmap Heap Scan` + `Bitmap Index Scan` pair.
-
-### Seq Scan
-
-Ignore the index, read the **entire** heap sequentially from start to end, filter each row. Sounds "dumb", but with sequential I/O + read-ahead, it is extremely fast per page. **Best when:** many rows match (low selectivity) — like `status = 'pending'` covering 40% of the table. At that point you'd touch nearly every page anyway, so a single sequential pass is far cheaper than millions of random fetches.
-
-### Reading EXPLAIN to see the decision
-
-```sql
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT * FROM orders WHERE customer_id = 12345;
--- Index Scan using idx_orders_customer_id ...
---   Buffers: shared hit=4 read=3
-
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT * FROM orders WHERE status = 'pending';
--- Seq Scan on orders ...
---   Filter: (status = 'pending')
---   Rows Removed by Filter: ...
-```
-
-With `customer_id` (high cardinality, few rows match) → Index Scan. With `status` (low cardinality, 40% of rows match) → Seq Scan. **Same `CREATE INDEX` operation, different planner decision because the selectivity differs.** The index on `status` isn't wrong technically — it's just useless for this query, and the planner is smart enough not to use it.
-
-> You can *temporarily* force the planner to try the index for comparison, by `SET enable_seqscan = off;` and rerunning `EXPLAIN ANALYZE`. If the real runtime is *worse*, the planner was right. Don't leave `enable_seqscan = off` in production — it's a diagnostic tool only.
-
----
-
-## 8. Cardinality, selectivity, and the art of picking columns to index
-
-Let's close the loop on the principle from section 1: **index for how the application queries, and prioritise high-selectivity columns.**
-
-**Cardinality** is the number of *distinct* values in a column. It drives selectivity:
-
-- **High cardinality** (e.g. `email`, `user_id`, `order_id`): each value matches very few rows → high selectivity → a B-tree index is highly effective. This is the ideal home of indexing.
-- **Low cardinality** (e.g. `status` with 3–4 values, or a boolean `is_active`): each value matches a large fraction of the table → low selectivity → the index typically *gets ignored* (as in section 7). An index on a low-cardinality column is usually only worth it when the distribution is skewed and you use a **partial index**.
-
-### Multi-column index and the leftmost prefix rule
-
-A multi-column index `(a, b, c)` sorts entries by `a`, then `b`, then `c`. Because of that order, the index is usable for predicates on a **contiguous leftmost prefix**: `(a)`, `(a, b)`, `(a, b, c)` — but **not** efficiently for `(b)` or `(c)` on their own. Practical rules:
-
-- Put equality columns (`=`) **first**, range columns (`>`, `<`, `BETWEEN`) or `ORDER BY` columns **after**.
-- Among equality columns, put the **highest-selectivity** column first to eliminate rows early.
-
-### Partial, expression, and covering indexes
-
-- **Partial index** — index only the rows matching a predicate:
-
-```sql
-CREATE INDEX idx_orders_pending ON orders (created_at)
-WHERE status = 'pending';
-```
-
-This index is tiny (it only contains `pending` orders) and turns a low-cardinality column into a useful index for the exact query that needs it.
-
-- **Expression index** — index the result of a function so queries using that function can still hit the index:
-
-```sql
-CREATE INDEX idx_users_lower_email ON users (lower(email));
--- serves: WHERE lower(email) = 'a@b.com'
-```
-
-- **Covering index** (`INCLUDE`) — attach extra columns to the leaf so the query can pull everything it needs *from the index*, with no heap fetch:
-
-```sql
-CREATE INDEX idx_orders_customer ON orders (customer_id) INCLUDE (status, total);
-```
-
-When every column the query needs is already in the index, the planner can use an **Index-Only Scan** — skipping the heap fetch entirely. It relies on the **Visibility Map** to know which pages contain only live tuples and skip the visibility check on the heap (the VM mechanism is described in [Storage Internals](/posts/postgresql-storage-internals)).
-
-### Let the query pattern lead
-
-In practice, you look at the application's query code to decide on indexes. Here's a typical repository using the `pg` library in Node.js:
-
-```typescript
-import { Pool } from 'pg'
-
-const pool = new Pool()
-
-async function findRecentOrdersForCustomer(customerId: number, limit: number) {
-  const { rows } = await pool.query(
-    `SELECT id, status, total, created_at
-     FROM orders
-     WHERE customer_id = $1
-     ORDER BY created_at DESC
-     LIMIT $2`,
-    [customerId, limit]
-  )
-  return rows
-}
-```
-
-This query filters by `customer_id` (equality) then sorts by `created_at` (range/ordering). The best index for it is multi-column, equality column first, `ORDER BY` column after:
-
-```sql
-CREATE INDEX idx_orders_customer_created
-ON orders (customer_id, created_at DESC);
-```
-
-With this index, PostgreSQL jumps straight to the `customer_id` branch, and because entries are already sorted by `created_at DESC` inside the leaves, it reads the first `LIMIT` rows and stops — no sort, no extra scanning. The index is *designed for the query*, not the table structure.
-
----
-
-## 9. Indexes bloat too — a little on maintenance
+## 7. Indexes bloat too — a little on maintenance
 
 An index isn't "create and forget". Like tables, B-tree indexes also **bloat** (grow due to wasted space). But an index has a bloat source *of its own — purely structural to the B-tree*, unrelated to MVCC, that must be dissected before we talk about `VACUUM`.
 
@@ -348,8 +221,8 @@ The core takeaways:
 - **An index is a redundant, sorted copy that points back to the table** — faster reads, paid for with slower writes and more disk. It does not change the table's data.
 - **Tree descent is the first power:** thanks to a balanced tree and logarithmic depth, a billion rows still only need ~5 levels. This step is almost always cheap.
 - **The real cost lies in the heap fetch.** PostgreSQL reads by **8 KB page**, not by row — so **correlation** (physical order) decides how many pages a range query touches. `CLUSTER` forces high correlation but doesn't maintain it.
-- **Random I/O is the Achilles' heel.** When matching rows are scattered and numerous enough, the planner picks **Seq Scan**; in the middle zone, **Bitmap Heap Scan** sorts `ctid`s by page to turn random into near-sequential.
-- **Design indexes around how the application queries**, prioritising **high-cardinality** columns; use multi-column (leftmost prefix), partial, expression, and covering indexes (`INCLUDE` → Index-Only Scan) for the right patterns.
+- **Random I/O is the Achilles' heel.** When matching rows are scattered and numerous enough, the planner abandons the index and picks **Seq Scan** — one sequential pass over the table beats millions of random `ctid` fetches.
+- **Design indexes around how the application queries**, prioritising **high-cardinality** columns — the ones that show up in `WHERE`, `JOIN`, and `ORDER BY`.
 - **Index maintenance:** drop indexes with `idx_scan = 0`, run `REINDEX CONCURRENTLY` when bloat sets in.
 
 An index is not a "make it fast" button. It is a trade-off you design — and the planner, with its cost arithmetic, gets the final say on whether to use it.
