@@ -1,6 +1,6 @@
 import { SearchWrapper } from '@/components/search-wrapper'
 import { LanguageSwitcher } from '@/components/language-switcher'
-import { AnimatedThemeSwitch } from '@/components/animated-theme-switch'
+import { ThemeToggler } from '@/components/theme-toggler'
 import { GithubIcon } from './animated-icons/github'
 
 type Props = {
@@ -16,7 +16,7 @@ const CustomFooter = async ({ lang }: Props) => {
 
           <LanguageSwitcher currentLocale={lang} />
 
-          <AnimatedThemeSwitch />
+          <ThemeToggler />
 
           <a
             href="https://github.com/aiden296"
