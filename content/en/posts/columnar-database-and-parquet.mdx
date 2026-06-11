@@ -1,0 +1,232 @@
+---
+title: 'Columnar Database: When Reading 3 Columns Beats Reading the Whole Table, and Why Parquet Dominates Analytics'
+date: '2026-06-11'
+tags: ['Database', 'System Design', 'Backend', 'AWS']
+description: 'Why a row-oriented database chokes on analytical queries, how columnar storage and Parquet fix it down to the byte on disk, and when to reach for the Parquet on S3 + Athena pattern.'
+enableComment: true
+---
+
+# Columnar Database: When Reading 3 Columns Beats Reading the Whole Table, and Why Parquet Dominates Analytics
+
+You just got a message from your PM: "Can you pull me a report of total revenue by country, grouped by month, for the last 2 years?"
+
+Easy enough. You open the production console and type a few lines of SQL against the PostgreSQL database running your app:
+
+```sql
+SELECT country, date_trunc('month', created_at) AS month, SUM(amount)
+FROM orders
+WHERE created_at >= now() - interval '2 years'
+GROUP BY country, month
+```
+
+You hit Enter. Then you wait. 30 seconds... a minute... the query is still spinning. On the monitoring dashboard the database's disk I/O spikes, CPU climbs, and the APIs serving real users start slowing down — p99 latency turns an angry red. The `orders` table has 200 million rows, and your query just scanned almost all of them.
+
+The irony: the query needs exactly 3 columns — `country`, `created_at`, `amount`. But the `orders` table has 30 columns: `id`, `user_id`, `name`, `email`, `shipping_address`, `note`, and more. The database still had to read all 30 columns of every row off disk, only to throw away the 27 it didn't use.
+
+This isn't your fault, and PostgreSQL isn't bad. The problem is how the database lays data out on disk: **row by row (row-oriented)**. And that's exactly why a completely different family of databases exists — **columnar databases** — along with the file format behind nearly every modern analytics system: **Parquet**.
+
+As a backend engineer, you might go your whole career barely touching them — until the day you step into the world of analytics. This post dissects why a row-oriented database chokes on analytical queries, how column-oriented databases and Parquet fix it down to the byte on disk, and when the "Parquet on S3 + query with Athena" pattern is the right call.
+
+---
+
+## 1. OLTP vs OLAP — why your database wasn't built for analytics
+
+Before talking about storage, you need to understand the two kinds of workload a database might have to serve. They differ so much that it's nearly impossible to optimize for both at once.
+
+<Tooltip content="Online Transaction Processing">OLTP</Tooltip> is the workload of everyday operational apps: create an order, update a user's profile, decrement inventory. Its hallmark is **many small transactions, each touching few rows but needing nearly all the columns of those rows** — for example, "get all the info for the user with `id = 42`" or "write a new order." PostgreSQL, MySQL, and SQL Server are all OLTP databases.
+
+<Tooltip content="Online Analytical Processing">OLAP</Tooltip> is the exact opposite: an analytical, aggregating workload. Its hallmark is **few queries, but each one scans a huge number of rows and touches only a few columns** — for example, "sum revenue by country across all 200 million orders." The number of columns read is small, but the number of rows to traverse is enormous.
+
+The table below sums up the contrast:
+
+| Criterion          | OLTP                               | OLAP                                   |
+| ------------------ | ---------------------------------- | -------------------------------------- |
+| Typical question   | "What's user 42's info?"           | "Revenue by country over 2 years?"     |
+| Access pattern     | Few rows × many columns            | Many rows × few columns                |
+| Writes             | Insert/update row by row, constant | Batch loads, rarely modified           |
+| Rows per query     | A few to a few hundred             | Millions to billions                   |
+| Priority           | Low latency per transaction        | High scan throughput                   |
+| Examples           | PostgreSQL, MySQL                  | Redshift, BigQuery, ClickHouse, DuckDB |
+
+The crux is the "access pattern" row. OLTP reads **few rows × many columns**; OLAP reads **many rows × few columns**. These two nearly perpendicular access shapes lead to two completely different ways of laying data out on disk.
+
+---
+
+## 2. Row store vs Column store — same table, two byte layouts on disk
+
+To see why layout matters, recall one physical fact: disks (SSDs included) read data in **blocks** — a <Tooltip content="The smallest unit a disk reads or writes at once, typically 4KB to a few dozen KB. Reading one byte in a block still loads the whole block">block</Tooltip> is a contiguous chunk of bytes loaded all at once. In other words: **what sits next to each other on disk gets read together**. So the question "what's stored next to what" decides performance.
+
+Take a tiny `orders` table, 3 rows, 4 columns:
+
+<ExcalidrawDiagram
+  src="/columnar-database-row-vs-column.excalidraw"
+  alt="Same table laid out two ways — row-oriented stores each full row contiguously, column-oriented stores each column contiguously; SUM(amount) only needs the amount block in the column layout"
+/>
+
+**Row-oriented** lays data out row by row — all the columns of one row sit together, then the next row
+
+**Column-oriented** lays it out column by column — all the values of one column sit together, then the next column
+
+This difference explains both worlds:
+
+- **Row store wins for OLTP.** To fetch the whole `user_id = 2` row, a row store needs a single contiguous read of the block `[2, VN, 30, b@x]`. A column store would have to jump to 4 different places (the user_id column, country column, amount column, email column) and stitch them back together — 4 scattered reads.
+- **Column store wins for OLAP.** Flip the question: `SUM(amount)`. A column store reads exactly one contiguous stripe `[50, 30, 70]` and adds it up. A row store has to read all of `[1, US, 50, a@x, 2, VN, 30, ...]`, wading through every other column just to pick out each `amount` value — reading all the rest for nothing.
+
+With 4 columns the waste is small. But with the 30-column `orders` table from the opening, a row store reads 10× more data than it needs. That's the root of everything that follows.
+
+---
+
+## 3. Why columnar is fast for analytics
+
+Laying data out by column opens up four sources of speed, and they stack on top of each other.
+
+### 3.1. Reading less — column pruning
+
+**Column pruning** is the technique of reading only the columns a query needs and skipping the rest. Because each column sits as its own stripe on disk, the engine can load exactly the `country` and `amount` columns without ever touching the other 28.
+
+With a 30-column table where the query needs only 3, columnar reads roughly 10% of the data a row store would. This is the biggest and most intuitive saving — and as you'll see in the Athena section, it translates straight into money.
+
+Don't mistake using `SELECT id FROM users` instead of `SELECT * FROM users` for column pruning. If you've read the [Storage Internals](/posts/postgresql-storage-internals) post, you'll recall that the smallest unit a database loads from disk is the page — even when you need just one value from one record, the database still loads the entire page that holds it.
+
+### 3.2. Better compression — compression & encoding
+
+This is where columnar shines. When every value in a stripe is **the same type and usually from the same domain** (say, a million `country` values that are all 2-character strings repeating "US", "VN", "JP"), compression algorithms work extremely well. Mixing types together, as a row store does, throws that advantage away.
+
+Even before general-purpose compression, columnar uses **lightweight encodings** — encoding schemes that exploit each column's characteristics:
+
+<ExcalidrawDiagram
+  src="/columnar-database-encoding.excalidraw"
+  alt="Four lightweight column encodings — dictionary encoding maps values to small ids, run-length encoding stores repeated values as (value, count), delta encoding stores differences, bit-packing fits small integers into minimal bits"
+/>
+
+- **Dictionary encoding** — replace each value with a small integer pointing into a "dictionary" of distinct values. The `country` column has only ~200 distinct values, so instead of storing the string "US" a million times, you store the number `0` a million times. Great for low-cardinality columns (few distinct values).
+- <Tooltip content="Run-Length Encoding">RLE</Tooltip> — replace a run of identical adjacent values with a (value, count) pair. `A A A A` becomes `(A, 4)`. Great when data is sorted or has long repeated runs.
+- **Delta encoding** — store only the difference between consecutive values instead of the absolute value. `1000, 1002, 1005, 1009` becomes base `1000` plus deltas `0, 2, 3, 4`. Great for increasing ids or timestamps.
+- **Bit-packing** — if a column (after dictionary encoding) only holds values in the range `0..3`, each value needs just 2 bits instead of 32 or 64. Packed tight to the bit, no waste.
+
+The real-world result: a column store typically compresses **5–10×**, while a row store reaches only about **1.5–3×** (because each block mixes different data types). Fewer bytes on disk means fewer bytes to read — an I/O saving that stacks on top of column pruning.
+
+### 3.3. Vectorized execution — running at the CPU's pace
+
+**Vectorized execution** is the technique of processing data in column-shaped batches rather than one row at a time, letting the CPU apply the same operation to many values at once.
+
+A column in a columnar store is a contiguous array of same-type values — say, a `double` array for the `amount` column. Modern CPUs process arrays like this extremely fast thanks to <Tooltip content="Single Instruction, Multiple Data — one CPU instruction operating on multiple values at once">SIMD</Tooltip>: a single add instruction can add 8 `double`s in one beat. Contiguous data is also friendly to the <Tooltip content="High-speed memory right inside the CPU; contiguous data raises the cache hit rate">CPU cache</Tooltip>, cutting trips out to RAM.
+
+In a row store it's the opposite: each row's `amount` value sits wedged between `country`, `email`, `name`... The CPU has to hop around memory, cache-missing constantly, and can't vectorize cleanly. For the same `SUM`, columnar runs several times faster purely because of how the data sits in memory.
+
+### 3.4. Predicate pushdown — skipping whole blocks of data
+
+The fourth source of speed is reading nothing at all when you're sure you don't need it. A **predicate** is a filter condition in the `WHERE` clause (for example, `amount > 1000`).
+
+**Predicate pushdown** is pushing that condition down to the storage layer, so the storage layer itself decides which blocks of data can be skipped without ever opening them.
+
+Columnar storage splits each column into many blocks and stores **min/max statistics** for each one. When a query has `WHERE amount > 1000`, the engine looks at the stats: if a block has `max = 500`, then no row in it can possibly match — skip the whole block, read zero bytes of data. This is exactly the mechanism that makes reading a Parquet file cheap, as you'll see next.
+
+---
+
+## 4. The price you pay — why columnar is terrible for OLTP
+
+No free lunch. Everything that makes columnar fast for analytics makes it awful for transactional work.
+
+- **Inserting one row is expensive — tuple splitting.** **Tuple splitting** is taking a row apart into individual columns, opening each column's storage region to write its value, and updating each column's compression/encoding metadata. A 30-column row turns into 30 scattered writes. That's why columnar systems almost always avoid single-row inserts and load data in big batches instead.
+- **Point lookups by id are slow.** To reconstruct a whole row (say, "get all the info for order id = 42"), the engine has to gather values from 30 different column regions — 30 scattered reads, exactly the work a row store does in a single read.
+- **Updates/Deletes are expensive.** Once data is compressed and tightly packed into blocks, changing one value in the middle usually forces decompressing and repacking the whole block.
+- **Many columnar systems are immutable or append-only**, with no in-place edits — a property you'll meet again, vividly, with Parquet.
+
+A rough rule of thumb: columnar tends to start paying off from around **10–100 million rows** and up. Below that, a traditional relational database with a few sensible indexes is usually more than enough — don't drag in a whole data warehouse just to query 2 million rows.
+
+By now you understand columnar databases. But here's an important detail: columnar isn't only a kind of database. It's also a way to organize a **file**. And the most popular columnar file in the data world today is Parquet.
+
+---
+
+## 5. What Parquet is — columnar isn't just a database, it's also a file format
+
+**Apache Parquet** is an open-source file format that stores data by column. It's not a database, and not a query engine — it's just a way of arranging bytes in a file on disk or object storage. You can have an `orders.parquet` file the same way you'd have a CSV file, except inside it's organized by column and compressed ahead of time.
+
+What makes Parquet dominant is that it **decouples storage from compute**. In a traditional database, storage and query processing are fused into one system. With Parquet, the data lives independently as files, and **any engine can read the same file**: AWS Athena, Apache Spark, DuckDB, Trino, or Snowflake. You store the data once and query it with all sorts of tools — this is the foundation of the **data lake** architecture (a lake of data: all your raw data gathered as files on object storage).
+
+A few core properties of Parquet:
+
+- **Columnar** — naturally, with all the advantages from section 3.
+- **Self-describing** — the schema (column names, data types) is embedded right in the file. You don't need an external database to know what the file contains; the file alone has enough information to be read.
+- **Immutable / append-only** — written once, never edited in place. The next section explains why the file structure forces this.
+
+On origins: Parquet is based on ideas from Google's **Dremel** paper (2010), was developed by Twitter and Cloudera, and became an Apache project. It has a sibling, **ORC**, with a similar philosophy, but Parquet is the most widely used format in today's data ecosystem.
+
+---
+
+## 6. Anatomy of a Parquet file
+
+Inside, a Parquet file has a tidy hierarchical structure. Understanding it is the key to understanding why the format is both fast and immutable.
+
+<ExcalidrawDiagram
+  src="/columnar-database-parquet-structure.excalidraw"
+  alt="Anatomy of a Parquet file — PAR1 magic numbers bracket the file; row groups hold one column chunk per column; each chunk holds dictionary and data pages; the footer stores schema and per-column-chunk min/max statistics and offsets"
+/>
+
+From the outside in:
+
+- **Magic number `PAR1`** — the file begins and ends with the 4 bytes `PAR1`. Read the first 4 and last 4 bytes and you immediately know whether it's a valid Parquet file.
+- **Row group** — a horizontal slice of the table, holding all the columns for a subset of rows (around 128MB per row group by default). This is the unit of parallelism: multiple row groups can be read by different threads/machines at the same time.
+- **Column chunk** — within each row group, the data for **one column** is gathered into a column chunk that sits contiguously on disk. This is where "columnar" is realized at the file level.
+- **Page** — each column chunk is split into pages (around 1MB), the **smallest unit of compression and encoding**. There are **dictionary pages** (holding the value dictionary for dictionary encoding) and **data pages** (holding the actual data).
+- **Footer (FileMetaData)** — at the end of the file, the brain of Parquet. The footer holds the full schema, the total row count, and for each column chunk of each row group: byte offset, size, encoding, compression codec, and **min/max statistics and null counts**. These are exactly the statistics that let predicate pushdown skip whole row groups.
+
+On top of that structure, Parquet applies the **lightweight encodings** from section 3.2 to each column, then layers **general-purpose compression** over it: **Snappy** (the default, speed-first), **Gzip**, **Zstd**, or **LZ4**, depending on how you want to trade compression ratio against speed.
+
+---
+
+## 7. Reading a Parquet file: footer-first + predicate pushdown
+
+That structure leads to a clever way of reading. The reader doesn't scan the file from the start — it reads the footer first.
+
+The steps for a query like `SELECT country, amount WHERE amount > 1000`:
+
+1. **Seek to the end of the file**, read the footer length, then read the `PAR1` magic to confirm it's a valid Parquet file.
+2. **Read the FileMetaData (footer)** — the reader now has the schema and the min/max statistics of every row group, without having read a single byte of data.
+3. **Predicate pushdown at the row-group level** — use min/max to skip row groups that can't contain a result. A row group with `amount max = 500` definitely can't satisfy `amount > 1000`, so skip it.
+4. **Column pruning** — for the surviving row groups, read only the `country` and `amount` column chunks, never touching `user_id`, `email`, or the other 26 columns.
+
+Together these two mechanisms make a real query touch only a tiny fraction of the file.
+
+The footer-at-the-end structure also explains why Parquet is **immutable**. Because the footer holds the offsets of everything and is written **last** (after the true size of every compressed column chunk is known), the file is written in a **single pass (single-pass write)**. You can't insert a row into the middle of a finished file — doing so would shift every byte after it and break every offset in the footer. To "change" data, you write a new file or add a new file alongside. Immutability here isn't an accidental limitation but a design choice: it allows storing on cheap object storage, parallel reads with no locking, and safe caching.
+
+---
+
+## 8. The most common pattern: Parquet on S3 + Athena
+
+Bring this pattern to the cloud and you get an architecture many data teams use every day.
+
+<ExcalidrawDiagram
+  src="/columnar-database-s3-athena.excalidraw"
+  alt="Querying Parquet on S3 with Athena — Parquet files partitioned by date live in S3, Glue Data Catalog holds table schema and partitions, serverless Athena scans only needed columns and partitions billed by bytes scanned, results flow to a BI dashboard"
+/>
+
+The pieces:
+
+- **Amazon S3** — where the Parquet files live. Object storage that's cheap, durable, and practically unlimited. This is the "disk" of the data lake.
+- **Directory partitioning (partition)** — data is organized in a Hive-style directory structure: `s3://my-lake/orders/year=2026/month=06/...`. **Partition pruning** is the engine looking at `WHERE year = 2026` and reading only the matching directory prefix, skipping every other year — eliminating data at the **directory/file** level, before even opening a Parquet file. Contrast this with predicate pushdown (which eliminates at the row-group level based on min/max **inside** the file); the two mechanisms complement each other.
+- **AWS Glue Data Catalog** — the store for table definitions: schema, data types, and the list of partitions that exist on S3. It tells the engine "the `orders` table has these columns, and the files are here."
+- **Amazon Athena** — a serverless query engine (based on Trino/Presto). You don't stand up or manage any server; you just type SQL.
+
+> The key point: **Athena bills by the amount of data scanned (bytes scanned)**, roughly 5 USD per TB.
+
+It's exactly this bytes-scanned pricing that turns every columnar optimization into real money. A 1TB table in CSV might shrink to around 100GB as compressed Parquet; then column pruning makes a query touch only a few columns, and partition pruning eliminates the irrelevant months — so the query scans a few GB instead of a whole TB. AWS benchmarks show that switching to a columnar format plus sensible partitioning can cut the data scanned and the cost by up to **~70%**, while making queries several times faster.
+
+> One closing note: because Parquet is immutable, it doesn't support `UPDATE`/`DELETE` or ACID transactions on its own. To get those on a data lake, people layer a **table format** on top — **Apache Iceberg**, **Delta Lake**, or **Apache Hudi**. These manage a collection of immutable Parquet files plus a metadata layer to simulate edits/deletes and snapshots over time — but that's a topic for another post.
+
+---
+
+## Conclusion
+
+Back to the revenue report query that choked your PostgreSQL at the start. Now you know why: it read 200 million rows × 30 columns when it only needed 3. On a columnar store — or on Parquet files partitioned by month and queried with Athena — that same question touches just 3 columns of the relevant partitions, scans a tiny fraction of the data, and never touches the OLTP database serving your users.
+
+The core things to take away:
+
+- **Row store and column store are two perpendicular shapes.** Row keeps a whole row contiguous (good for OLTP: fetch/edit one entity); column keeps a whole column contiguous (good for OLAP: scan and aggregate).
+- **Columnar is fast for analytics thanks to four stacking effects:** column pruning (read fewer columns), compression/encoding (5–10×), vectorized execution (CPU and SIMD), and predicate pushdown (skip whole blocks via min/max).
+- **The price is OLTP:** single-row inserts/updates cost tuple splitting, and point lookups by id have to gather from many columns. Don't use columnar for transactional workloads or small datasets.
+- **Parquet takes columnar out of the database and turns it into a file.** Self-describing, immutable, written in one pass and read footer-first — decoupling storage from compute so every engine can read the same file.
+- **S3 + Athena is the most common embodiment of this pattern.** Parquet on cheap object storage, billed by bytes scanned, so columnar + compression + partition pruning translate straight into a smaller bill.
+
+As a backend engineer, you may never have to run a columnar database yourself. But the day you need to answer an analytical question over hundreds of millions of rows, knowing that the data should sit as **columns** — not **rows** — will be the difference between a 3-second query and a query that takes down production.

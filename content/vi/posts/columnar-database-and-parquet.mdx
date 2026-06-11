@@ -1,0 +1,232 @@
+---
+title: 'Columnar Database: Khi Đọc 3 Cột Nhanh Hơn Đọc Cả Bảng, Và Vì Sao Parquet Thống Trị Analytics'
+date: '2026-06-11'
+tags: ['Database', 'System Design', 'Backend', 'AWS']
+description: 'Vì sao row-oriented database nghẹt thở với query phân tích, columnar storage và Parquet sửa nó thế nào ở tận mức byte trên đĩa, và khi nào nên dùng mẫu hình Parquet trên S3 + Athena.'
+enableComment: true
+---
+
+# Columnar Database: Khi Đọc 3 Cột Nhanh Hơn Đọc Cả Bảng, Và Vì Sao Parquet Thống Trị Analytics
+
+Bạn vừa nhận được một tin nhắn từ PM: "Cho mình xin report tổng doanh thu theo từng quốc gia, group theo tháng, trong 2 năm gần nhất nhé."
+
+Quá đơn giản. Bạn mở console production, gõ vài dòng SQL trên cái database PostgreSQL đang chạy app:
+
+```sql
+SELECT country, date_trunc('month', created_at) AS month, SUM(amount)
+FROM orders
+WHERE created_at >= now() - interval '2 years'
+GROUP BY country, month
+```
+
+Bạn nhấn Enter. Rồi chờ. 30 giây... 1 phút... query vẫn quay. Trên dashboard monitoring, disk I/O của database tăng vọt, CPU leo thang, và mấy con API đang phục vụ user thật bắt đầu chậm lại, latency p99 nhảy lên đỏ lòm. Bảng `orders` có 200 triệu dòng, và câu query của bạn vừa quét gần như toàn bộ.
+
+Điều trớ trêu là: query chỉ cần đúng 3 cột — `country`, `created_at`, `amount`. Nhưng bảng `orders` có tới 30 cột: `id`, `user_id`, `name`, `email`, `shipping_address`, `note`, và nhiều nữa. Database vẫn phải đọc nguyên cả 30 cột của mỗi dòng lên, chỉ để rồi vứt đi 27 cột không dùng tới.
+
+Đây không phải lỗi của bạn, cũng không phải PostgreSQL tệ. Vấn đề nằm ở cách database lưu dữ liệu xuống đĩa: **theo dòng (row-oriented)**. Và đó chính là lý do tồn tại của một họ database hoàn toàn khác — **columnar database** — cùng với định dạng file đứng sau gần như mọi hệ thống analytics hiện đại: **Parquet**.
+
+Là một backend engineer, bạn có thể đi cả sự nghiệp mà hiếm khi chạm tới chúng — trừ khi một ngày bạn bước chân vào thế giới analytics. Bài viết này sẽ mổ xẻ: vì sao row-oriented database nghẹt thở với các query phân tích, column-oriented database và Parquet sửa nó thế nào ở tận mức byte trên đĩa, và khi nào thì mẫu hình "Parquet trên S3 + query bằng Athena" là lựa chọn đúng.
+
+---
+
+## 1. OLTP vs OLAP — vì sao database của bạn không sinh ra để làm analytics
+
+Trước khi nói về cách lưu trữ, phải hiểu hai kiểu công việc (workload) mà một database có thể phải phục vụ. Chúng khác nhau đến mức gần như không thể tối ưu cho cả hai cùng lúc.
+
+<Tooltip content="Online Transaction Processing — xử lý giao dịch trực tuyến">OLTP</Tooltip> là kiểu workload của những ứng dụng vận hành hằng ngày: tạo một đơn hàng, cập nhật thông tin user, trừ tồn kho. Đặc trưng của nó là **nhiều giao dịch nhỏ, mỗi giao dịch đụng tới ít dòng nhưng cần gần như toàn bộ các cột của dòng đó** — ví dụ "lấy hết thông tin của user có `id = 42`" hay "ghi một đơn hàng mới". PostgreSQL, MySQL, SQL Server đều là database OLTP.
+
+<Tooltip content="Online Analytical Processing — xử lý phân tích trực tuyến">OLAP</Tooltip> thì ngược lại hoàn toàn: nó là kiểu workload phân tích, tổng hợp. Đặc trưng là **ít câu query, nhưng mỗi câu quét rất nhiều dòng và chỉ đụng tới vài cột** — ví dụ "tính tổng doanh thu theo quốc gia trên toàn bộ 200 triệu đơn hàng". Số cột được đọc thì nhỏ, nhưng số dòng phải duyệt thì khổng lồ.
+
+Bảng dưới đây tóm tắt sự đối lập:
+
+| Tiêu chí              | OLTP                              | OLAP                                   |
+| --------------------- | --------------------------------- | -------------------------------------- |
+| Câu hỏi điển hình     | "User 42 có thông tin gì?"        | "Doanh thu theo quốc gia 2 năm qua?"   |
+| Pattern truy cập      | Ít dòng × nhiều cột               | Nhiều dòng × ít cột                    |
+| Kiểu ghi              | Insert/update từng dòng, liên tục | Nạp theo lô (batch), hiếm khi sửa      |
+| Số dòng mỗi query     | Vài đến vài trăm                  | Hàng triệu đến hàng tỷ                 |
+| Ưu tiên               | Latency thấp mỗi giao dịch        | Throughput quét lớn                    |
+| Ví dụ                 | PostgreSQL, MySQL                 | Redshift, BigQuery, ClickHouse, DuckDB |
+
+Mấu chốt nằm ở dòng "pattern truy cập". OLTP đọc **ít dòng × nhiều cột**; OLAP đọc **nhiều dòng × ít cột**. Hai hình dạng truy cập gần như vuông góc với nhau này dẫn tới hai cách sắp xếp dữ liệu xuống đĩa hoàn toàn khác biệt.
+
+---
+
+## 2. Row store vs Column store — cùng một bảng, hai cách xếp byte trên đĩa
+
+Để hiểu vì sao cách sắp xếp lại quan trọng, cần nhớ một sự thật vật lý: đĩa (kể cả SSD) đọc dữ liệu theo **block** — một <Tooltip content="Đơn vị đọc/ghi nhỏ nhất mà đĩa thao tác một lần, thường 4KB đến vài chục KB. Đọc 1 byte trong block vẫn phải nạp cả block">block</Tooltip> là một khối byte liền mạch được nạp lên cùng lúc. Nói cách khác: **những gì nằm cạnh nhau trên đĩa sẽ được đọc cùng nhau**. Vậy nên câu hỏi "cái gì nằm cạnh cái gì" quyết định hiệu năng.
+
+Lấy một bảng `orders` tí hon, 3 dòng, 4 cột:
+
+<ExcalidrawDiagram
+  src="/columnar-database-row-vs-column.excalidraw"
+  alt="Same table laid out two ways — row-oriented stores each full row contiguously, column-oriented stores each column contiguously; SUM(amount) only needs the amount block in the column layout"
+/>
+
+**Row-oriented** xếp dữ liệu theo dòng — toàn bộ các cột của một dòng nằm liền nhau, rồi mới tới dòng kế
+
+**Column-oriented** xếp theo cột — toàn bộ giá trị của một cột nằm liền nhau, rồi mới tới cột kế
+
+Sự khác biệt này lý giải cả hai thế giới:
+
+- **OLTP thắng với row store.** Để lấy nguyên dòng `user_id = 2`, row store chỉ cần một lần đọc liền mạch khối `[2, VN, 30, b@x]`. Column store thì phải nhảy tới 4 vị trí khác nhau (cột user_id, cột country, cột amount, cột email) rồi ghép lại — tốn 4 lần đọc rải rác.
+- **OLAP thắng với column store.** Đảo ngược câu hỏi: `SUM(amount)`. Column store chỉ đọc đúng một dải liền mạch `[50, 30, 70]` rồi cộng lại. Row store phải đọc cả `[1, US, 50, a@x, 2, VN, 30, ...]`, lội qua mọi cột khác chỉ để nhặt ra mỗi giá trị `amount` — đọc thừa toàn bộ phần còn lại.
+
+Với bảng 4 cột, lãng phí còn nhỏ. Nhưng với bảng `orders` 30 cột ở đầu bài, row store đọc thừa gấp 10 lần lượng dữ liệu cần thiết. Đó là gốc rễ của mọi thứ phía sau.
+
+---
+
+## 3. Vì sao columnar nhanh cho analytics
+
+Cách xếp dữ liệu theo cột mở ra bốn nguồn tăng tốc, và chúng cộng dồn lên nhau.
+
+### 3.1. Đọc ít hơn — column pruning
+
+**Column pruning** là kỹ thuật chỉ đọc đúng những cột mà query cần và bỏ qua phần còn lại. Vì mỗi cột nằm thành một dải riêng trên đĩa, engine có thể nạp chính xác cột `country` và `amount` mà không hề chạm tới 28 cột kia.
+
+Với bảng 30 cột mà query chỉ cần 3, columnar đọc khoảng 10% lượng dữ liệu so với row store. Đây là khoản tiết kiệm lớn nhất và dễ hình dung nhất — và như sẽ thấy ở phần Athena, nó dịch thẳng thành tiền.
+
+Bạn đừng lầm tưởng rằng dùng `SELECT id FROM users` thay vì `SELECT * FROM users` cũng là column pruning. Nếu bạn đã đọc bài viết [Storage Internals](/posts/postgresql-storage-internals), bạn sẽ hiểu được rằng đơn vị dữ liệu nhỏ nhất mà database load lên từ disk là page, kể cả khi bạn chỉ cần 1 giá trị của 1 record, database cũng sẽ load nguyên page chứa record đó.
+
+### 3.2. Nén tốt hơn — compression & encoding
+
+Đây là phần đẹp đẽ của columnar. Khi mọi giá trị trong một dải đều **cùng kiểu dữ liệu và thường cùng miền giá trị** (ví dụ cả triệu giá trị `country` đều là chuỗi 2 ký tự, lặp đi lặp lại "US", "VN", "JP"), thuật toán nén làm việc cực kỳ hiệu quả. Trộn lẫn nhiều kiểu như trong row store thì không có lợi thế đó.
+
+Trước cả khi nén tổng quát, columnar dùng các **encoding nhẹ** — cách mã hóa khai thác đặc điểm của từng cột:
+
+<ExcalidrawDiagram
+  src="/columnar-database-encoding.excalidraw"
+  alt="Four lightweight column encodings — dictionary encoding maps values to small ids, run-length encoding stores repeated values as (value, count), delta encoding stores differences, bit-packing fits small integers into minimal bits"
+/>
+
+- **Dictionary encoding** — thay mỗi giá trị bằng một số nguyên nhỏ trỏ vào "từ điển" các giá trị phân biệt. Cột `country` chỉ có ~200 giá trị khác nhau, nên thay vì lưu chuỗi "US" cả triệu lần, ta lưu số `0` cả triệu lần. Tuyệt vời cho cột ít giá trị phân biệt (low-cardinality).
+- <Tooltip content="Run-Length Encoding — mã hóa độ dài chuỗi lặp">RLE</Tooltip> — thay một chuỗi giá trị giống nhau liền nhau bằng cặp (giá trị, số lần lặp). `A A A A` thành `(A, 4)`. Tuyệt vời khi dữ liệu đã sắp xếp hoặc có nhiều đoạn lặp dài.
+- **Delta encoding** — chỉ lưu hiệu số giữa các giá trị liên tiếp thay vì giá trị tuyệt đối. `1000, 1002, 1005, 1009` thành base `1000` cộng deltas `0, 2, 3, 4`. Tuyệt vời cho id tăng dần hay timestamp.
+- **Bit-packing** — nếu một cột (sau dictionary encoding) chỉ chứa giá trị trong khoảng `0..3`, mỗi giá trị chỉ cần 2 bit thay vì 32 hay 64 bit. Đóng gói sát bit, không phí.
+
+Hệ quả thực tế: column store thường nén chặt **5–10 lần**, trong khi row store chỉ đạt khoảng **1.5–3 lần** (vì mỗi block trộn nhiều kiểu dữ liệu khác nhau). Ít byte trên đĩa nghĩa là ít byte phải đọc — khoản tiết kiệm I/O cộng dồn lên trên column pruning.
+
+### 3.3. Vectorized execution — chạy đúng nhịp của CPU
+
+**Vectorized execution** là kỹ thuật xử lý dữ liệu theo từng khối cột (batch) thay vì từng dòng một, cho phép CPU áp cùng một phép tính lên nhiều giá trị cùng lúc.
+
+Một cột trong columnar là một mảng liền mạch các giá trị cùng kiểu — ví dụ một mảng `double` của cột `amount`. CPU hiện đại xử lý mảng kiểu này cực nhanh nhờ <Tooltip content="Single Instruction, Multiple Data — một lệnh CPU thao tác trên nhiều giá trị cùng lúc">SIMD</Tooltip>: một lệnh cộng có thể cộng 8 số `double` trong một nhịp. Dữ liệu nằm liền nhau cũng thân thiện với <Tooltip content="Bộ nhớ đệm tốc độ cao nằm ngay trong CPU; dữ liệu nằm liền nhau giúp tăng tỉ lệ cache hit">CPU cache</Tooltip>, giảm số lần phải ra RAM.
+
+Trong row store thì ngược lại: giá trị `amount` của mỗi dòng nằm xen kẽ giữa `country`, `email`, `name`... CPU phải nhảy cóc qua bộ nhớ, liên tục cache miss, và không thể vector hóa gọn gàng. Cùng một phép `SUM`, columnar chạy nhanh hơn nhiều lần chỉ nhờ cách dữ liệu nằm trong bộ nhớ.
+
+### 3.4. Predicate pushdown — bỏ qua cả khối dữ liệu
+
+Nguồn tăng tốc thứ tư là không đọc gì cả nếu chắc chắn không cần. Một **predicate** là điều kiện lọc trong mệnh đề `WHERE` (ví dụ `amount > 1000`).
+
+**Predicate pushdown** là việc đẩy điều kiện đó xuống tận tầng lưu trữ, để tầng đó tự quyết định khối dữ liệu nào có thể bỏ qua mà không cần mở ra đọc.
+
+Columnar storage chia mỗi cột thành nhiều khối, và lưu sẵn **thống kê min/max** cho từng khối. Khi query có `WHERE amount > 1000`, engine nhìn vào thống kê: nếu một khối có `max = 500`, thì chắc chắn không dòng nào trong khối đó thỏa điều kiện — bỏ qua cả khối, không đọc một byte dữ liệu. Đây chính là cơ chế làm cho việc đọc một file Parquet trở nên rẻ, như ta sẽ thấy ngay sau đây.
+
+---
+
+## 4. Cái giá phải trả — vì sao columnar tệ cho OLTP
+
+Không có bữa trưa miễn phí. Mọi thứ làm columnar nhanh cho analytics lại làm nó dở tệ cho công việc giao dịch.
+
+- **Insert một dòng rất đắt — tuple splitting.** **Tuple splitting** là việc xé một dòng thành từng cột riêng, rồi mở từng vùng lưu trữ của mỗi cột để ghi giá trị vào, đồng thời cập nhật metadata nén/encoding của từng cột. Một dòng 30 cột biến thành 30 thao tác ghi rải rác. Vì vậy hệ thống columnar gần như luôn tránh insert lẻ, mà nạp dữ liệu theo lô lớn.
+- **Point lookup theo id chậm.** Muốn dựng lại nguyên một dòng (ví dụ "lấy hết thông tin order id = 42"), engine phải gom giá trị từ 30 vùng cột khác nhau — 30 lần đọc rải rác, đúng kiểu việc mà row store làm bằng một lần đọc.
+- **Update/Delete đắt.** Khi dữ liệu đã được nén và đóng gói chặt theo khối, sửa một giá trị ở giữa thường buộc phải giải nén rồi đóng gói lại cả khối.
+- **Nhiều hệ thống columnar là immutable hoặc append-only**, không cho sửa tại chỗ — một tính chất ta sẽ gặp lại rõ nét với Parquet.
+
+Một con số tham khảo: columnar thường bắt đầu phát huy giá trị từ khoảng **10–100 triệu dòng** trở lên. Dưới ngưỡng đó, một database quan hệ truyền thống cùng vài index hợp lý thường là quá đủ — đừng kéo cả một data warehouse vào chỉ để query 2 triệu dòng.
+
+Đến đây bạn đã nắm được columnar database. Nhưng có một chi tiết quan trọng: columnar không chỉ là một loại database. Nó còn là một cách tổ chức **file**. Và file columnar phổ biến nhất thế giới data hiện nay là Parquet.
+
+---
+
+## 5. Parquet là gì — columnar không chỉ là database, mà còn là một định dạng file
+
+**Apache Parquet** là một định dạng file lưu trữ dữ liệu theo cột, mã nguồn mở. Nó không phải database, cũng không phải query engine — nó chỉ là một cách sắp xếp byte trong một file nằm trên đĩa hay object storage. Bạn có thể có một file `orders.parquet` y như có một file CSV, chỉ khác là bên trong nó được tổ chức theo cột và nén sẵn.
+
+Điểm khiến Parquet trở nên thống trị là nó **tách lưu trữ khỏi tính toán** (decoupling storage from compute). Trong database truyền thống, phần lưu trữ và phần xử lý query dính chặt vào nhau trong một hệ thống. Với Parquet, dữ liệu nằm độc lập dưới dạng file, và **bất kỳ engine nào cũng đọc được cùng một file**: AWS Athena, Apache Spark, DuckDB, Trino, hay Snowflake. Bạn lưu dữ liệu một lần, query bằng đủ thứ công cụ — đây là nền tảng của kiến trúc **data lake** (hồ dữ liệu: nơi gom mọi dữ liệu thô dưới dạng file trên object storage).
+
+Vài tính chất cốt lõi của Parquet:
+
+- **Columnar** — dĩ nhiên, với toàn bộ lợi thế ở phần 3.
+- **Self-describing (tự mô tả)** — schema (tên cột, kiểu dữ liệu) được nhúng ngay trong file. Không cần một database bên ngoài để biết file chứa gì; bản thân file đã đủ thông tin để đọc.
+- **Immutable / append-only** — file ghi một lần, không sửa tại chỗ. Phần sau sẽ giải thích vì sao cấu trúc file bắt buộc điều này.
+
+Về nguồn gốc: Parquet dựa trên ý tưởng từ paper **Dremel** của Google (2010), được Twitter và Cloudera phát triển, rồi trở thành một dự án Apache. Nó có một người anh em là **ORC** với triết lý tương tự, nhưng Parquet là định dạng được dùng rộng rãi nhất trong hệ sinh thái data hiện nay.
+
+---
+
+## 6. Giải phẫu một file Parquet
+
+Bên trong, một file Parquet có cấu trúc phân cấp gọn gàng. Hiểu cấu trúc này là chìa khóa để hiểu vì sao nó vừa nhanh vừa immutable.
+
+<ExcalidrawDiagram
+  src="/columnar-database-parquet-structure.excalidraw"
+  alt="Anatomy of a Parquet file — PAR1 magic numbers bracket the file; row groups hold one column chunk per column; each chunk holds dictionary and data pages; the footer stores schema and per-column-chunk min/max statistics and offsets"
+/>
+
+Đi từ ngoài vào trong:
+
+- **Magic number `PAR1`** — file bắt đầu và kết thúc bằng 4 byte `PAR1`. Đọc 4 byte đầu và 4 byte cuối là biết ngay có phải file Parquet hợp lệ không.
+- **Row group** — một lát cắt ngang của bảng, chứa toàn bộ các cột cho một tập con các dòng (mặc định khoảng 128MB mỗi row group). Đây là đơn vị song song hóa: nhiều row group có thể được đọc bởi nhiều luồng/máy khác nhau cùng lúc.
+- **Column chunk** — bên trong mỗi row group, dữ liệu của **một cột** được gom thành một column chunk nằm liền mạch trên đĩa. Đây chính là chỗ tính "columnar" được hiện thực hóa ở mức file.
+- **Page** — mỗi column chunk lại chia thành các page (khoảng 1MB), là **đơn vị nhỏ nhất của nén và encoding**. Có **dictionary page** (chứa từ điển giá trị cho dictionary encoding) và **data page** (chứa dữ liệu thực).
+- **Footer (FileMetaData)** — nằm ở cuối file, là bộ não của Parquet. Footer chứa schema đầy đủ, tổng số dòng, và với mỗi column chunk của mỗi row group: vị trí byte (offset), kích thước, encoding, codec nén, cùng **thống kê min/max và số lượng null**. Chính những thống kê này cho phép predicate pushdown bỏ qua cả row group.
+
+Trên cùng cấu trúc đó, Parquet áp các **encoding nhẹ** đã nói ở phần 3.2 cho từng cột, rồi phủ thêm một lớp **nén tổng quát** lên trên: **Snappy** (mặc định, ưu tiên tốc độ), **Gzip**, **Zstd** hay **LZ4** tùy nhu cầu cân bằng giữa tỉ lệ nén và tốc độ.
+
+---
+
+## 7. Đọc một file Parquet: footer-first + predicate pushdown
+
+Cấu trúc trên dẫn tới một cách đọc rất thông minh. Reader không quét file từ đầu — nó đọc footer trước.
+
+Các bước đọc một query như `SELECT country, amount WHERE amount > 1000`:
+
+1. **Seek tới cuối file**, đọc footer length rồi đọc magic `PAR1` để xác nhận đây là 1 file parquet hợp lệ.
+2. **Đọc FileMetaData (footer)** — giờ reader đã có schema và thống kê min/max của mọi row group, mà chưa hề đọc một byte dữ liệu nào.
+3. **Predicate pushdown ở mức row group** — dùng min/max để bỏ qua row group không thể chứa kết quả. Row group có `amount max = 500` thì chắc chắn không thỏa `amount > 1000`, bỏ luôn.
+4. **Column pruning** — với những row group sống sót, chỉ đọc column chunk của `country` và `amount`, không đụng tới `user_id`, `email` hay 26 cột khác.
+
+Hai cơ chế này cộng lại khiến một query thực tế chỉ chạm vào một phần rất nhỏ của file.
+
+Cấu trúc footer-ở-cuối cũng giải thích vì sao Parquet **immutable**. Vì footer chứa offset của mọi thứ và chỉ được ghi **sau cùng** (sau khi đã biết kích thước thật của mọi column chunk đã nén), nên file được ghi trong **một lượt duy nhất (single-pass write)**. Bạn không thể chèn một dòng vào giữa file đã đóng — làm vậy sẽ dịch chuyển mọi byte phía sau và phá vỡ toàn bộ offset trong footer. Muốn "sửa" dữ liệu, bạn ghi một file mới hoặc thêm file mới bên cạnh. Immutability ở đây không phải hạn chế tình cờ, mà là một lựa chọn thiết kế: nó cho phép lưu trên object storage rẻ tiền, đọc song song không cần khóa, và cache an toàn.
+
+---
+
+## 8. Mẫu hình phổ biến nhất: Parquet trên S3 + Athena
+
+Khi đưa mẫu hình này lên cloud, ta có kiến trúc mà rất nhiều đội data dùng hằng ngày.
+
+<ExcalidrawDiagram
+  src="/columnar-database-s3-athena.excalidraw"
+  alt="Querying Parquet on S3 with Athena — Parquet files partitioned by date live in S3, Glue Data Catalog holds table schema and partitions, serverless Athena scans only needed columns and partitions billed by bytes scanned, results flow to a BI dashboard"
+/>
+
+Các mảnh ghép:
+
+- **Amazon S3** — nơi lưu các file Parquet. Object storage rẻ, bền, gần như vô hạn. Đây là "đĩa" của data lake.
+- **Phân vùng theo thư mục (partition)** — dữ liệu được tổ chức theo cấu trúc thư mục kiểu Hive: `s3://my-lake/orders/year=2026/month=06/...`. **Partition pruning** là việc engine nhìn vào `WHERE year = 2026` và chỉ đọc đúng prefix thư mục khớp, bỏ qua mọi năm khác — loại bỏ dữ liệu ở mức **thư mục/file**, trước cả khi mở file Parquet. Hãy phân biệt với predicate pushdown (loại bỏ ở mức row group dựa trên min/max **bên trong** file); hai cơ chế bổ trợ cho nhau.
+- **AWS Glue Data Catalog** — kho lưu định nghĩa bảng: schema, kiểu dữ liệu, và danh sách các partition đang tồn tại trên S3. Nó cho engine biết "bảng `orders` gồm những cột gì, file nằm ở đâu".
+- **Amazon Athena** — query engine serverless (dựa trên Trino/Presto). Bạn không phải dựng hay quản lý server nào; chỉ cần gõ SQL.
+
+> Điểm mấu chốt: **Athena tính tiền theo lượng dữ liệu quét (bytes scanned)**, khoảng 5 USD mỗi TB.
+
+Chính mô hình tính tiền theo bytes scanned biến mọi tối ưu columnar thành tiền thật. Một bảng 1TB dạng CSV, khi chuyển sang Parquet nén có thể chỉ còn khoảng 100GB; rồi column pruning khiến query chỉ chạm vài cột, và partition pruning loại bỏ những tháng không liên quan — kết quả là query chỉ quét vài GB thay vì cả TB. Benchmark của AWS cho thấy chuyển sang định dạng cột cộng phân vùng hợp lý có thể giảm tới **~70% lượng dữ liệu quét và chi phí**, đồng thời query nhanh hơn nhiều lần.
+
+> Một lưu ý cuối: vì Parquet immutable, nó không tự hỗ trợ `UPDATE`/`DELETE` hay giao dịch ACID. Để có những thứ đó ngay trên data lake, người ta phủ thêm một tầng **table format** như **Apache Iceberg**, **Delta Lake** hay **Apache Hudi**. Chúng quản lý một tập hợp các file Parquet immutable cộng với một lớp metadata để mô phỏng thao tác sửa/xóa và snapshot theo thời gian — nhưng đó là chủ đề cho một bài viết khác.
+
+---
+
+## Kết luận
+
+Quay lại câu query report doanh thu đã làm PostgreSQL của bạn nghẹt thở ở đầu bài. Giờ bạn đã biết vì sao: nó đọc 200 triệu dòng × 30 cột trong khi chỉ cần 3 cột. Trên một columnar store — hoặc trên các file Parquet phân vùng theo tháng và query bằng Athena — đúng câu hỏi đó chỉ chạm vào 3 cột của những partition liên quan, quét một phần nhỏ dữ liệu, và không hề đụng tới database OLTP đang phục vụ user.
+
+Những điều cốt lõi cần mang theo:
+
+- **Row store và column store là hai hình dạng vuông góc.** Row gom cả dòng nằm liền nhau (tốt cho OLTP: lấy/sửa một thực thể); column gom cả cột nằm liền nhau (tốt cho OLAP: quét và tổng hợp).
+- **Columnar nhanh cho analytics nhờ bốn thứ cộng dồn:** column pruning (đọc ít cột), nén/encoding (5–10 lần), vectorized execution (CPU và SIMD), và predicate pushdown (bỏ qua cả khối qua min/max).
+- **Cái giá là OLTP:** insert/update lẻ tốn tuple splitting, point lookup theo id phải gom từ nhiều cột. Đừng dùng columnar cho workload giao dịch hay dataset nhỏ.
+- **Parquet đưa columnar ra khỏi database, biến nó thành file.** Self-describing, immutable, ghi một lượt và đọc footer-first — tách lưu trữ khỏi tính toán, để mọi engine cùng đọc một file.
+- **S3 + Athena là hiện thân phổ biến nhất của mẫu hình này.** Parquet trên object storage rẻ, tính tiền theo bytes scanned, nên columnar + nén + partition pruning dịch thẳng thành hóa đơn nhỏ hơn.
+
+Là backend engineer, có thể bạn sẽ không bao giờ phải tự vận hành một columnar database. Nhưng cái ngày bạn cần trả lời một câu hỏi phân tích trên hàng trăm triệu dòng, biết rằng dữ liệu nên nằm dạng **cột** — không phải dạng **dòng** — sẽ là khác biệt giữa một query 3 giây và một query làm sập production.
