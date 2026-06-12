@@ -1,0 +1,213 @@
+---
+title: 'AWS Machine Learning: Chọn Đúng Service Cho Kỳ Thi SAA'
+date: '2026-06-12'
+tags: ['AWS', 'Machine Learning', 'SAA']
+description: 'Nhận diện nhanh keyword trong đề thi SAA để chọn đúng AI/ML service: Rekognition, Transcribe, Polly, Translate, Lex, Comprehend, Comprehend Medical, SageMaker, Kendra, Personalize, Textract.'
+enableComment: true
+---
+
+# AWS Machine Learning: Chọn Đúng Service Cho Kỳ Thi SAA
+
+Trong phòng thi SAA, một câu hỏi về machine learning thường không kiểm tra bạn có train được model hay không — nó kiểm tra bạn có nhận ra đúng **loại dữ liệu đầu vào và tác vụ** mà đề đang mô tả hay không. Đề ném ra một tình huống — "tự động tạo phụ đề cho video", "phân tích cảm xúc bình luận khách hàng", "trích xuất dữ liệu từ hóa đơn scan" — và gần như luôn có **đúng một service** là đáp án.
+
+Điểm mấu chốt: gần như toàn bộ các service trong phần này là **AI service đã huấn luyện sẵn (pre-trained)** và fully managed — bạn chỉ gọi API, ném dữ liệu vào và nhận kết quả, không phải tự xây model. Ngoại lệ duy nhất là SageMaker, nơi bạn tự build/train/deploy model của riêng mình. Bạn chỉ có khoảng 90 giây mỗi câu, nên việc nhận diện phải gần như là phản xạ. Bài viết này là tấm bản đồ đó: với mỗi service, mình tóm tắt nó làm gì, feature cốt lõi, use case, và quan trọng nhất — các **keyword "tố cáo"** nó trong đề.
+
+> **Lưu ý quan trọng:** Đây chỉ là các nhận biết **cơ bản** để chọn nhanh đáp án trong phòng thi. Ngoài thực tế, việc chọn một AI/ML service cần cân nhắc nhiều hơn: độ chính xác trên dữ liệu thật, chi phí theo lượng request, yêu cầu về chủ quyền dữ liệu (data residency) và tuân thủ, có cần train trên dữ liệu riêng hay không, và liệu một service pre-trained đã đủ tốt hay phải tự build bằng SageMaker. Một keyword hiếm khi ánh xạ tới đúng một lựa chọn "chuẩn production" như cách nó ánh xạ trong đề thi.
+
+---
+
+## 1. Amazon Rekognition — Phân tích ảnh và video
+
+Rekognition là service computer vision (thị giác máy tính — cho máy "nhìn" và hiểu nội dung trong ảnh/video) đã train sẵn, phân tích hình ảnh và video qua API.
+
+- Nhận diện object và scene (gắn nhãn vật thể, khung cảnh trong ảnh).
+- Phân tích khuôn mặt (tuổi, cảm xúc, có đeo kính...), so khớp và nhận dạng khuôn mặt (face comparison/recognition).
+- Nhận diện người nổi tiếng (celebrity recognition).
+- Content moderation — phát hiện nội dung phản cảm/không phù hợp (khỏa thân, bạo lực).
+- Đọc chữ xuất hiện trong ảnh (text in image), phát hiện đồ bảo hộ lao động (PPE).
+- Tích hợp Kinesis Video Streams để phân tích video thời gian thực.
+
+**Use case:** Phân tích thư viện ảnh/video, kiểm duyệt nội dung do người dùng đăng, xác thực bằng khuôn mặt, đếm người trong khung hình.
+
+**Keyword nhận diện:** `phân tích ảnh / video`, `nhận diện khuôn mặt (face detection/recognition)`, `object/scene detection`, `content moderation`, `nội dung phản cảm / không phù hợp`.
+
+---
+
+## 2. Amazon Transcribe — Chuyển giọng nói thành văn bản
+
+Transcribe dùng <Tooltip content="Automatic Speech Recognition — nhận dạng giọng nói tự động, chuyển âm thanh lời nói thành văn bản">ASR</Tooltip> để chuyển âm thanh lời nói thành văn bản.
+
+- Tự động nhận dạng giọng nói với độ chính xác cao.
+- Tự động che (redact) thông tin nhạy cảm <Tooltip content="Personally Identifiable Information — thông tin định danh cá nhân như tên, email, số điện thoại, số CMND/CCCD">PII</Tooltip> trong bản ghi.
+- Tự nhận diện ngôn ngữ, hỗ trợ nhiều ngôn ngữ.
+- Custom vocabulary (từ điển riêng cho thuật ngữ chuyên ngành) và speaker diarization (phân biệt ai đang nói).
+
+**Use case:** Ghi lại nội dung cuộc gọi/họp, tạo phụ đề (subtitles/captions) cho video, chuyển voicemail thành text.
+
+**Keyword nhận diện:** `speech to text`, `transcribe / ghi lại âm thanh`, `phụ đề / subtitles / captions`, `chuyển audio thành text`.
+
+---
+
+## 3. Amazon Polly — Chuyển văn bản thành giọng nói
+
+Polly làm điều ngược lại với Transcribe: dùng <Tooltip content="Text-to-Speech — tổng hợp giọng nói, chuyển văn bản thành âm thanh lời nói">TTS</Tooltip> để chuyển văn bản thành giọng nói sống động như người thật.
+
+- Nhiều giọng đọc tự nhiên (neural voice) trên nhiều ngôn ngữ.
+- Điều khiển cách đọc bằng <Tooltip content="Speech Synthesis Markup Language — ngôn ngữ đánh dấu cho phép điều khiển cách đọc: ngắt nghỉ, nhấn nhá, tốc độ, cách phát âm">SSML</Tooltip> (ngắt nghỉ, nhấn nhá, tốc độ).
+- Lexicon (từ điển phát âm tùy chỉnh) và Speech Marks (đồng bộ text với audio để làm hiệu ứng nhép môi/highlight).
+
+**Use case:** Cho ứng dụng "biết nói", đọc bài báo thành audio, hỗ trợ người khiếm thị, tạo giọng cho trợ lý ảo.
+
+**Keyword nhận diện:** `text to speech`, `tạo giọng nói / audio từ văn bản`, `giọng đọc sống động`, `đọc văn bản thành tiếng`.
+
+---
+
+## 4. Amazon Translate — Dịch ngôn ngữ
+
+Translate là dịch máy bằng neural network (dịch theo ngữ cảnh cả câu thay vì dịch từng từ rời rạc), chuyển văn bản giữa các ngôn ngữ một cách tự nhiên.
+
+- Dịch giữa nhiều cặp ngôn ngữ, giữ ngữ cảnh.
+- Bản địa hóa (localize) nội dung ứng dụng, website.
+- Dịch theo batch hoặc real-time, hỗ trợ custom terminology (thuật ngữ riêng).
+
+**Use case:** Bản địa hóa giao diện/nội dung đa ngôn ngữ, dịch nội dung do người dùng tạo, dịch tài liệu hàng loạt.
+
+**Keyword nhận diện:** `dịch (translate)`, `dịch ngôn ngữ`, `localization / bản địa hóa`, `đa ngôn ngữ / multilingual`.
+
+---
+
+## 5. Amazon Lex + Amazon Connect — Chatbot và tổng đài đám mây
+
+Lex là service xây chatbot hội thoại, dùng chung công nghệ <Tooltip content="Automatic Speech Recognition — nhận dạng giọng nói tự động, chuyển lời nói thành văn bản">ASR</Tooltip> + <Tooltip content="Natural Language Understanding — hiểu ngôn ngữ tự nhiên, nắm bắt ý định và ý nghĩa đằng sau câu nói của người dùng">NLU</Tooltip> với Alexa. Connect là tổng đài chăm sóc khách hàng (contact center) chạy trên đám mây, có thể dùng Lex để làm bot thoại/chat.
+
+- Lex: hiểu người dùng qua **intent** (ý định) và **slot** (thông tin cần thu thập), gọi Lambda để xử lý nghiệp vụ.
+- Connect: tổng đài ảo, không cần đầu tư hạ tầng trả trước, tích hợp Lex để tự động hóa cuộc gọi.
+- Kết hợp Lex + Connect tạo <Tooltip content="Interactive Voice Response — hệ thống trả lời thoại tự động, dẫn dắt người gọi qua menu bằng giọng nói hoặc phím bấm">IVR</Tooltip> thông minh.
+
+**Use case:** Chatbot hỗ trợ khách hàng, trợ lý đặt lịch/đặt hàng qua hội thoại, tổng đài tự động.
+
+**Keyword nhận diện:** `chatbot`, `giao diện hội thoại / conversational`, `tổng đài / call center / contact center`, `IVR`.
+
+---
+
+## 6. Amazon Comprehend — Phân tích văn bản (NLP)
+
+Comprehend là service <Tooltip content="Natural Language Processing — xử lý ngôn ngữ tự nhiên, nhóm kỹ thuật cho máy đọc hiểu và phân tích văn bản">NLP</Tooltip> đã train sẵn, đọc hiểu và rút trích thông tin từ văn bản tự do.
+
+- Sentiment analysis (phân tích cảm xúc: tích cực/tiêu cực/trung tính).
+- Trích xuất thực thể (entity) và cụm từ khóa (key phrase).
+- Nhận diện ngôn ngữ, phát hiện <Tooltip content="Personally Identifiable Information — thông tin định danh cá nhân như tên, email, số điện thoại">PII</Tooltip>.
+- Topic modeling — tự gom nhóm tài liệu theo chủ đề.
+
+**Use case:** Phân tích phản hồi khách hàng, tự phân loại/gắn nhãn tài liệu theo chủ đề, đo cảm xúc trên mạng xã hội.
+
+**Keyword nhận diện:** `sentiment / phân tích cảm xúc`, `NLP`, `trích xuất entity / key phrase`, `tìm chủ đề trong văn bản`.
+
+---
+
+## 7. Amazon Comprehend Medical — NLP cho văn bản y tế
+
+Comprehend Medical là phiên bản Comprehend chuyên cho văn bản y khoa, hiểu thuật ngữ lâm sàng mà Comprehend thường không xử lý tốt.
+
+- Phát hiện <Tooltip content="Protected Health Information — thông tin sức khỏe được bảo vệ, dữ liệu y tế nhận dạng được cá nhân và phải tuân thủ quy định như HIPAA">PHI</Tooltip> trong hồ sơ.
+- Trích xuất thực thể y tế: bệnh lý, thuốc, liều lượng, triệu chứng.
+- Liên kết với hệ thống mã chuẩn y khoa (ICD-10-CM cho chẩn đoán, RxNorm cho thuốc).
+
+**Use case:** Rút trích thông tin có cấu trúc từ ghi chú của bác sĩ, hồ sơ bệnh án, đơn thuốc.
+
+**Keyword nhận diện:** `văn bản y tế / lâm sàng`, `PHI`, `NLP cho y khoa`, `ghi chú bác sĩ / bệnh án`.
+
+---
+
+## 8. Amazon SageMaker AI — Nền tảng tự xây dựng model ML
+
+SageMaker là nền tảng fully managed để bạn **tự build, train và deploy** model machine learning của riêng mình — khác hẳn các service pre-trained ở trên.
+
+- Notebook để khám phá dữ liệu, kèm thư viện thuật toán dựng sẵn.
+- Training job, tinh chỉnh siêu tham số (hyperparameter tuning).
+- Deploy model thành endpoint phục vụ <Tooltip content="Inference — suy luận, bước đưa dữ liệu mới vào model đã train để lấy dự đoán/kết quả">inference</Tooltip> thời gian thực, hoặc batch transform cho xử lý hàng loạt.
+- Ground Truth để gán nhãn dữ liệu (data labeling).
+
+**Use case:** Đội data scientist tự xây model cho bài toán riêng mà không service pre-trained nào giải được — đây là service **duy nhất** trong nhóm này để "tự làm từ đầu".
+
+**Keyword nhận diện:** `tự build / train / deploy model`, `custom ML model`, `data scientist`, `nền tảng machine learning`.
+
+---
+
+## 9. Amazon Kendra — Tìm kiếm tài liệu thông minh
+
+Kendra là service tìm kiếm doanh nghiệp (enterprise search) dùng ML, cho phép tìm trong kho tài liệu nội bộ bằng câu hỏi ngôn ngữ tự nhiên thay vì chỉ khớp từ khóa.
+
+- Hiểu câu hỏi tự nhiên và trả về **câu trả lời trực tiếp** trích từ tài liệu, không chỉ danh sách link.
+- Connector dựng sẵn cho nhiều nguồn (S3, SharePoint, Salesforce...).
+- Học tăng cường theo phản hồi người dùng (incremental learning).
+
+**Use case:** Hệ thống hỏi đáp nội bộ, tìm kiếm trong kho tài liệu/knowledge base của công ty.
+
+**Keyword nhận diện:** `tìm kiếm tài liệu / document search`, `enterprise search`, `knowledge base`, `tìm kiếm bằng ngôn ngữ tự nhiên`.
+
+---
+
+## 10. Amazon Personalize — Gợi ý cá nhân hóa thời gian thực
+
+Personalize là engine gợi ý (recommendation) dùng chung công nghệ với trang Amazon.com, tạo gợi ý cá nhân hóa theo thời gian thực.
+
+- Gợi ý sản phẩm/nội dung phù hợp từng người dùng.
+- Personalized ranking (sắp xếp lại danh sách theo sở thích), gợi ý "sản phẩm tương tự".
+- Cập nhật real-time theo hành vi mới của người dùng.
+
+**Use case:** Gợi ý sản phẩm trong e-commerce, đề xuất nội dung, cá nhân hóa email marketing.
+
+**Keyword nhận diện:** `gợi ý / recommendation`, `cá nhân hóa / personalization`, `"recommended for you"`, `personalized ranking`.
+
+---
+
+## 11. Amazon Textract — Trích xuất dữ liệu từ tài liệu
+
+Textract dùng <Tooltip content="Optical Character Recognition — nhận dạng ký tự quang học, chuyển chữ trong ảnh/tài liệu scan thành văn bản máy đọc được">OCR</Tooltip> nâng cao để trích xuất không chỉ chữ mà cả **dữ liệu có cấu trúc** (cặp khóa–giá trị trong form, bảng biểu, chữ viết tay) từ tài liệu scan, PDF, ảnh.
+
+- Đọc text, form (key-value) và table từ tài liệu.
+- Nhận diện được cả chữ viết tay.
+- Giữ nguyên cấu trúc dữ liệu để đưa thẳng vào hệ thống xử lý.
+
+**Use case:** Xử lý hóa đơn, giấy tờ tùy thân, biểu mẫu, tài liệu tài chính/thuế/y tế.
+
+**Keyword nhận diện:** `trích xuất text từ tài liệu`, `tài liệu scan / PDF`, `form và bảng (forms & tables)`, `OCR`, `xử lý hóa đơn / giấy tờ`.
+
+---
+
+## Tips & Tricks — Nhận diện keyword và chọn service
+
+Đây là phần quan trọng nhất khi đi thi. Đọc đề, bắt keyword, ánh xạ thẳng sang service.
+
+### Theo loại dữ liệu đầu vào
+
+| Đề nhắc tới...                                      | Chọn               |
+| -------------------------------------------------- | ------------------ |
+| Ảnh, video, khuôn mặt, vật thể                     | Rekognition        |
+| Âm thanh lời nói → cần ra văn bản                  | Transcribe         |
+| Văn bản → cần ra giọng nói                         | Polly              |
+| Văn bản cần dịch sang ngôn ngữ khác                | Translate          |
+| Văn bản cần phân tích cảm xúc / entity / chủ đề    | Comprehend         |
+| Văn bản y tế / lâm sàng                            | Comprehend Medical |
+| Tài liệu scan / PDF / form / bảng                  | Textract           |
+| Hội thoại / chatbot / tổng đài                     | Lex (+ Connect)    |
+| Câu hỏi tìm kiếm trong kho tài liệu                | Kendra             |
+| Lịch sử hành vi → cần gợi ý                        | Personalize        |
+
+### Pre-trained hay tự build
+
+| Đề nhắc tới...                                                        | Chọn                          |
+| -------------------------------------------------------------------- | ----------------------------- |
+| "data scientist", "train model riêng", "custom model", "thuật toán riêng" | SageMaker                |
+| Tác vụ AI phổ biến (ảnh, giọng nói, dịch, NLP...) qua API có sẵn      | Service pre-trained tương ứng |
+
+---
+
+## Kết lại
+
+Một câu để nhớ:
+
+> **Nhận ra loại dữ liệu và tác vụ trước, service sẽ tự lộ ra.**
+
+Trong phòng thi, phản xạ keyword → service giúp bạn tiết kiệm thời gian quý giá. Nhưng ngoài thực tế, câu hỏi đúng không phải "service nào khớp keyword", mà là một service pre-trained có đủ chính xác cho bài toán không, chi phí theo lượng request ra sao, dữ liệu có ràng buộc tuân thủ gì, và khi nào thì đáng để tự train model bằng SageMaker.

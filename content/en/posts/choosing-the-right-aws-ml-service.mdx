@@ -1,0 +1,213 @@
+---
+title: 'AWS Machine Learning: Picking the Right Service for the SAA Exam'
+date: '2026-06-12'
+tags: ['AWS', 'Machine Learning', 'SAA']
+description: 'Recognize the keywords in SAA exam questions to pick the right AI/ML service fast: Rekognition, Transcribe, Polly, Translate, Lex, Comprehend, Comprehend Medical, SageMaker, Kendra, Personalize, Textract.'
+enableComment: true
+---
+
+# AWS Machine Learning: Picking the Right Service for the SAA Exam
+
+In the SAA exam, a machine learning question usually isn't testing whether you can train a model — it's testing whether you can recognize the **input data type and the task** the prompt describes. The question drops a scenario — "automatically generate subtitles for videos", "analyze sentiment in customer comments", "extract data from scanned invoices" — and almost always there's **exactly one service** that's the intended answer.
+
+The key insight: nearly every service in this section is a **pre-trained, fully managed AI service** — you just call an API, hand it data, and get a result; you don't build a model. The one exception is SageMaker, where you build/train/deploy your own model. You get roughly 90 seconds per question, so recognition has to be nearly reflexive. This article is that map: for each service I summarize what it does, the core features, the use case, and most importantly — the **keywords that give it away** in the prompt.
+
+> **Important note:** These are only **basic** cues for quickly picking an answer under exam pressure. In the real world, choosing an AI/ML service demands far more thought: accuracy on real data, cost per request, data residency and compliance requirements, whether you need to train on your own data, and whether a pre-trained service is good enough or you must build with SageMaker. A keyword rarely maps to exactly one production-correct choice the way it does on the exam.
+
+---
+
+## 1. Amazon Rekognition — Image and Video Analysis
+
+Rekognition is a pre-trained computer vision service (computer vision — letting machines "see" and understand the contents of images/video) that analyzes images and video through an API.
+
+- Detects objects and scenes (labels for things and settings in an image).
+- Facial analysis (age, emotion, wearing glasses...), plus face comparison and recognition.
+- Celebrity recognition.
+- Content moderation — flags inappropriate/unsafe content (nudity, violence).
+- Reads text that appears in images (text in image), detects personal protective equipment (PPE).
+- Integrates with Kinesis Video Streams for real-time video analysis.
+
+**Use case:** Analyze photo/video libraries, moderate user-uploaded content, face-based verification, count people in a frame.
+
+**Keywords:** `image / video analysis`, `face detection/recognition`, `object/scene detection`, `content moderation`, `inappropriate / unsafe content`.
+
+---
+
+## 2. Amazon Transcribe — Speech to Text
+
+Transcribe uses <Tooltip content="Automatic Speech Recognition — automatically recognizing speech and converting spoken audio into text">ASR</Tooltip> to convert spoken audio into text.
+
+- Automatic speech recognition with high accuracy.
+- Automatically redacts sensitive <Tooltip content="Personally Identifiable Information — personal data such as names, emails, phone numbers, or ID numbers">PII</Tooltip> from the transcript.
+- Automatic language identification, multi-language support.
+- Custom vocabulary (a dictionary for domain-specific terms) and speaker diarization (who said what).
+
+**Use case:** Transcribe calls/meetings, generate subtitles/captions for video, turn voicemail into text.
+
+**Keywords:** `speech to text`, `transcribe audio`, `subtitles / captions`, `convert audio to text`.
+
+---
+
+## 3. Amazon Polly — Text to Speech
+
+Polly does the reverse of Transcribe: it uses <Tooltip content="Text-to-Speech — speech synthesis that converts written text into spoken audio">TTS</Tooltip> to turn text into lifelike speech.
+
+- Many natural-sounding voices (neural voices) across languages.
+- Control delivery with <Tooltip content="Speech Synthesis Markup Language — a markup language that controls how text is spoken: pauses, emphasis, speed, pronunciation">SSML</Tooltip> (pauses, emphasis, speed).
+- Lexicons (custom pronunciation dictionaries) and Speech Marks (sync text with audio for lip-sync/highlight effects).
+
+**Use case:** Give apps a voice, turn articles into audio, support the visually impaired, voice a virtual assistant.
+
+**Keywords:** `text to speech`, `generate voice / audio from text`, `lifelike speech`, `read text aloud`.
+
+---
+
+## 4. Amazon Translate — Language Translation
+
+Translate is neural machine translation (translating in the context of the whole sentence rather than word by word), converting text between languages naturally.
+
+- Translates across many language pairs while preserving context.
+- Localizes app/website content.
+- Batch or real-time translation, with custom terminology support.
+
+**Use case:** Localize multi-language UI/content, translate user-generated text, translate documents in bulk.
+
+**Keywords:** `translate`, `language translation`, `localization`, `multilingual`.
+
+---
+
+## 5. Amazon Lex + Amazon Connect — Chatbots and Cloud Contact Center
+
+Lex is the service for building conversational chatbots, using the same <Tooltip content="Automatic Speech Recognition — automatically recognizing speech and converting it into text">ASR</Tooltip> + <Tooltip content="Natural Language Understanding — understanding natural language, grasping the intent and meaning behind what a user says">NLU</Tooltip> technology as Alexa. Connect is a cloud-based customer contact center that can use Lex to power voice/chat bots.
+
+- Lex: understands users via **intents** (what they want) and **slots** (the information to collect), calling Lambda for business logic.
+- Connect: a virtual contact center with no upfront infrastructure, integrating Lex to automate calls.
+- Lex + Connect together build an intelligent <Tooltip content="Interactive Voice Response — an automated phone system that guides callers through menus by voice or keypad">IVR</Tooltip>.
+
+**Use case:** Customer-support chatbots, conversational booking/ordering assistants, automated phone lines.
+
+**Keywords:** `chatbot`, `conversational interface`, `contact center / call center`, `IVR`.
+
+---
+
+## 6. Amazon Comprehend — Text Analysis (NLP)
+
+Comprehend is a pre-trained <Tooltip content="Natural Language Processing — a family of techniques for machines to read, understand, and analyze text">NLP</Tooltip> service that reads and extracts information from free-form text.
+
+- Sentiment analysis (positive/negative/neutral).
+- Entity and key-phrase extraction.
+- Language detection, <Tooltip content="Personally Identifiable Information — personal data such as names, emails, phone numbers">PII</Tooltip> detection.
+- Topic modeling — automatically groups documents by topic.
+
+**Use case:** Analyze customer feedback, auto-classify/label documents by topic, measure sentiment on social media.
+
+**Keywords:** `sentiment analysis`, `NLP`, `extract entities / key phrases`, `find topics in text`.
+
+---
+
+## 7. Amazon Comprehend Medical — NLP for Medical Text
+
+Comprehend Medical is a version of Comprehend specialized for clinical text, understanding medical terminology that plain Comprehend often handles poorly.
+
+- Detects <Tooltip content="Protected Health Information — personally identifiable health data that must comply with regulations such as HIPAA">PHI</Tooltip> in records.
+- Extracts medical entities: conditions, medications, dosages, symptoms.
+- Links to standard medical coding systems (ICD-10-CM for diagnoses, RxNorm for medications).
+
+**Use case:** Extract structured information from doctor's notes, patient records, and prescriptions.
+
+**Keywords:** `medical / clinical text`, `PHI`, `healthcare NLP`, `doctor's notes / patient records`.
+
+---
+
+## 8. Amazon SageMaker AI — Platform to Build Your Own ML Models
+
+SageMaker is a fully managed platform for you to **build, train, and deploy your own** machine learning models — fundamentally different from the pre-trained services above.
+
+- Notebooks for data exploration, plus a library of built-in algorithms.
+- Training jobs and hyperparameter tuning.
+- Deploy a model as an endpoint for real-time <Tooltip content="Inference — feeding new data into a trained model to get a prediction/result">inference</Tooltip>, or batch transform for bulk processing.
+- Ground Truth for data labeling.
+
+**Use case:** A data science team building a custom model for a problem no pre-trained service can solve — this is the **only** "build it yourself" service in the group.
+
+**Keywords:** `build / train / deploy your own model`, `custom ML model`, `data scientists`, `machine learning platform`.
+
+---
+
+## 9. Amazon Kendra — Intelligent Document Search
+
+Kendra is an ML-powered enterprise search service that lets you search an internal document store with natural-language questions instead of just keyword matching.
+
+- Understands natural-language questions and returns a **direct answer** extracted from the documents, not just a list of links.
+- Built-in connectors for many sources (S3, SharePoint, Salesforce...).
+- Incremental learning from user feedback.
+
+**Use case:** Internal Q&A systems, searching a company's document store / knowledge base.
+
+**Keywords:** `document search`, `enterprise search`, `knowledge base`, `natural language search`.
+
+---
+
+## 10. Amazon Personalize — Real-Time Personalized Recommendations
+
+Personalize is a recommendation engine using the same technology as Amazon.com, producing personalized recommendations in real time.
+
+- Recommends products/content tailored to each user.
+- Personalized ranking (re-orders a list by preference) and "similar items" suggestions.
+- Updates in real time based on new user behavior.
+
+**Use case:** Product recommendations in e-commerce, content suggestions, personalized email marketing.
+
+**Keywords:** `recommendations`, `personalization`, `"recommended for you"`, `personalized ranking`.
+
+---
+
+## 11. Amazon Textract — Extract Data from Documents
+
+Textract uses advanced <Tooltip content="Optical Character Recognition — recognizing characters optically, turning text in images/scanned documents into machine-readable text">OCR</Tooltip> to extract not just text but **structured data** (key-value pairs in forms, tables, handwriting) from scanned documents, PDFs, and images.
+
+- Reads text, forms (key-value), and tables from documents.
+- Recognizes handwriting too.
+- Preserves the data structure so it can flow straight into a processing system.
+
+**Use case:** Process invoices, IDs, forms, and financial/tax/medical documents.
+
+**Keywords:** `extract text from documents`, `scanned documents / PDF`, `forms & tables`, `OCR`, `process invoices / IDs`.
+
+---
+
+## Tips & Tricks — Recognize the Keyword and Pick the Service
+
+This is the most important part for the exam. Read the prompt, catch the keyword, map it straight to a service.
+
+### By input data type
+
+| When the prompt says...                              | Pick               |
+| ---------------------------------------------------- | ------------------ |
+| Images, video, faces, objects                        | Rekognition        |
+| Spoken audio → need text out                         | Transcribe         |
+| Text → need speech out                               | Polly              |
+| Text that needs translating to another language      | Translate          |
+| Text to analyze for sentiment / entities / topics    | Comprehend         |
+| Medical / clinical text                              | Comprehend Medical |
+| Scanned documents / PDF / forms / tables             | Textract           |
+| Conversation / chatbot / contact center             | Lex (+ Connect)    |
+| A search query over a document store                | Kendra             |
+| Behavior history → need recommendations              | Personalize        |
+
+### Pre-trained or build your own
+
+| When the prompt says...                                                  | Pick                          |
+| ------------------------------------------------------------------------ | ----------------------------- |
+| "data scientists", "train your own model", "custom model", "custom algorithm" | SageMaker                |
+| A common AI task (image, speech, translation, NLP...) via a ready API     | The matching pre-trained service |
+
+---
+
+## Wrapping Up
+
+One line to remember:
+
+> **Recognize the data type and the task first, and the service falls out.**
+
+In the exam, the keyword → service reflex saves you precious time. But in real life, the right question isn't "which service matches the keyword", but whether a pre-trained service is accurate enough for the problem, what it costs per request, what compliance constraints the data carries, and when it's worth training your own model with SageMaker.
