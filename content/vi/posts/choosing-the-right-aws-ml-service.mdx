@@ -84,6 +84,12 @@ Lex là service xây chatbot hội thoại, dùng chung công nghệ <Tooltip co
 - Connect: tổng đài ảo, không cần đầu tư hạ tầng trả trước, tích hợp Lex để tự động hóa cuộc gọi.
 - Kết hợp Lex + Connect tạo <Tooltip content="Interactive Voice Response — hệ thống trả lời thoại tự động, dẫn dắt người gọi qua menu bằng giọng nói hoặc phím bấm">IVR</Tooltip> thông minh.
 
+**Flow điển hình — đặt lịch hẹn qua điện thoại:**
+
+<ExcalidrawDiagram src="/lex-connect-appointment-flow.excalidraw" alt="Amazon Connect + Lex appointment-booking flow: a phone call reaches Connect, is streamed to Lex which recognizes the intent, Lex invokes Lambda, and Lambda schedules the booking into the CRM" />
+
+Khách hàng gọi vào số tổng đài ảo của Connect (**call**). Connect stream âm thanh cuộc gọi sang Lex (**stream**); Lex nhận dạng giọng nói rồi xác định **intent** "đặt lịch hẹn" cùng các slot cần thiết (ngày, giờ). Khi intent đã rõ, Lex gọi một hàm Lambda (**invoke**) để chạy nghiệp vụ — kiểm tra lịch trống rồi ghi lịch hẹn vào hệ thống <Tooltip content="Customer Relationship Management — hệ thống quản lý quan hệ và dữ liệu khách hàng">CRM</Tooltip> (**schedule**). Toàn bộ diễn ra tự động, không cần nhân viên trực tổng đài.
+
 **Use case:** Chatbot hỗ trợ khách hàng, trợ lý đặt lịch/đặt hàng qua hội thoại, tổng đài tự động.
 
 **Keyword nhận diện:** `chatbot`, `giao diện hội thoại / conversational`, `tổng đài / call center / contact center`, `IVR`.

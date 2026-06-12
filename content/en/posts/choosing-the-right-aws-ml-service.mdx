@@ -84,6 +84,12 @@ Lex is the service for building conversational chatbots, using the same <Tooltip
 - Connect: a virtual contact center with no upfront infrastructure, integrating Lex to automate calls.
 - Lex + Connect together build an intelligent <Tooltip content="Interactive Voice Response — an automated phone system that guides callers through menus by voice or keypad">IVR</Tooltip>.
 
+**Typical flow — booking an appointment by phone:**
+
+<ExcalidrawDiagram src="/lex-connect-appointment-flow.excalidraw" alt="Amazon Connect + Lex appointment-booking flow: a phone call reaches Connect, is streamed to Lex which recognizes the intent, Lex invokes Lambda, and Lambda schedules the booking into the CRM" />
+
+A customer dials Connect's virtual contact-center number (**call**). Connect streams the call audio to Lex (**stream**); Lex recognizes the speech and identifies the "book an appointment" **intent** along with the slots it needs (date, time). Once the intent is clear, Lex calls a Lambda function (**invoke**) to run the business logic — check availability and write the booking into the <Tooltip content="Customer Relationship Management — a system for managing customer relationships and data">CRM</Tooltip> system (**schedule**). The whole thing runs automatically, with no human agent.
+
 **Use case:** Customer-support chatbots, conversational booking/ordering assistants, automated phone lines.
 
 **Keywords:** `chatbot`, `conversational interface`, `contact center / call center`, `IVR`.
