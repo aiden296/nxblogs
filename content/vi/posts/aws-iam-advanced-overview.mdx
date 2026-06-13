@@ -1,0 +1,387 @@
+---
+title: 'AWS IAM Advanced: Organizations, Identity Center & Policy Evaluation'
+date: '2026-06-13'
+tags: ['AWS', 'SAA', 'Devops']
+description: 'Tổng quan nhóm dịch vụ IAM nâng cao cho kỳ thi SAA — AWS Organizations (SCP, Tag Policies), IAM Advanced Policies, Resource-based Policies vs IAM Roles, Policy Evaluation Logic, IAM Identity Center, Directory Services và Control Tower: mỗi thứ giải quyết bài toán gì, use case, và từ khóa nhận diện trong đề thi.'
+enableComment: true
+---
+
+# AWS IAM Advanced: Organizations, Identity Center & Policy Evaluation
+
+Hãy tưởng tượng công ty bạn khởi đầu với **một** AWS account duy nhất. Một năm sau, bạn có 20 account: account cho team A, team B, một cái cho production, một cái cho sandbox của intern, vài cái cho dự án khách hàng... Và đột nhiên một loạt câu hỏi đập vào mặt bạn, mỗi câu lại là một bài toán **hoàn toàn khác nhau**:
+
+1. "Làm sao **gộp hóa đơn** tất cả account lại một chỗ và tận dụng được giá rẻ theo sản lượng?"
+2. "Làm sao **chặn** account sandbox không cho ai bật tài nguyên ngoài region Singapore, dù họ có quyền admin trong account đó?"
+3. "Làm sao để 200 nhân viên **đăng nhập một lần** rồi vào được đúng account với đúng quyền, mà không phải tạo 200 IAM user × 20 account?"
+4. "Làm sao **dựng sẵn** một bộ account mới chuẩn chỉnh, có sẵn rào chắn bảo mật, chỉ trong vài cú click?"
+
+Điều thú vị: mỗi câu hỏi lại trỏ tới một **dịch vụ khác nhau**. Câu 1 và 2 là **AWS Organizations**, câu 3 là **IAM Identity Center**, câu 4 là **AWS Control Tower**. Và xen giữa chúng là phần cơ chế phân quyền "khó nhằn" nhất của IAM: <Tooltip content="Service Control Policy — chính sách giới hạn quyền tối đa cho cả account hoặc nhóm account trong Organizations">SCP</Tooltip>, permission boundary, resource-based policy, và logic mà AWS dùng để quyết định một request là **Allow** hay **Deny**.
+
+Đây chính là cái bẫy yêu thích của đề thi SAA: nó mô tả một tình huống nhiều account, hỏi bạn nên dùng dịch vụ nào — trong khi các đáp án còn lại "nghe đều có lý". Bài viết này là tấm bản đồ giúp bạn vẽ ranh giới sắc nét giữa các dịch vụ trong nhóm **IAM nâng cao**, kèm những con số và từ khóa hay được hỏi.
+
+> **Lưu ý:** Đây là bài tổng quan để xây **mental model** và nhận diện nhanh đáp án trong phòng thi. Nếu bạn chưa nắm phần nền tảng (IAM user, group, role, policy, least privilege), hãy đọc bài [Bắt đầu với AWS: từ hạ tầng toàn cầu tới tư duy bảo mật với IAM](/vi/posts/learn-aws-iam) trước, rồi quay lại đây cho phần nâng cao.
+
+---
+
+## 1. Bức tranh tổng thể: ba tầng của bài toán "nhiều account, nhiều người"
+
+Trước khi đi vào chi tiết, hãy ghim mental model này. Nhóm dịch vụ IAM nâng cao thực ra giải quyết **ba tầng** bài toán khác nhau:
+
+| Tầng | Câu hỏi cốt lõi | Dịch vụ / Khái niệm |
+| --- | --- | --- |
+| **Quản trị account** | Làm sao tổ chức, gom hóa đơn và đặt **rào chắn** cho hàng chục account? | **AWS Organizations** (OU, SCP, Tag Policies), **AWS Control Tower** |
+| **Danh tính & đăng nhập** | Làm sao để người dùng **đăng nhập một lần** vào đúng account / ứng dụng? | **IAM Identity Center**, **AWS Directory Services** |
+| **Cơ chế phân quyền** | Khi nhiều loại policy chồng lên nhau, AWS quyết định Allow/Deny **thế nào**? | **IAM Advanced Policies**, **Resource-based Policies vs Roles**, **Policy Evaluation Logic** |
+
+Hai tầng đầu là các **dịch vụ** bạn bật lên và cấu hình. Tầng thứ ba là **cơ chế** — những quy tắc vô hình quyết định mọi request thành công hay bị chặn. Đề SAA hỏi cả ba, nhưng tầng thứ ba (đặc biệt là logic Allow/Deny) là nơi nhiều người mất điểm nhất vì nó "trừu tượng".
+
+Giữ khung này trong đầu, ta đi vào từng phần.
+
+---
+
+## 2. AWS Organizations — bộ khung quản lý nhiều account
+
+**AWS Organizations** là dịch vụ giúp bạn **gom nhiều AWS account** vào một tổ chức duy nhất để quản lý tập trung: gộp hóa đơn, áp chính sách bảo mật chung, và chia nhóm account theo phòng ban/môi trường. Nếu một AWS account giống một căn hộ, thì Organizations chính là **ban quản lý tòa nhà**.
+
+### 2.1. Management account và member account
+
+Một Organization có đúng **một management account** (trước đây gọi là master account) và nhiều **member account**:
+
+- **Management account** là account "chủ", nơi bạn tạo Organization, mời/khởi tạo các account khác, và xem hóa đơn tổng. Đây là account **quyền lực nhất** — nên giữ nó "sạch", chỉ dùng để quản trị, **không** chạy workload trong đó.
+- **Member account** là các account con. Một account chỉ thuộc về **một** Organization tại một thời điểm.
+
+Bạn có thể **mời** một account đã tồn tại vào tổ chức, hoặc **tạo mới** account bằng API một cách tự động (rất hợp cho việc cấp phát account hàng loạt).
+
+### 2.2. Organizational Unit (OU) — chia nhóm theo cây
+
+<Tooltip content="Organizational Unit — một nhóm logic chứa các account hoặc các OU con, dùng để áp chính sách chung theo nhóm">OU</Tooltip> là cách bạn **nhóm các account** lại theo cấu trúc cây, từ gốc **Root** đi xuống. Ví dụ một cách tổ chức phổ biến:
+
+- OU **Prod** chứa các account production.
+- OU **Dev** chứa các account phát triển.
+- OU **Sandbox** chứa các account "chơi thử" của lập trình viên.
+
+Sức mạnh của OU nằm ở chỗ: chính sách (SCP, Tag Policy) gắn vào một OU sẽ **tự động áp xuống** mọi account bên dưới nó. Bạn cấu hình một lần cho cả nhóm thay vì sửa từng account.
+
+### 2.3. Consolidated Billing — gộp hóa đơn và hưởng giá rẻ
+
+Đây là lý do "kinh tế" để dùng Organizations. Khi bật **Consolidated Billing** (gộp hóa đơn), bạn nhận được:
+
+- **Một hóa đơn duy nhất** cho toàn bộ account — management account trả tiền, member account dùng miễn phí tính năng này.
+- **Giảm giá theo sản lượng (volume pricing)**: AWS cộng dồn mức sử dụng của tất cả account lại để tính bậc giá. Ví dụ S3 càng dùng nhiều giá mỗi GB càng rẻ — gộp lại sẽ chạm bậc giá rẻ nhanh hơn so với tính riêng từng account.
+- **Chia sẻ Reserved Instances và Savings Plans**: phần <Tooltip content="Reserved Instance — cam kết dùng EC2 trong 1–3 năm để đổi lấy giá rẻ hơn nhiều so với on-demand">RI</Tooltip> hoặc <Tooltip content="Savings Plans — cam kết một mức chi tiêu/giờ trong 1–3 năm để được giảm giá compute, linh hoạt hơn Reserved Instance">Savings Plans</Tooltip> mua ở một account nhưng không dùng hết có thể được các account khác trong tổ chức tận dụng, tránh lãng phí cam kết.
+
+> **Mẹo thi:** Thấy từ khóa "**giảm chi phí khi có nhiều account**", "**gộp hóa đơn**", "**chia sẻ Reserved Instances giữa các account**" → đáp án gần như chắc chắn là **AWS Organizations + Consolidated Billing**.
+
+### 2.4. Service Control Policies (SCP) — trần quyền của cả tổ chức
+
+Đây là khái niệm **quan trọng bậc nhất** của Organizations trong đề SAA, và cũng dễ hiểu sai nhất.
+
+**SCP** là chính sách xác định **mức quyền tối đa** (permission ceiling — "trần quyền") mà các account/OU được phép có. Hãy nhớ ba điều cốt lõi:
+
+1. **SCP không cấp quyền — nó chỉ giới hạn.** SCP giống cái **trần nhà**: nó quyết định bạn được phép vươn cao tới đâu, nhưng để thực sự "đứng dậy" bạn vẫn cần IAM policy cấp quyền cụ thể.
+2. **SCP áp dụng cho mọi User và Role trong account — kể cả root user của member account — nhưng KHÔNG áp dụng cho management account.** Dù bạn gắn SCP cấm đoán thế nào, account quản lý vẫn giữ trọn quyền admin. Đây là lý do nữa để **không chạy workload trong management account** — vì nó không thể bị SCP bảo vệ.
+3. **SCP được kế thừa xuống cây OU.** Gắn vào Root thì áp toàn tổ chức; gắn vào OU thì áp mọi account bên dưới.
+
+Có hai chiến lược viết SCP:
+
+- **Blocklist (danh sách cấm)**: mặc định AWS cho phép tất cả (`FullAWSAccess`), bạn chỉ viết các `Deny` để chặn vài hành động cụ thể. Đây là cách phổ biến nhất.
+- **Allowlist (danh sách cho phép)**: gỡ quyền mặc định, rồi liệt kê tường minh những gì được phép. Chặt chẽ hơn nhưng khó bảo trì.
+
+Ví dụ một SCP blocklist cấm mọi account trong OU rời khỏi region `ap-southeast-1` (Singapore) — đúng tình huống câu hỏi số 2 ở đầu bài:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyAllOutsideSingapore",
+      "Effect": "Deny",
+      "NotAction": ["iam:*", "sts:*", "cloudfront:*"],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "ap-southeast-1"
+        }
+      }
+    }
+  ]
+}
+```
+
+Lưu ý cái hay: dù người dùng trong account đó có quyền `AdministratorAccess`, SCP này vẫn **chặn cứng** mọi thao tác ngoài Singapore (trừ các dịch vụ global như IAM). Quyền admin trong account **không thể vượt** trần mà SCP đặt ra.
+
+> **Bẫy thường gặp:** "**Ngăn ngừa ngay từ đầu**, dù người dùng là admin" → **SCP**. Đừng nhầm với AWS Config (chỉ **phát hiện** vi phạm sau khi đã xảy ra, không ngăn chặn).
+
+### 2.5. Tag Policies — chuẩn hóa nhãn tài nguyên
+
+**Tag Policies** giúp bạn **chuẩn hóa cách gắn thẻ (tag)** tài nguyên trên toàn tổ chức: ép đúng key (ví dụ bắt buộc có `CostCenter`), đúng cách viết hoa/thường, và giới hạn tập giá trị hợp lệ.
+
+Tag là cặp key-value gắn lên tài nguyên, dùng để phân loại — và đặc biệt quan trọng cho việc **phân bổ chi phí** (biết phòng ban nào tốn bao nhiêu).
+
+Tag Policy đảm bảo mọi người trong tổ chức gắn tag **nhất quán**, để báo cáo chi phí không bị loạn vì `costcenter`, `CostCenter`, `cost-center` bị coi là ba thứ khác nhau. Đây cũng là nền tảng cho các công cụ phân tích chi phí như Cost Explorer, AWS Budgets, Cost and Usage Report.
+
+Một điểm cần nhớ: Tag Policy tự nó chỉ **báo cáo** mức độ tuân thủ chứ không chặn hay sửa tài nguyên gắn sai tag. Để **chủ động giám sát** tài nguyên không tuân thủ, hãy ghép thêm <Tooltip content="AWS Config — dịch vụ theo dõi cấu hình tài nguyên theo thời gian và đánh giá chúng có tuân thủ các quy tắc hay không">AWS Config</Tooltip> (dùng managed rule `required-tags` để phát hiện tài nguyên thiếu tag bắt buộc) với <Tooltip content="Amazon EventBridge — bus sự kiện serverless, định tuyến sự kiện từ các dịch vụ AWS tới đích như Lambda hay SNS để tự động hóa">Amazon EventBridge</Tooltip>: mỗi khi Config báo một tài nguyên chuyển sang **non-compliant**, EventBridge bắt sự kiện đó và kích hoạt **SNS** (gửi cảnh báo) hoặc **Lambda** (tự gắn tag đúng / cô lập tài nguyên vi phạm). Nhờ vậy một tag sai biến thành cảnh báo hoặc hành động sửa **ngay lập tức**, thay vì đợi tới cuối tháng mới lộ ra trên hóa đơn.
+
+### 2.6. Những tiện ích "đi kèm" đáng nhớ
+
+Khi đã có Organizations, bạn mở khóa thêm vài khả năng hay được hỏi:
+
+- **Ghi log tập trung**: bật **CloudTrail trên mọi account** và gửi log về một **S3 account trung tâm** (qua **organization trail**), đồng thời đẩy **CloudWatch Logs về một account logging tập trung** — gom toàn bộ dấu vết về một chỗ để audit. Tương tự có **Config aggregator** gom trạng thái tuân thủ của cả tổ chức.
+- **Chia sẻ tài nguyên** giữa các account qua <Tooltip content="Resource Access Manager — dịch vụ cho phép chia sẻ tài nguyên (như subnet của VPC, Transit Gateway) giữa các account trong cùng tổ chức">AWS RAM</Tooltip>.
+- **Cross-account role cho quản trị**: khi tạo account bằng Organizations, AWS tự tạo sẵn một role tên `OrganizationAccountAccessRole` để management account "nhảy vào" account con quản trị — đây là cách thiết lập quyền admin chéo account chuẩn mực.
+- **Multi-account vs một account nhiều VPC**: tách workload ra **nhiều account riêng** (mỗi phòng ban/môi trường một account) cho ranh giới bảo mật và tính chi phí rạch ròi hơn so với nhồi tất cả vào **một account với nhiều VPC**. Đây là một quyết định kiến trúc cốt lõi mà Organizations sinh ra để giải quyết.
+
+---
+
+## 3. IAM Advanced Policies — phân quyền tinh vi hơn
+
+Ở mức cơ bản, một IAM policy chỉ là "cho phép/cấm **Action** nào trên **Resource** nào". Phần nâng cao bổ sung các công cụ để bạn ra điều kiện chính xác đến từng tình huống.
+
+### 3.1. Cấu trúc policy và khối Condition
+
+Một IAM policy là tài liệu JSON gồm nhiều **Statement**, mỗi statement có: `Effect` (Allow/Deny), `Action` (hành động), `Resource` (tài nguyên), và tùy chọn `Condition` (điều kiện). **Condition** chính là nơi tạo nên sức mạnh "nâng cao": chỉ cho phép khi thỏa một số điều kiện về ngữ cảnh request.
+
+Một vài **global condition key** hay được hỏi:
+
+| Condition key | Ý nghĩa |
+| --- | --- |
+| `aws:SourceIp` | Giới hạn theo dải IP nguồn của request |
+| `aws:RequestedRegion` | Giới hạn theo region mà request nhắm tới |
+| `aws:MultiFactorAuthPresent` | Chỉ cho phép khi người dùng đã đăng nhập bằng <Tooltip content="Multi-Factor Authentication — xác thực nhiều yếu tố, ví dụ mật khẩu + mã OTP từ điện thoại">MFA</Tooltip> |
+| `aws:PrincipalOrgID` | Chỉ cho phép nếu người gọi thuộc một Organization cụ thể |
+| `aws:PrincipalTag` / `aws:ResourceTag` | So khớp theo tag của người gọi / của tài nguyên |
+| `aws:SecureTransport` | Bắt buộc dùng HTTPS (TLS) |
+
+Ví dụ một policy chỉ cho phép xóa object S3 **khi và chỉ khi** người dùng đã bật MFA:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": "arn:aws:s3:::my-bucket/*",
+      "Condition": {
+        "Bool": { "aws:MultiFactorAuthPresent": "true" }
+      }
+    }
+  ]
+}
+```
+
+### 3.2. Policy variables và ABAC
+
+Bạn có thể nhúng **biến** vào policy, ví dụ `${aws:username}`, để viết **một** policy dùng chung cho nhiều người: "mỗi user chỉ được truy cập thư mục S3 mang tên chính họ" (`arn:aws:s3:::my-bucket/${aws:username}/*`). Cách này gọi là <Tooltip content="Attribute-Based Access Control — phân quyền dựa trên thuộc tính/tag thay vì viết policy riêng cho từng người, giúp số lượng policy không phình to khi tổ chức lớn lên">ABAC</Tooltip>: thay vì tạo policy riêng cho từng người (cách truyền thống gọi là RBAC — phân quyền theo vai trò), bạn so khớp **tag của người gọi** với **tag của tài nguyên**. Tổ chức lớn lên thì số policy không phình theo — đây là điểm ABAC ăn đứt RBAC mà đề thi hay nhấn mạnh.
+
+### 3.3. Permission Boundary — "trần quyền" ở mức từng IAM entity
+
+Nếu SCP là trần quyền cho cả **account**, thì **Permission Boundary** là trần quyền cho **một IAM user hoặc role** cụ thể. Nó định nghĩa **mức quyền tối đa** mà các policy gắn vào entity đó có thể trao.
+
+Use case kinh điển: **ủy quyền an toàn**. Bạn muốn cho một admin cấp dưới được tự tạo IAM user/role cho team họ, nhưng **không được** tự cấp cho mình quyền vượt một mức nào đó (chống leo thang đặc quyền). Bạn gắn một permission boundary giới hạn họ chỉ thao tác trong phạm vi cho phép — dù họ có vô tình gắn `AdministratorAccess`, boundary vẫn chặn lại.
+
+---
+
+## 4. Resource-based Policies vs IAM Roles — hai cách trao quyền truy cập chéo
+
+Đây là một trong những chỗ tinh tế nhất và **rất hay xuất hiện** trong đề SAA. Để truy cập tài nguyên (nhất là **chéo account**), có hai con đường, và chúng khác nhau ở một điểm cực kỳ quan trọng. Lấy ví dụ kinh điển: một **user ở Account A** muốn đẩy dữ liệu vào một **S3 bucket ở Account B** — có đúng hai cách, tóm tắt trong sơ đồ sau:
+
+<ExcalidrawDiagram
+  src="/aws-iam-cross-account-s3-access.excalidraw"
+  alt="Hai cách để user ở Account A ghi dữ liệu vào S3 bucket ở Account B: Cách 1 — assume một Cross-Account IAM Role trong Account B (từ bỏ quyền gốc) rồi ghi vào S3; Cách 2 — ghi trực tiếp, được cấp phép bởi S3 Bucket Policy (giữ nguyên quyền gốc)"
+/>
+
+### 4.1. Identity-based vs Resource-based policy
+
+- **Identity-based policy**: gắn vào **danh tính** (user, group, role) và nói "danh tính này được làm gì". Không có trường `Principal` vì principal chính là danh tính được gắn.
+- **Resource-based policy**: gắn thẳng vào **tài nguyên** (như S3 bucket, SQS queue, SNS topic, Lambda function) và có trường `Principal` để chỉ rõ "**ai** được phép truy cập tài nguyên này". Không phải dịch vụ nào cũng hỗ trợ — các "ứng viên" quen thuộc gồm **S3, SQS, SNS, Lambda, KMS, API Gateway, Secrets Manager, EventBridge, ECR**.
+
+Ví dụ một **bucket policy** (resource-based) cho phép một account khác (`111122223333`) đọc bucket:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::111122223333:root" },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-shared-bucket/*"
+    }
+  ]
+}
+```
+
+### 4.2. Khác biệt cốt lõi: "giữ" hay "bỏ" quyền gốc
+
+Đây là câu mà bạn nên khắc vào đầu:
+
+- Khi bạn **assume một IAM Role** (qua <Tooltip content="Security Token Service — dịch vụ cấp credential tạm thời; lệnh AssumeRole đổi danh tính hiện tại lấy quyền của role trong một phiên có thời hạn">STS</Tooltip> `AssumeRole`), bạn **từ bỏ** quyền gốc của mình và **khoác** lên bộ quyền của role trong suốt phiên đó. Giống như bạn trở thành 1 con người mới hoàn toàn, quên sạch trước đây mình từng là ai.
+- Khi truy cập qua **resource-based policy**, principal **giữ nguyên** quyền gốc của mình và **đồng thời** được tài nguyên kia cấp thêm quyền. Không cần "đổi danh tính".
+
+Hệ quả thực tế: nếu một Lambda ở account A cần vừa thao tác tài nguyên **của chính account A**, vừa truy cập một tài nguyên **ở account B**, thì cho B cấp quyền qua **resource-based policy** sẽ tiện hơn — Lambda giữ được quyền ở A trong khi vẫn chạm tới B. Nếu dùng assume-role sang B, nó sẽ tạm mất quyền ở A.
+
+> **Mẹo thi:** Thấy "**giữ nguyên quyền hiện tại** và truy cập thêm tài nguyên account khác" → **resource-based policy**. Thấy "**tạm thời nhận quyền** / đổi vai" → **IAM Role + STS AssumeRole**. Và nhớ: muốn account khác **gọi** được EventBridge/SQS/SNS/Lambda của bạn, bạn cấp quyền qua **resource-based policy**.
+
+---
+
+## 5. IAM Policy Evaluation Logic — AWS quyết định Allow hay Deny thế nào
+
+Khi nhiều loại policy chồng lên nhau (SCP, identity, resource, boundary...), làm sao AWS ra phán quyết cuối cùng? Đây là phần "luật chơi" mà nắm chắc là gỡ được vô số câu hỏi mẹo.
+
+### 5.1. Quy tắc vàng
+
+Explicit deny > Explicit alow > Implicit deny
+
+### 5.2. Khi có nhiều loại policy: tất cả đều phải "gật đầu"
+
+Với một request trong môi trường Organizations, AWS kiểm tra theo một trình tự cố định — và chỉ cần **một** chỗ Deny là hỏng. Sơ đồ chính thức của AWS dưới đây mô tả toàn bộ logic đó: request đi từ trái sang phải qua **sáu nhóm** policy (Deny tường minh → SCP → resource-based → identity-based → permission boundary → session policy), mỗi nhóm phải "gật đầu" thì mới được đi tiếp:
+
+<ExcalidrawDiagram
+  src="/aws-iam-policy-evaluation-logic.excalidraw"
+  alt="Sơ đồ logic đánh giá policy của IAM: quyết định bắt đầu ở Deny, lần lượt đi qua sáu nhóm — Deny tường minh, Organizations SCP, resource-based policy, identity-based policy, permission boundary và session policy; mỗi nhóm phải cho phép, gặp explicit Deny là từ chối ngay, kết thúc bằng Allow hoặc Deny"
+/>
+
+Hình dung như qua nhiều cửa an ninh: **mọi cửa** phải để bạn qua (giao của các điều kiện), và bất kỳ cửa nào treo biển "cấm" (explicit Deny) là dừng cuộc chơi.
+
+### 5.3. Truy cập chéo account cần "gật đầu" ở cả hai phía
+
+Một điểm thi rất hay sai: muốn danh tính ở **account A** truy cập tài nguyên ở **account B**, cần **cả hai bên** cùng cho phép:
+
+- **Account B** (bên có tài nguyên) phải cho phép qua **resource-based policy** hoặc qua **trust policy của role** mà A sẽ assume.
+- **Account A** (bên có danh tính) phải cấp cho user/role của mình quyền **gọi sang** B (identity-based policy).
+
+Thiếu một trong hai phía là chặn. Truy cập chéo account **không bao giờ** chỉ cần một phía.
+
+---
+
+## 6. AWS IAM Identity Center — một cổng đăng nhập cho tất cả
+
+**AWS IAM Identity Center** (tên cũ là **AWS Single Sign-On / AWS SSO**) là dịch vụ cho phép người dùng **đăng nhập một lần** rồi truy cập **mọi AWS account trong Organization** lẫn các **ứng dụng doanh nghiệp** (qua chuẩn <Tooltip content="Security Assertion Markup Language — chuẩn cho phép một hệ thống danh tính khẳng định 'người này đã đăng nhập' để đăng nhập một lần (SSO) vào nhiều ứng dụng">SAML 2.0</Tooltip>) — tất cả từ **một portal duy nhất**. Đây chính là lời giải cho câu hỏi số 3 ở đầu bài: thay vì tạo 200 user × 20 account, bạn quản lý danh tính một nơi.
+
+### 6.1. Nguồn danh tính (Identity Source)
+
+Identity Center không bắt bạn lưu user ở một chỗ cố định. Bạn chọn **nguồn danh tính**:
+
+- **Kho danh tính tích hợp sẵn** (Identity Center directory) — đơn giản nhất, dùng ngay không cần hệ thống ngoài.
+- **Active Directory** — kết nối tới AWS Managed Microsoft AD hoặc AD on-premises (qua AD Connector, xem phần 7).
+- **IdP bên ngoài** — qua SAML 2.0, ví dụ <Tooltip content="Identity Provider — nhà cung cấp danh tính, nơi quản lý tài khoản đăng nhập của tổ chức, ví dụ Okta hay Microsoft Entra ID">IdP</Tooltip> như Okta, Microsoft Entra ID (Azure AD), OneLogin, Ping.
+
+### 6.2. Permission Set — gắn quyền theo account
+
+**Permission Set** là một "bộ quyền" (tập hợp các IAM policy) định nghĩa một người được làm gì khi vào một account. Khi bạn gán một permission set cho một user/group ở một account, Identity Center **tự tạo một IAM role tương ứng** trong account đích. Người dùng đăng nhập portal, chọn account và assume IAM role kèm 1 credential tạm thời — không cần IAM user, không cần access key dài hạn. Đây cũng là cách AWS khuyến nghị thay cho việc phát access key tĩnh.
+
+> Về mặt quyền hạn, điều này khá tương đồng với flow root user tạo IAM user cho các member
+
+Lấy ví dụ cụ thể: bạn gán **permission set FullAccess** cho **group Developers** (gồm Bob và Alice) tại **Dev Account B**. Identity Center sẽ tự tạo một IAM role tương ứng trong Dev Account B; nhờ đó Bob và Alice chỉ cần đăng nhập portal là có **toàn quyền** vào Dev Account B — mà không cần tạo bất kỳ IAM user nào trong account đó:
+
+<ExcalidrawDiagram
+  src="/aws-iam-identity-center.excalidraw"
+  alt="Sơ đồ IAM Identity Center: trong AWS Organization có management account, OU Development (Dev Account A, B) và OU Production (Prod Account A, B); IAM Identity Center đặt trong management account chứa group Developers (Bob, Alice) cùng hai permission set ReadOnlyAccess và FullAccess; group Developers được gán permission set FullAccess, qua đó được cấp một IAM role toàn quyền vào Dev Account B"
+/>
+
+> Nếu 1 permission set được gán cho group developers, thì cũng chỉ có 1 IAM role được tạo, và các developers sẽ cùng assume 1 IAM role.
+
+> **Mẹo thi:** "**SSO cho nhiều AWS account** trong Organization", "đăng nhập một lần bằng tài khoản công ty (Okta/Active Directory) vào AWS" → **IAM Identity Center**.
+
+---
+
+## 7. AWS Directory Services — Active Directory trên AWS
+
+Trước hết: **Active Directory (AD)** là dịch vụ thư mục của Microsoft, dùng phổ biến trong doanh nghiệp để quản lý tập trung **người dùng, máy tính và quyền** trong một "miền" (domain) — đăng nhập máy Windows, áp <Tooltip content="Group Policy — cơ chế của Active Directory để áp đặt cấu hình và chính sách đồng loạt lên nhiều máy/người dùng trong miền">Group Policy</Tooltip>, dùng giao thức Kerberos/LDAP để xác thực. **AWS Directory Services** mang AD lên đám mây với **ba lựa chọn**, khác nhau ở mức độ "AD thật" và khả năng kết nối on-premises:
+
+| Lựa chọn | Bản chất | Kết nối on-prem | Khi nào dùng |
+| --- | --- | --- | --- |
+| **AWS Managed Microsoft AD** | AD **Microsoft thật**, do AWS vận hành | Có — lập **trust** hai chiều với AD on-prem | Cần đầy đủ tính năng AD, MFA, chạy workload Windows/AD-aware trên AWS, đồng thời liên thông với AD công ty |
+| **AD Connector** | **Cổng proxy**, chuyển tiếp yêu cầu xác thực về AD on-prem | Bắt buộc — chỉ là cầu nối | Muốn dùng dịch vụ AWS bằng tài khoản AD on-prem **có sẵn**, **không** lưu gì trên cloud |
+| **Simple AD** | Thư mục **tương thích AD**, chạy trên <Tooltip content="Samba — phần mềm mã nguồn mở hiện thực các giao thức của Windows/Active Directory; Simple AD dùng Samba để cung cấp tính năng AD cơ bản với chi phí thấp">Samba</Tooltip> | Không — đứng độc lập | Tổ chức nhỏ, nhu cầu cơ bản, **chưa** có AD nào, muốn rẻ |
+
+Vài điểm phân biệt hay được hỏi:
+
+- **Managed Microsoft AD** là lựa chọn duy nhất là **AD Microsoft thực thụ** và có thể **lập trust** với AD on-prem (người dùng on-prem đăng nhập tài nguyên AWS mà không cần nhân bản tài khoản).
+- **AD Connector** **không lưu trữ** bất kỳ dữ liệu danh tính nào trên AWS — mọi yêu cầu xác thực đều được **chuyển thẳng về** AD on-prem. Nếu đề nói "không muốn để dữ liệu danh tính trên cloud, chỉ proxy về AD nội bộ" → đây là đáp án.
+- **Simple AD** rẻ và đơn giản nhưng **không hỗ trợ trust** với miền AD khác, **không** MFA, thiếu nhiều tính năng nâng cao. Hợp với nhu cầu tối thiểu.
+
+> **Bẫy thường gặp:** "Chỉ **chuyển tiếp** xác thực về AD on-prem, không giữ dữ liệu trên AWS" → **AD Connector**. "Cần **AD Microsoft thật** + **trust** với on-prem" → **Managed Microsoft AD**. "Nhỏ, rẻ, độc lập, không cần trust" → **Simple AD**.
+
+---
+
+## 8. AWS Control Tower — dựng và quản trị môi trường nhiều account tự động
+
+Bạn có thể tự tay dùng Organizations để dựng cấu trúc nhiều account, viết SCP, bật CloudTrail, cấu hình Config... nhưng việc đó tỉ mỉ và dễ sai. **AWS Control Tower** là cách **nhanh nhất** để **thiết lập và quản trị** một môi trường nhiều account **an toàn, tuân thủ** — chỉ trong vài cú click. Đây là lời giải cho câu hỏi số 4 ở đầu bài.
+
+### 8.1. Landing Zone — nền móng dựng sẵn
+
+Control Tower tạo ra một <Tooltip content="Landing Zone — một môi trường AWS nhiều account đã được thiết lập sẵn theo kiến trúc tốt (well-architected), gồm cấu trúc account, bảo mật, log và mạng làm nền cho mọi workload">**landing zone**</Tooltip>: một môi trường nhiều account chuẩn chỉnh ngay từ đầu, với account quản trị log, account audit, cấu hình bảo mật và mạng nền tảng. Điểm mấu chốt cần nhớ cho kỳ thi: **Control Tower được xây bên trên Organizations** — nó **tự động dựng** Organizations, IAM Identity Center, AWS Config và CloudTrail giúp bạn, chứ không thay thế chúng.
+
+### 8.2. Guardrails (Controls) — rào chắn quản trị
+
+**Guardrail** (nay gọi là **control**) là các quy tắc quản trị áp lên môi trường, chia hai kiểu chính:
+
+- **Preventive (ngăn chặn)** — thực thi bằng **SCP**, **chặn** hành động vi phạm ngay từ đầu (ví dụ: cấm tắt CloudTrail).
+- **Detective (phát hiện)** — thực thi bằng **AWS Config rules**, **phát hiện** và báo cáo tài nguyên không tuân thủ (ví dụ: phát hiện volume EBS chưa mã hóa).
+
+Mỗi guardrail còn được phân mức: **mandatory** (bắt buộc, luôn bật), **strongly recommended** (rất nên bật), và **elective** (tùy chọn).
+
+### 8.3. Account Factory và Dashboard
+
+- **Account Factory** giúp **cấp phát account mới tự động** theo một khuôn mẫu đã được phê duyệt sẵn (cấu hình mạng, bảo mật, guardrail mặc định) — đảm bảo mọi account "ra lò" đều chuẩn, thay vì mỗi người dựng một kiểu.
+- **Dashboard** cho bạn một màn hình tổng quan về trạng thái tuân thủ của toàn bộ OU và account.
+
+> **Phân biệt cốt lõi (rất hay thi):** **Organizations** là **cơ chế nền** (cấu trúc account + SCP) bạn tự cấu hình. **Control Tower** là **lớp tự động hóa + quản trị** dựng sẵn bên trên, kèm guardrail, Account Factory và dashboard. Cần dựng nhanh môi trường multi-account có rào chắn sẵn → **Control Tower**.
+
+---
+
+## 9. Cheat sheet: bắt từ khóa trong đề SAA
+
+Trong phòng thi bạn chỉ có khoảng 90 giây mỗi câu, nên việc nhận diện phải gần như phản xạ. Bảng dưới ánh xạ từ khóa thường gặp sang đáp án:
+
+| Từ khóa / tình huống trong đề | Đáp án |
+| --- | --- |
+| **Gộp hóa đơn** nhiều account, **giảm giá theo sản lượng**, chia sẻ RI/Savings Plans | **AWS Organizations** (Consolidated Billing) |
+| **Ngăn chặn** hành động trên cả account/OU, **dù người dùng là admin** | **SCP** (Service Control Policy) |
+| Giới hạn **quyền tối đa của một IAM user/role** (chống leo thang đặc quyền khi ủy quyền) | **Permission Boundary** |
+| **Chuẩn hóa tag** trên toàn tổ chức | **Tag Policies** |
+| **Giám sát / phản ứng** với tài nguyên gắn tag không tuân thủ | **AWS Config (`required-tags`) + EventBridge** → SNS/Lambda |
+| Chỉ cho phép khi **đã bật MFA** / từ **dải IP** cụ thể / trong **region** cụ thể | **IAM Policy + Condition** |
+| Một policy dùng chung, phân quyền theo **tag** của người dùng/tài nguyên | **ABAC** (`aws:PrincipalTag` / `aws:ResourceTag`) |
+| **Giữ nguyên quyền hiện tại** và truy cập thêm tài nguyên account khác | **Resource-based policy** |
+| **Tạm nhận quyền / đổi vai** trong một phiên | **IAM Role + STS AssumeRole** |
+| Account khác **gọi** SQS/SNS/Lambda/EventBridge của bạn | **Resource-based policy** |
+| Một **Deny** ghi đè mọi Allow | **Explicit Deny** luôn thắng |
+| **SSO** cho nhiều AWS account + ứng dụng SAML, đăng nhập bằng Okta/Entra ID | **IAM Identity Center** |
+| **Proxy** xác thực về AD on-prem, **không lưu** dữ liệu trên cloud | **AD Connector** |
+| **AD Microsoft thật** trên AWS + **trust** với on-prem, hỗ trợ MFA | **AWS Managed Microsoft AD** |
+| Thư mục AD nhỏ, rẻ, độc lập, **không cần trust** | **Simple AD** |
+| **Dựng nhanh** môi trường multi-account có **guardrail** + **Account Factory** | **AWS Control Tower** |
+| **Phát hiện** tài nguyên không tuân thủ trên toàn tổ chức | **Detective guardrail / AWS Config** |
+
+Vài "trọng tài" nhanh khi bạn phân vân:
+
+- Thấy "**dù là admin vẫn không được**" → **SCP** (cấp account) hoặc **Permission Boundary** (cấp user/role).
+- Thấy "**đăng nhập một lần** / SSO" → **IAM Identity Center**.
+- Thấy "**không lưu danh tính trên cloud**" → **AD Connector**.
+- Thấy "**dựng môi trường multi-account chuẩn, có rào chắn sẵn**" → **Control Tower** (chứ không phải tự làm bằng Organizations).
+- Thấy "**ngăn ngừa**" → SCP/guardrail preventive; thấy "**phát hiện**" → Config/guardrail detective.
+
+---
+
+## Kết luận
+
+Quay lại bốn câu hỏi lúc 3 giờ sáng khi công ty bạn phình ra 20 account, giờ mỗi câu đã có địa chỉ rõ ràng:
+
+- **"Gộp hóa đơn và tận dụng giá rẻ?"** → **AWS Organizations** với Consolidated Billing.
+- **"Chặn cứng dù người dùng là admin?"** → **SCP** đặt trần quyền cho account/OU.
+- **"Một lần đăng nhập cho tất cả?"** → **IAM Identity Center** (kết hợp Directory Services nếu cần AD).
+- **"Dựng sẵn môi trường có rào chắn?"** → **AWS Control Tower** với guardrail và Account Factory.
+
+Những điều cần khắc vào đầu cho kỳ thi SAA:
+
+- **SCP không cấp quyền, chỉ giới hạn** — mặc định **deny như IAM**, áp lên **cả root user của member account** nhưng **không** áp dụng cho **management account**. Quyền hiệu lực là **giao** của SCP và IAM policy; với allowlist cần **Allow tường minh suốt đường đi** từ Root → từng OU → account.
+- **Permission Boundary** là trần quyền cho **một user/role**; SCP là trần cho **account/OU**. Cả hai chỉ giới hạn, không cấp.
+- **Assume role thì bỏ quyền gốc; resource-based policy thì giữ quyền gốc.** Account khác muốn gọi tài nguyên của bạn (SQS/SNS/Lambda/EventBridge) → resource-based policy.
+- **Explicit Deny luôn thắng.** Truy cập chéo account cần **cả hai phía** cùng cho phép.
+- **Directory Services:** Managed Microsoft AD = AD thật + trust; AD Connector = proxy, **không lưu** gì; Simple AD = nhỏ, rẻ, **không trust**.
+- **Control Tower được xây trên Organizations** — nó tự động dựng landing zone, guardrail (preventive = SCP, detective = Config) và Account Factory.
+
+Nắm chắc ranh giới giữa các dịch vụ này, bạn sẽ thôi bị đánh lừa bởi "bốn đáp án nghe đều đúng" — và đó chính là khác biệt giữa đoán mò và chọn chắc tay trong phòng thi.

@@ -1,0 +1,387 @@
+---
+title: 'AWS IAM Advanced: Organizations, Identity Center & Policy Evaluation'
+date: '2026-06-13'
+tags: ['AWS', 'SAA', 'Devops']
+description: 'An overview of the advanced IAM service group for the SAA exam — AWS Organizations (SCPs, Tag Policies), IAM Advanced Policies, Resource-based Policies vs IAM Roles, Policy Evaluation Logic, IAM Identity Center, Directory Services, and Control Tower: what each one solves, its use cases, and the keywords that give it away in a question.'
+enableComment: true
+---
+
+# AWS IAM Advanced: Organizations, Identity Center & Policy Evaluation
+
+Imagine your company starts with a **single** AWS account. A year later you have 20: an account for team A, one for team B, one for production, one for the intern's sandbox, a few for client projects... And suddenly a wave of questions hits you, each a **completely different** problem:
+
+1. "How do I **consolidate billing** across all accounts and still get volume discounts?"
+2. "How do I **stop** the sandbox account from launching anything outside the Singapore region, even if its users have admin rights inside that account?"
+3. "How do I let 200 employees **log in once** and land in the right account with the right permissions, without creating 200 IAM users × 20 accounts?"
+4. "How do I **provision** a clean new set of accounts, complete with security guardrails, in just a few clicks?"
+
+Here's the interesting part: each question maps to a **different service**. Questions 1 and 2 are **AWS Organizations**, question 3 is **IAM Identity Center**, question 4 is **AWS Control Tower**. And woven between them is the trickiest part of IAM — the permission machinery: <Tooltip content="Service Control Policy — a policy that caps the maximum permissions for an entire account or group of accounts in Organizations">SCPs</Tooltip>, permission boundaries, resource-based policies, and the logic AWS uses to decide whether a request is **Allow** or **Deny**.
+
+This is the SAA exam's favorite trap: it describes a multi-account scenario and asks which service you should use — while the other options all "sound plausible." This article is a map to help you draw a sharp line between the services in the **advanced IAM** group, along with the numbers and keywords that get asked.
+
+> **Note:** This is an overview meant to build a mental model and let you recognize the right answer quickly in the exam room. If you haven't nailed the fundamentals (IAM users, groups, roles, policies, least privilege), read [Getting Started with AWS: From Global Infrastructure to Security Thinking with IAM](/en/posts/learn-aws-iam) first, then come back here for the advanced layer.
+
+---
+
+## 1. The big picture: three layers of the "many accounts, many people" problem
+
+Before the details, pin down this mental model. The advanced IAM group really solves **three different layers** of problem:
+
+| Layer | Core question | Service / Concept |
+| --- | --- | --- |
+| **Account governance** | How do I organize, consolidate billing, and put **guardrails** on dozens of accounts? | **AWS Organizations** (OUs, SCPs, Tag Policies), **AWS Control Tower** |
+| **Identity & login** | How do users **log in once** and reach the right account / application? | **IAM Identity Center**, **AWS Directory Services** |
+| **Permission machinery** | When many policies stack up, how does AWS decide Allow/Deny? | **IAM Advanced Policies**, **Resource-based Policies vs Roles**, **Policy Evaluation Logic** |
+
+The first two layers are **services** you turn on and configure. The third is the **machinery** — the invisible rules that decide whether each request succeeds or gets blocked. The SAA exam asks about all three, but the third layer (especially the Allow/Deny logic) is where most people lose points because it feels "abstract."
+
+Keep this framework in mind, and let's dig into each part.
+
+---
+
+## 2. AWS Organizations — the framework for managing many accounts
+
+**AWS Organizations** is the service that lets you **group many AWS accounts** into a single organization for central management: consolidate billing, apply shared security policies, and split accounts into groups by department/environment. If an AWS account is like an apartment, Organizations is the **building management**.
+
+### 2.1. Management account and member accounts
+
+An organization has exactly **one management account** (formerly called the master account) and many **member accounts**:
+
+- The **management account** is the "owner" account, where you create the organization, invite/create the other accounts, and view the combined bill. It's the **most powerful** account — keep it "clean," use it only for administration, and do **not** run workloads in it.
+- A **member account** is a child account. An account belongs to **only one** organization at a time.
+
+You can **invite** an existing account into the organization, or **create new** accounts programmatically via API (great for provisioning accounts at scale).
+
+### 2.2. Organizational Unit (OU) — grouping into a tree
+
+An <Tooltip content="Organizational Unit — a logical group that contains accounts or child OUs, used to apply shared policies to a whole group">OU</Tooltip> is how you **group accounts** into a tree structure, starting from the **Root** and going down. A common layout:
+
+- An OU **Prod** holds the production accounts.
+- An OU **Dev** holds the development accounts.
+- An OU **Sandbox** holds the developers' "play" accounts.
+
+The power of OUs: a policy (SCP, Tag Policy) attached to an OU **automatically applies** to every account beneath it. You configure once for the whole group instead of editing each account.
+
+### 2.3. Consolidated Billing — combine bills and get cheaper prices
+
+This is the "economic" reason to use Organizations. With **Consolidated Billing** enabled, you get:
+
+- **A single bill** for all accounts — the management account pays, and member accounts use this feature for free.
+- **Volume pricing discounts**: AWS aggregates the usage of all accounts to compute the pricing tier. For example, S3 gets cheaper per GB the more you use — pooled together, you reach the cheaper tiers faster than each account would on its own.
+- **Sharing Reserved Instances and Savings Plans**: a <Tooltip content="Reserved Instance — a 1–3 year EC2 commitment in exchange for a much lower price than on-demand">RI</Tooltip> or <Tooltip content="Savings Plans — a commitment to a fixed hourly spend over 1–3 years for a compute discount, more flexible than a Reserved Instance">Savings Plan</Tooltip> bought in one account but not fully used can be picked up by other accounts in the organization, so no commitment goes to waste.
+
+> **Exam tip:** See the keywords "**reduce cost with many accounts**," "**consolidated billing**," "**share Reserved Instances across accounts**" → the answer is almost certainly **AWS Organizations + Consolidated Billing**.
+
+### 2.4. Service Control Policies (SCPs) — the organization's permission ceiling
+
+This is the **single most important** Organizations concept on the SAA exam, and the easiest to misunderstand.
+
+An **SCP** is a policy that defines the **maximum available permissions** (a permission ceiling) that accounts/OUs are allowed to have. Remember three core facts:
+
+1. **An SCP does not grant permissions — it only restricts.** An SCP is like a **ceiling**: it decides how high you're allowed to reach, but to actually "stand up" you still need an IAM policy that grants the specific permission. Effective permissions = the **intersection** of (what the SCP allows) and (what the IAM policy grants). An action only works when **both** allow it.
+2. **An SCP applies to every User and Role in the account — including a member account's root user — but NOT to the management account.** No matter what restrictive SCP you attach, the management account keeps full admin power. That's another reason **not to run workloads in the management account** — it can't be protected by SCPs.
+3. **An SCP is inherited down the OU tree.** Attach it to the Root and it covers the whole organization; attach it to an OU and it covers every account beneath it.
+
+There are two strategies for writing SCPs:
+
+- **Blocklist**: AWS allows everything by default (`FullAWSAccess`), and you only write `Deny` statements to block specific actions. This is the most common approach.
+- **Allowlist**: remove the default permission, then explicitly list what's allowed. Stricter but harder to maintain.
+
+Here's a blocklist SCP that prevents every account in an OU from leaving the `ap-southeast-1` (Singapore) region — exactly question 2 from the intro:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyAllOutsideSingapore",
+      "Effect": "Deny",
+      "NotAction": ["iam:*", "sts:*", "cloudfront:*"],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "ap-southeast-1"
+        }
+      }
+    }
+  ]
+}
+```
+
+Notice the beauty: even if a user in that account has `AdministratorAccess`, this SCP **hard-blocks** every action outside Singapore (except global services like IAM). Admin rights inside the account **cannot exceed** the ceiling the SCP sets.
+
+> **Trap:** "**Prevent it in the first place**, even for admin users" → **SCP**. Don't confuse it with AWS Config, which only **detects** violations after they happen — it doesn't prevent them.
+
+### 2.5. Tag Policies — standardizing resource labels
+
+**Tag Policies** help you **standardize how resources are tagged** across the whole organization: enforce the right key (e.g. require a `CostCenter`), the right capitalization, and a limited set of valid values.
+
+A tag is a key-value pair attached to a resource for classification — and it's especially important for **cost allocation** (knowing which department spends how much).
+
+A Tag Policy ensures everyone tags **consistently**, so cost reports don't fall apart because `costcenter`, `CostCenter`, and `cost-center` are treated as three different things. It's also the foundation for cost-analysis tools like Cost Explorer, AWS Budgets, and the Cost and Usage Report.
+
+One thing to remember: a Tag Policy only **reports** compliance — it doesn't block or fix incorrectly tagged resources. To **actively monitor** non-compliant resources, pair <Tooltip content="AWS Config — a service that tracks resource configuration over time and evaluates whether resources comply with rules">AWS Config</Tooltip> (using the `required-tags` managed rule to detect resources missing a mandatory tag) with <Tooltip content="Amazon EventBridge — a serverless event bus that routes events from AWS services to targets like Lambda or SNS for automation">Amazon EventBridge</Tooltip>: whenever Config flags a resource as **non-compliant**, EventBridge catches that event and triggers **SNS** (send an alert) or **Lambda** (auto-apply the correct tag / quarantine the resource). That turns a mis-tag into an **immediate** alert or auto-fix, instead of surfacing only at month-end on the bill.
+
+### 2.6. The "comes-with-it" extras worth remembering
+
+Once you have Organizations, you unlock a few more abilities that get asked about:
+
+- **Centralized logging**: enable **CloudTrail on all accounts** and send the logs to a **central S3 account** (via an **organization trail**), and ship **CloudWatch Logs to a central logging account** — gather every trace in one place for auditing. Similarly, a **Config aggregator** rolls up the organization's compliance state.
+- **Resource sharing** across accounts via <Tooltip content="Resource Access Manager — a service that lets you share resources (such as VPC subnets or a Transit Gateway) across accounts in the same organization">AWS RAM</Tooltip>.
+- **Cross-account admin roles**: when you create an account via Organizations, AWS automatically sets up a role named `OrganizationAccountAccessRole` so the management account can "jump into" the child account to administer it — the standard way to establish cross-account admin access.
+- **Multi-account vs one account with many VPCs**: splitting workloads into **separate accounts** (one per department/environment) gives cleaner security boundaries and cost tracking than cramming everything into **one account with multiple VPCs**. This is a core architectural decision Organizations exists to solve.
+
+---
+
+## 3. IAM Advanced Policies — finer-grained permissions
+
+At the basic level, an IAM policy just says "allow/deny which **Action** on which **Resource**." The advanced part adds tools to express conditions precise to a specific situation.
+
+### 3.1. Policy structure and the Condition block
+
+An IAM policy is a JSON document made of several **Statements**, each with: `Effect` (Allow/Deny), `Action`, `Resource`, and optionally `Condition`. The **Condition** is where the "advanced" power lives: only allow when certain facts about the request context are true.
+
+A few **global condition keys** that get asked:
+
+| Condition key | Meaning |
+| --- | --- |
+| `aws:SourceIp` | Restrict by the source IP range of the request |
+| `aws:RequestedRegion` | Restrict by the region the request targets |
+| `aws:MultiFactorAuthPresent` | Only allow when the user signed in with <Tooltip content="Multi-Factor Authentication — multi-factor sign-in, e.g. password + an OTP from a phone">MFA</Tooltip> |
+| `aws:PrincipalOrgID` | Only allow if the caller belongs to a specific organization |
+| `aws:PrincipalTag` / `aws:ResourceTag` | Match by the caller's tag / the resource's tag |
+| `aws:SecureTransport` | Require HTTPS (TLS) |
+
+Here's a policy that allows deleting an S3 object **only if** the user has MFA enabled:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": "arn:aws:s3:::my-bucket/*",
+      "Condition": {
+        "Bool": { "aws:MultiFactorAuthPresent": "true" }
+      }
+    }
+  ]
+}
+```
+
+### 3.2. Policy variables and ABAC
+
+You can embed **variables** in a policy, e.g. `${aws:username}`, to write **one** policy shared by many people: "each user can only access the S3 folder named after them" (`arn:aws:s3:::my-bucket/${aws:username}/*`). This approach is called <Tooltip content="Attribute-Based Access Control — granting access based on attributes/tags instead of writing a separate policy per person, so the number of policies doesn't explode as the org grows">ABAC</Tooltip>: instead of creating a separate policy per person (the traditional approach, RBAC — role-based access control), you match the **caller's tags** against the **resource's tags**. As the organization grows, the number of policies doesn't grow with it — that's ABAC's edge over RBAC, which the exam likes to emphasize.
+
+### 3.3. Permission Boundary — a "ceiling" at the individual IAM entity level
+
+If an SCP is a permission ceiling for an entire **account**, a **Permission Boundary** is a ceiling for **one IAM user or role**. It defines the **maximum permissions** the policies attached to that entity can grant.
+
+The classic use case: **safe delegation**. You want a junior admin to be able to create IAM users/roles for their team, but **not** to grant themselves permissions beyond a certain level (preventing privilege escalation). You attach a permission boundary that confines them to the allowed scope — even if they accidentally attach `AdministratorAccess`, the boundary still blocks it.
+
+---
+
+## 4. Resource-based Policies vs IAM Roles — two ways to grant cross-account access
+
+This is one of the most subtle spots, and it shows up **very often** on the SAA exam. To access a resource (especially **cross-account**), there are two paths, and they differ on one critical point. Take the classic example: a **user in Account A** wants to push data into an **S3 bucket in Account B** — there are exactly two ways, summarized in the diagram below:
+
+<ExcalidrawDiagram
+  src="/aws-iam-cross-account-s3-access.excalidraw"
+  alt="Two ways a user in Account A can write to an S3 bucket in Account B: Method 1 — assume a cross-account IAM Role in Account B (giving up its own permissions) then write to S3; Method 2 — write directly, authorized by the S3 bucket policy (keeping its own permissions)"
+/>
+
+### 4.1. Identity-based vs resource-based policy
+
+- **Identity-based policy**: attached to an **identity** (user, group, role) and says "this identity can do X." It has no `Principal` field, because the principal is the identity it's attached to.
+- **Resource-based policy**: attached directly to a **resource** (like an S3 bucket, SQS queue, SNS topic, Lambda function) and has a `Principal` field to spell out "**who** is allowed to access this resource." Not every service supports it — the familiar candidates are **S3, SQS, SNS, Lambda, KMS, API Gateway, Secrets Manager, EventBridge, ECR**.
+
+Here's a **bucket policy** (resource-based) that lets another account (`111122223333`) read the bucket:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::111122223333:root" },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-shared-bucket/*"
+    }
+  ]
+}
+```
+
+### 4.2. The core difference: do you "keep" or "give up" your original permissions
+
+This is the sentence to burn into your memory:
+
+- When you **assume an IAM Role** (via <Tooltip content="Security Token Service — issues temporary credentials; the AssumeRole call exchanges your current identity for the role's permissions for a time-limited session">STS</Tooltip> `AssumeRole`), you **give up** your original permissions and **put on** the role's permission set for the duration of the session. It's like becoming a completely new person, with no memory of who you used to be.
+- When you access via a **resource-based policy**, the principal **keeps** its original permissions **and at the same time** gains the access granted by the resource. No "identity switch" needed.
+
+The practical consequence: if a Lambda in account A needs to act on resources **in its own account A** and also access a resource **in account B**, then having B grant access via a **resource-based policy** is more convenient — the Lambda keeps its permissions in A while still reaching B. If it assumed a role into B, it would temporarily lose its permissions in A.
+
+> **Exam tip:** See "**keep current permissions** and also access another account's resource" → **resource-based policy**. See "**temporarily take on permissions** / switch roles" → **IAM Role + STS AssumeRole**. And remember: for another account to **invoke** your EventBridge/SQS/SNS/Lambda, you grant access via a **resource-based policy**.
+
+---
+
+## 5. IAM Policy Evaluation Logic — how AWS decides Allow or Deny
+
+When many kinds of policy stack up (SCP, identity, resource, boundary...), how does AWS reach its final verdict? This is the "rules of the game" that, once mastered, unlocks countless trick questions.
+
+### 5.1. The golden rule
+
+**Explicit Deny** > **Explicit Allow** > **Implicit Deny**
+
+### 5.2. With multiple policy types: every one must "say yes"
+
+For a request in an Organizations environment, AWS checks in a fixed order — and a single Deny anywhere sinks it. AWS's official flowchart below captures the whole logic: the request flows left to right through **six policy stages** (explicit Deny → SCP → resource-based → identity-based → permission boundary → session policy), and each stage must "say yes" for it to continue:
+
+<ExcalidrawDiagram
+  src="/aws-iam-policy-evaluation-logic.excalidraw"
+  alt="IAM policy evaluation logic flowchart: the decision starts at Deny, then passes through six stages in order — explicit Deny, Organizations SCPs, resource-based policies, identity-based policies, permissions boundaries, and session policies; each stage must allow, an explicit Deny rejects immediately, ending in a final Allow or Deny"
+/>
+
+Picture it as passing several security gates: **every** gate must let you through (the intersection of the conditions), and any gate showing a "blocked" sign (explicit Deny) ends the journey.
+
+### 5.3. Cross-account access needs a "yes" on both sides
+
+A very common exam mistake: for an identity in **account A** to access a resource in **account B**, **both sides** must allow it:
+
+- **Account B** (the one with the resource) must allow it via a **resource-based policy** or via the **trust policy of the role** that A will assume.
+- **Account A** (the one with the identity) must grant its user/role permission **to call into** B (an identity-based policy).
+
+Missing either side blocks the access. Cross-account access **never** needs just one side.
+
+---
+
+## 6. AWS IAM Identity Center — one login portal for everything
+
+**AWS IAM Identity Center** (formerly **AWS Single Sign-On / AWS SSO**) lets users **log in once** and reach **every AWS account in the organization** plus **business applications** (via the <Tooltip content="Security Assertion Markup Language — a standard that lets one identity system assert 'this person is signed in' to enable single sign-on (SSO) across many applications">SAML 2.0</Tooltip> standard) — all from a **single portal**. This is the answer to question 3 from the intro: instead of creating 200 users × 20 accounts, you manage identities in one place.
+
+### 6.1. Identity Source
+
+Identity Center doesn't force you to store users in one fixed place. You choose an **identity source**:
+
+- **The built-in identity store** (Identity Center directory) — the simplest, usable right away with no external system.
+- **Active Directory** — connect to AWS Managed Microsoft AD or an on-premises AD (via AD Connector, see section 7).
+- **An external IdP** — via SAML 2.0, e.g. an <Tooltip content="Identity Provider — the system that manages your organization's sign-in accounts, e.g. Okta or Microsoft Entra ID">IdP</Tooltip> like Okta, Microsoft Entra ID (Azure AD), OneLogin, or Ping.
+
+### 6.2. Permission Set — attaching permissions per account
+
+A **Permission Set** is a "bundle of permissions" (a collection of IAM policies) defining what a person can do when they enter an account. When you assign a permission set to a user/group for an account, Identity Center **automatically creates a matching IAM role** in the target account. The user logs into the portal, picks an account, and assumes that IAM role with temporary credentials — no IAM user, no long-term access keys. This is also what AWS recommends in place of handing out static access keys.
+
+> In terms of permissions, this is quite similar to the flow where the root user creates IAM users for the members.
+
+Here's a concrete example: you assign the **FullAccess permission set** to the **Developers group** (Bob and Alice) for **Dev Account B**. Identity Center then provisions a matching IAM role in Dev Account B, so when Bob and Alice sign in to the portal they get **full access** to Dev Account B — without any IAM user created in that account:
+
+<ExcalidrawDiagram
+  src="/aws-iam-identity-center.excalidraw"
+  alt="IAM Identity Center diagram: inside an AWS Organization there is a management account, an OU (Development) with Dev Accounts A and B, and an OU (Production) with Prod Accounts A and B; IAM Identity Center lives in the management account and holds a Developers group (Bob, Alice) plus ReadOnlyAccess and FullAccess permission sets; the Developers group is assigned the FullAccess permission set, which provisions a full-access IAM role into Dev Account B"
+/>
+
+> If one permission set is assigned to the Developers group, only one IAM role is created, and all the developers assume that same role.
+
+> **Exam tip:** "**SSO across many AWS accounts** in an organization," "log in once with the corporate account (Okta/Active Directory) into AWS" → **IAM Identity Center**.
+
+---
+
+## 7. AWS Directory Services — Active Directory on AWS
+
+First: **Active Directory (AD)** is Microsoft's directory service, widely used in enterprises to centrally manage **users, computers, and permissions** within a "domain" — signing into Windows machines, applying <Tooltip content="Group Policy — an Active Directory mechanism to push configuration and policy uniformly across many machines/users in the domain">Group Policy</Tooltip>, and authenticating via the Kerberos/LDAP protocols. **AWS Directory Services** brings AD to the cloud with **three options**, differing in how "real" the AD is and whether they connect to on-premises:
+
+| Option | What it is | On-prem connection | When to use |
+| --- | --- | --- | --- |
+| **AWS Managed Microsoft AD** | A **real Microsoft AD**, operated by AWS | Yes — set up a two-way **trust** with on-prem AD | Need full AD features, MFA, run Windows/AD-aware workloads on AWS, and interconnect with the corporate AD |
+| **AD Connector** | A **proxy gateway** that forwards authentication to on-prem AD | Required — it's just a bridge | Want to use AWS services with **existing** on-prem AD accounts, storing **nothing** in the cloud |
+| **Simple AD** | An **AD-compatible** directory running on <Tooltip content="Samba — open-source software implementing Windows/Active Directory protocols; Simple AD uses Samba to provide basic AD features at low cost">Samba</Tooltip> | No — it stands alone | Small organization, basic needs, **no** existing AD, wants it cheap |
+
+A few distinctions that get asked:
+
+- **Managed Microsoft AD** is the only option that is a **true Microsoft AD** and can **establish a trust** with on-prem AD (on-prem users sign into AWS resources without duplicating accounts).
+- **AD Connector** **stores no** identity data on AWS — every authentication request is **forwarded straight back** to the on-prem AD. If the question says "don't keep identity data in the cloud, just proxy to the internal AD" → this is the answer.
+- **Simple AD** is cheap and simple but **does not support trusts** with other AD domains, **no** MFA, and lacks many advanced features. It fits minimal needs.
+
+> **Trap:** "Only **forward** authentication to on-prem AD, keep no data on AWS" → **AD Connector**. "Need a **real Microsoft AD** + a **trust** with on-prem" → **Managed Microsoft AD**. "Small, cheap, standalone, no trust needed" → **Simple AD**.
+
+---
+
+## 8. AWS Control Tower — set up and govern a multi-account environment automatically
+
+You could use Organizations by hand to build a multi-account structure, write SCPs, enable CloudTrail, configure Config... but it's fiddly and error-prone. **AWS Control Tower** is the **fastest** way to **set up and govern** a **secure, compliant** multi-account environment — in just a few clicks. This is the answer to question 4 from the intro.
+
+### 8.1. Landing Zone — a pre-built foundation
+
+Control Tower creates a <Tooltip content="Landing Zone — a multi-account AWS environment pre-configured to a well-architected baseline, with account structure, security, logging, and networking as the foundation for all workloads">**landing zone**</Tooltip>: a clean multi-account environment from the start, with a log archive account, an audit account, baseline security, and foundational networking. The key fact to remember for the exam: **Control Tower is built on top of Organizations** — it **automatically sets up** Organizations, IAM Identity Center, AWS Config, and CloudTrail for you, rather than replacing them.
+
+### 8.2. Guardrails (Controls) — governance rules
+
+A **guardrail** (now called a **control**) is a governance rule applied to the environment, split into two main kinds:
+
+- **Preventive** — enforced via **SCPs**, it **blocks** a violating action up front (e.g. disallow disabling CloudTrail).
+- **Detective** — enforced via **AWS Config rules**, it **detects** and reports non-compliant resources (e.g. detect an unencrypted EBS volume).
+
+Each guardrail also has a level: **mandatory** (always on), **strongly recommended**, and **elective** (optional).
+
+### 8.3. Account Factory and the Dashboard
+
+- **Account Factory** lets you **provision new accounts automatically** from a pre-approved template (networking, security, default guardrails) — ensuring every account that "rolls off the line" is standardized, instead of everyone building one their own way.
+- The **Dashboard** gives you a single-pane view of the compliance status across all OUs and accounts.
+
+> **Core distinction (asked a lot):** **Organizations** is the **underlying mechanism** (account structure + SCPs) that you configure yourself. **Control Tower** is the **automation + governance layer** pre-built on top, with guardrails, Account Factory, and a dashboard. Need to stand up a multi-account environment fast with guardrails ready to go → **Control Tower**.
+
+---
+
+## 9. Cheat sheet: spotting keywords in SAA questions
+
+In the exam you have about 90 seconds per question, so recognition has to be almost reflexive. The table below maps common keywords to the answer:
+
+| Keyword / scenario in the question | Answer |
+| --- | --- |
+| **Consolidate billing** across accounts, **volume discounts**, share RI/Savings Plans | **AWS Organizations** (Consolidated Billing) |
+| **Prevent** an action across a whole account/OU, **even for admin users** | **SCP** (Service Control Policy) |
+| Cap the **maximum permissions of one IAM user/role** (anti-escalation when delegating) | **Permission Boundary** |
+| **Standardize tags** across the whole organization | **Tag Policies** |
+| **Monitor / react to** non-compliant tagged resources | **AWS Config (`required-tags`) + EventBridge** → SNS/Lambda |
+| Only allow when **MFA is on** / from a specific **IP range** / in a specific **region** | **IAM Policy + Condition** |
+| One shared policy, granting access by the **tag** of the user/resource | **ABAC** (`aws:PrincipalTag` / `aws:ResourceTag`) |
+| **Keep current permissions** and also access another account's resource | **Resource-based policy** |
+| **Temporarily take on permissions / switch roles** for a session | **IAM Role + STS AssumeRole** |
+| Another account needs to **invoke** your SQS/SNS/Lambda/EventBridge | **Resource-based policy** |
+| A single **Deny** overrides every Allow | **Explicit Deny** always wins |
+| **SSO** across many AWS accounts + SAML apps, sign in with Okta/Entra ID | **IAM Identity Center** |
+| **Proxy** authentication to on-prem AD, **store nothing** in the cloud | **AD Connector** |
+| A **real Microsoft AD** on AWS + a **trust** with on-prem, MFA support | **AWS Managed Microsoft AD** |
+| A small, cheap, standalone AD directory, **no trust needed** | **Simple AD** |
+| **Quickly stand up** a multi-account environment with **guardrails** + **Account Factory** | **AWS Control Tower** |
+| **Detect** non-compliant resources across the organization | **Detective guardrail / AWS Config** |
+
+A few quick tie-breakers when you're torn:
+
+- See "**even an admin can't do it**" → **SCP** (account level) or **Permission Boundary** (user/role level).
+- See "**log in once** / SSO" → **IAM Identity Center**.
+- See "**don't store identities in the cloud**" → **AD Connector**.
+- See "**stand up a standard multi-account environment with guardrails ready**" → **Control Tower** (not building it by hand with Organizations).
+- See "**prevent**" → SCP/preventive guardrail; see "**detect**" → Config/detective guardrail.
+
+---
+
+## Conclusion
+
+Back to the four questions when your company sprawled to 20 accounts — now each has a clear address:
+
+- **"Consolidate billing and capture cheaper prices?"** → **AWS Organizations** with Consolidated Billing.
+- **"Hard-block it even for admin users?"** → **SCPs** setting a permission ceiling on the account/OU.
+- **"One login for everything?"** → **IAM Identity Center** (paired with Directory Services if you need AD).
+- **"A pre-built environment with guardrails?"** → **AWS Control Tower** with guardrails and Account Factory.
+
+Things to burn into memory for the SAA exam:
+
+- **An SCP grants nothing, only restricts** — it **denies by default like IAM**, applies to **a member account's root user too**, but **not** to the **management account**. Effective permissions are the **intersection** of the SCP and the IAM policy; with an allowlist you need an **explicit Allow all the way down the path** from Root → each OU → account.
+- **A Permission Boundary** is a ceiling for **one user/role**; an SCP is a ceiling for an **account/OU**. Both only restrict, never grant.
+- **Assuming a role gives up your original permissions; a resource-based policy keeps them.** For another account to invoke your resource (SQS/SNS/Lambda/EventBridge) → resource-based policy.
+- **Explicit Deny always wins.** Cross-account access needs **both sides** to allow it.
+- **Directory Services:** Managed Microsoft AD = real AD + trust; AD Connector = proxy, **stores nothing**; Simple AD = small, cheap, **no trust**.
+- **Control Tower is built on Organizations** — it automatically provisions the landing zone, guardrails (preventive = SCP, detective = Config), and Account Factory.
+
+Master the boundaries between these services, and you'll stop being fooled by "four answers that all sound right" — and that's the difference between guessing and choosing with confidence in the exam room.
