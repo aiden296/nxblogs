@@ -37,8 +37,8 @@ This is the "strength in unity" strategy.
 
 - **Mechanism:** AWS will try to place your instances within the same Availability Zone (AZ), and even on the same or adjacent server racks.
 - **Advantages:**
-- Extremely low network latency.
-- Extremely high throughput between nodes (up to 10-100 Gbps).
+  - Extremely low network latency.
+  - Extremely high throughput between nodes (up to 10-100 Gbps).
 
 - **Disadvantages:** "All or nothing." Since they are clustered together, if that rack experiences a power or network failure, your entire cluster of instances could go down at once.
 - **Use Case:** Suitable for High Performance Computing (<Tooltip content="High Performance Computing — workloads that require massive parallel processing power">HPC</Tooltip>) applications, graphics rendering, or big data processing applications that require continuous and instantaneous network communication.
@@ -49,8 +49,7 @@ The opposite of Cluster, this is the "divide and conquer" strategy aimed at maxi
 
 - **Mechanism:** Instances are guaranteed to be placed on completely different hardware (racks, power supplies, networks).
 - **Advantages:** Extremely high availability. A hardware failure on one instance will definitely not affect another.
-- **Disadvantages:**
-- Limited in quantity. You can have a maximum of **7 running instances** per AZ within a Spread PG. The reason is simply that physical space for complete isolation is finite.
+- **Disadvantages:** Limited in quantity. You can have a maximum of **7 running instances** per AZ within a Spread PG. The reason is simply that physical space for complete isolation is finite.
 
 - **Use Case:** Suitable for critical applications and database clusters where the survival of each node is the top priority.
 
@@ -59,14 +58,14 @@ The opposite of Cluster, this is the "divide and conquer" strategy aimed at maxi
 This is the "hybrid child," the perfect balance between Cluster and Spread designed for modern distributed systems.
 
 - **Mechanism:**
-- AWS divides your group into logical partitions called **Partitions**.
-- Instances **within the same Partition** can share hardware (like Cluster).
-- But **different Partitions** are placed on different racks (like Spread).
-- Supports up to **7 partitions** per AZ.
+  - AWS divides your group into logical partitions called **Partitions**.
+  - Instances **within the same Partition** can share hardware (like Cluster).
+  - But **different Partitions** are placed on different racks (like Spread).
+  - Supports up to **7 partitions** per AZ.
 
 - **Advantages:**
-- Allows scaling to a much larger number of instances than Spread (since each partition can hold many instances).
-- Still ensures fault isolation: if Partition 1's rack fails, Partition 2 continues running normally.
+  - Allows scaling to a much larger number of instances than Spread (since each partition can hold many instances).
+  - Still ensures fault isolation: if Partition 1's rack fails, Partition 2 continues running normally.
 - **Special feature:** Instances can access **Metadata** to know exactly which Partition they are in, enabling applications to self-coordinate data placement (<Tooltip content="Application is aware of the physical location of nodes to optimize data placement and replication">Topology-aware</Tooltip>).
 
 - **Use Case:** Large-scale distributed data systems (Big Data) such as **Hadoop HDFS, Cassandra, Kafka**. (For example: Kafka can replicate data to a partition on a different rack to ensure safety).

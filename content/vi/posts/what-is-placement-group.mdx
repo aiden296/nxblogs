@@ -37,8 +37,8 @@ Hiện tại, AWS cung cấp 3 chiến lược (strategies) chính: **Cluster**,
 
 - **Cơ chế:** AWS sẽ cố gắng đặt các instances của bạn nằm trong cùng một Availability Zone (AZ), thậm chí là nằm chung hoặc sát các tủ rack (giá đỡ server).
 - **Ưu điểm:**
-- Độ trễ mạng (Latency) cực thấp.
-- Băng thông (Throughput) cực cao giữa các node (lên đến 10-100 Gbps).
+  - Độ trễ mạng (Latency) cực thấp.
+  - Băng thông (Throughput) cực cao giữa các node (lên đến 10-100 Gbps).
 
 - **Nhược điểm:** "Được ăn cả, ngã về không". Vì nằm chụm lại một chỗ, nếu tủ rack đó gặp sự cố về điện hoặc mạng, toàn bộ cụm instance của bạn có thể "sập" cùng lúc.
 - **Use Case:** Phù hợp cho các ứng dụng tính toán hiệu năng cao (<Tooltip content="High Performance Computing — tính toán hiệu năng cao, đòi hỏi xử lý song song khối lượng lớn">HPC</Tooltip>), render đồ họa, hoặc các ứng dụng xử lý dữ liệu lớn cần giao tiếp mạng liên tục và tức thì.
@@ -49,8 +49,7 @@ Trái ngược với Cluster, đây là chiến lược "chia để trị" nhằ
 
 - **Cơ chế:** Các instances được đảm bảo đặt trên các phần cứng (tủ rack, nguồn điện, mạng) hoàn toàn khác nhau.
 - **Ưu điểm:** Độ sẵn sàng (Availability) cực cao. Việc hỏng hóc phần cứng ở instance này chắc chắn không ảnh hưởng đến instance kia.
-- **Nhược điểm:**
-- Bị giới hạn số lượng. Bạn chỉ được tối đa **7 running instances** cho mỗi AZ trong một Spread PG. Lý do đơn giản là không gian vật lý để tách biệt hoàn toàn là có hạn.
+- **Nhược điểm:** Bị giới hạn số lượng. Bạn chỉ được tối đa **7 running instances** cho mỗi AZ trong một Spread PG. Lý do đơn giản là không gian vật lý để tách biệt hoàn toàn là có hạn.
 
 - **Use Case:** Thích hợp cho các ứng dụng quan trọng (Critical applications), các cụm Cơ sở dữ liệu (Database cluster) nơi mà sự sống còn của từng node là ưu tiên hàng đầu.
 
@@ -59,14 +58,14 @@ Trái ngược với Cluster, đây là chiến lược "chia để trị" nhằ
 Đây là "đứa con lai", sự cân bằng hoàn hảo giữa Cluster và Spread dành cho các hệ thống phân tán hiện đại.
 
 - **Cơ chế:**
-- AWS chia nhóm của bạn thành các phân vùng logic gọi là **Partition**.
-- Các instances **trong cùng một Partition** có thể chia sẻ chung phần cứng (như Cluster).
-- Nhưng các **Partition khác nhau** thì nằm trên các tủ rack khác nhau (như Spread).
-- Hỗ trợ tối đa **7 partitions** trên mỗi AZ.
+  - AWS chia nhóm của bạn thành các phân vùng logic gọi là **Partition**.
+  - Các instances **trong cùng một Partition** có thể chia sẻ chung phần cứng (như Cluster).
+  - Nhưng các **Partition khác nhau** thì nằm trên các tủ rack khác nhau (như Spread).
+  - Hỗ trợ tối đa **7 partitions** trên mỗi AZ.
 
 - **Ưu điểm:**
-- Cho phép scale số lượng instance lớn hơn nhiều so với Spread (vì mỗi partition có thể chứa nhiều instance).
-- Vẫn đảm bảo cô lập lỗi: Nếu rack của Partition 1 bị hỏng, Partition 2 vẫn chạy bình thường.
+  - Cho phép scale số lượng instance lớn hơn nhiều so với Spread (vì mỗi partition có thể chứa nhiều instance).
+  - Vẫn đảm bảo cô lập lỗi: Nếu rack của Partition 1 bị hỏng, Partition 2 vẫn chạy bình thường.
 - **Tính năng đặc biệt:** Instance có thể truy cập **Metadata** để biết chính xác mình đang nằm ở Partition nào, giúp ứng dụng tự điều phối data (<Tooltip content="Ứng dụng nhận biết được vị trí vật lý của các node để tối ưu việc phân bổ dữ liệu và replica">Topology-aware</Tooltip>).
 
 - **Use Case:** Các hệ thống phân tán dữ liệu lớn (Big Data) như **Hadoop HDFS, Cassandra, Kafka**. (Ví dụ: Kafka sẽ biết để replicate data sang partition khác rack nhằm đảm bảo an toàn).
