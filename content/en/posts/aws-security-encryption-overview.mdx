@@ -1,0 +1,401 @@
+---
+title: 'AWS Security & Encryption: A Map of KMS, Secrets, ACM, WAF, Shield, GuardDuty and How to Pick the Right Service'
+date: '2026-06-15'
+tags: ['Devops', 'AWS', 'SAA']
+description: 'An overview of AWS security and encryption services for the SAA exam — KMS, CloudHSM, SSM Parameter Store, Secrets Manager, ACM, WAF, Shield, Firewall Manager, GuardDuty, Inspector, Macie — what problem each one solves, its core features, use cases, and when to choose which.'
+enableComment: true
+---
+
+# AWS Security & Encryption: A Map of KMS, Secrets, ACM, WAF, Shield, GuardDuty and How to Pick the Right Service
+
+You just shipped a fintech app to AWS. A week later, the security team comes in for a review and leaves behind a list of questions that make you sweat:
+
+1. "Is customer data in S3 and RDS encrypted? Who holds the encryption keys, how are they rotated, and who is allowed to use them?"
+2. "Where do your database passwords and API keys live? Don't tell me they're hardcoded or sitting in environment variables. Do they rotate automatically?"
+3. "How does your public endpoint defend against SQL injection and DDoS? What happens if it gets hit with a 100 Gbps flood?"
+4. "And most importantly: if right now an instance got hijacked to mine crypto, or an S3 bucket were leaking customer ID numbers, would you even **know**?"
+
+Four questions, four completely different problems — and AWS has no **single** service that solves all four. Instead there is a whole family of services, each born to plug a specific gap: encryption and key management, secrets storage, edge defense, and threat detection.
+
+This is also the SAA exam's favorite trap: it gives you a scenario ("need encryption but must control the keys in dedicated hardware," "need to auto-rotate an RDS password," "need to find PII in S3") then offers four options that all sound reasonable, and you must pick exactly one. The boundary between services is what's really being tested.
+
+This post is the map that helps you tell them apart. For each service we'll walk through: what problem it solves, its core features, real-world use cases, and the points the exam loves to probe.
+
+> **Note:** This is an overview meant to build a mental model and let you recognize services quickly in the exam room. Each service here (especially KMS and WAF) deserves its own deep-dive; this post focuses on the boundaries between them and why each one exists.
+
+---
+
+## 1. The big picture: 4 defense groups
+
+Before the details, pin this mental framework. Every service in the Security & Encryption space falls into four groups, each answering a different question:
+
+| Group | The question it answers | Key services |
+| --- | --- | --- |
+| **Encryption & key management** | "How do I encrypt data and manage keys?" | KMS, CloudHSM |
+| **Secrets & certificates** | "Where do I store secrets and issue TLS certificates?" | SSM Parameter Store, Secrets Manager, ACM |
+| **Edge defense** | "How do I block web exploits and DDoS?" | WAF, Shield, Firewall Manager |
+| **Threat detection** | "How do I know I'm being attacked / leaking data?" | GuardDuty, Inspector, Macie |
+
+There's one more distinction worth drawing, because the exam leans on it heavily:
+
+- **Preventive:** stop bad things from happening — encryption, WAF blocking a request, IAM limiting permissions.
+- **Detective:** detect bad things that have happened or are happening — GuardDuty, Inspector, Macie. They don't block; they **alert**.
+
+Keep this framework in mind, and let's walk through each group.
+
+---
+
+## 2. Encryption 101: three types of encryption to tell apart
+
+Before talking about services, you need the fundamentals: data can be attacked at two moments — while it is in transit over the network, and while it is at rest on disk. There are three corresponding types of encryption, each answering the question "who holds the key, who does the encrypting."
+
+**Encryption in flight** protects data on the wire between client and server. Data is encrypted before it leaves the sender and only decrypted after it reaches the receiver, so an eavesdropper in the middle (a <Tooltip content="Man-in-the-middle — an attacker who sits between two communicating parties to eavesdrop on or tamper with data">MITM</Tooltip> attack) only sees meaningless bytes. This is exactly <Tooltip content="Transport Layer Security — the protocol that encrypts the transport channel and is the foundation of HTTPS; SSL is the older name">TLS/SSL</Tooltip>, the thing behind HTTPS. The key lives in the TLS certificate — and this is where ACM comes in (section 6).
+
+**Server-side encryption at rest** protects data sitting on disk. The server receives the raw data, encrypts it itself before writing to disk, and decrypts it before returning it to the client. The key is managed by the server — on AWS that's usually KMS. This is the mechanism behind SSE-S3, SSE-KMS, EBS volume encryption, and RDS encryption. The crucial point: the server **does** see the raw data at processing time.
+
+**Client-side encryption** is the opposite: the client encrypts the data before sending it, and the server **never** sees the raw data — it only stores the ciphertext. The client manages the key (possibly with KMS via envelope encryption, see section 3.2). Use it when you don't trust even the storage side, or when you need end-to-end encrypted data.
+
+A common exam gotcha: SSE-C (Server-Side Encryption with Customer-provided keys) has the word "customer" in it but is still **server-side** — you supply the key with each request, AWS uses it to encrypt and then immediately forgets it (the key is never stored). It differs from client-side in that the encryption happens on the AWS server, not on your machine.
+
+---
+
+## 3. AWS KMS — the heart of encryption on AWS
+
+**AWS Key Management Service (KMS)** is the service for managing encryption keys, and it is built into nearly every AWS service that needs at-rest encryption (S3, EBS, RDS, DynamoDB, Secrets Manager, and more).
+
+Instead of creating and safeguarding keys yourself, KMS holds them in a tightly controlled system, lets you grant and revoke key usage through IAM, and records every use of a key in CloudTrail for auditing.
+
+### 3.1. Key types and ownership
+
+KMS has two key types by algorithm:
+
+- **Symmetric:** a single key (AES-256) used for both encryption and decryption. The key **never leaves KMS in plaintext** — you must call the KMS API to use it. This is the default type, used by most AWS services.
+- **Asymmetric:** a public/private key pair (RSA or ECC). The public key can be downloaded to encrypt or verify signatures outside AWS; the private key stays in KMS. Use it when the caller cannot call the KMS API (for example, encrypting from outside AWS), or for sign/verify operations.
+
+More important for the exam is the classification by who owns and pays for the key:
+
+| Key type | Who manages it | Rotation | Cost |
+| --- | --- | --- | --- |
+| **AWS Owned Keys** | AWS, shared across accounts, invisible to you | AWS handles it | Free |
+| **AWS Managed Keys** | AWS on your behalf, named `aws/<service>` | Automatic, yearly | Free |
+| **Customer Managed Keys (CMK)** | You create & manage them | Optional (see 3.3) | $1/month + usage |
+| **CMK with imported material (BYOK)** | You, using your own key material | Must rotate manually | $1/month + usage |
+
+**Key Policies** are an easy trap. Every KMS key has a resource-based policy attached directly to it, and no one can access the key unless the policy allows it — **not even the root account**. There are two flavors:
+
+- **Default key policy:** grants the account full control and delegates permission management to IAM (like other resources).
+- **Custom key policy:** you explicitly list which users/roles may use the key — required for cross-account key sharing.
+
+### 3.2. Master key, data key, the 4 KB limit, and envelope encryption
+
+A core limit: a direct KMS `Encrypt`/`Decrypt` API call processes **at most 4 KB** of data. So how do you encrypt a 1 GB file? To answer that, you need the concept of a data key and KMS's two-tier key model.
+
+- **Master key (KMS key)** is the root key that never leaves KMS. It does not directly encrypt your large data; its job is to encrypt and decrypt other keys.
+- **Data key (Data Encryption Key)** is a key KMS generates on demand to encrypt the actual data. This is the key that works directly with your data, and it is itself protected (encrypted) by the KMS key.
+
+The mechanism that combines these two tiers is called **envelope encryption**: the data sits inside an "envelope" locked by the data key, and the data key sits inside a larger "envelope" locked by the KMS key. This technique shows up constantly on the exam.
+
+The flow to obtain a data key via the `GenerateDataKey` API:
+
+1. `GenerateDataKey` returns two things: the data key in plaintext for you to use right away, and that same data key in encrypted form, encrypted by the KMS key (called the **encrypted data key**).
+2. You use the plaintext data key to encrypt the large block of data right on your own machine (no network round trip, no 4 KB limit), then wipe the plaintext data key from memory as soon as possible.
+3. You store the encrypted data key alongside the ciphertext. To decrypt, call `Decrypt` and send the encrypted data key to KMS to get the plaintext data key back, then decrypt the data yourself.
+
+Point to remember: when the exam mentions **data larger than 4 KB**, think immediately of envelope encryption / `GenerateDataKey`.
+
+So why separate the master key from the data key at all? It's a deliberate design. Part of the answer is offloading the heavy encrypt/decrypt workload onto the client. Encrypting or decrypting a large object is expensive, and the data key approach lets that encryption/decryption happen on the client instead of inside KMS.
+
+### 3.3. Key rotation, region scoping, and throttling
+
+**Key rotation** means periodically replacing a key to limit the damage if a key is exposed:
+
+- **AWS Managed Keys:** rotate automatically once a year, with no intervention from you.
+- **Customer Managed Keys:** automatic rotation is optional. Since April 2024, AWS lets you configure a flexible period from 90 days to 2560 days (default 365 days) and even rotate on demand at any time.
+- **Imported keys (BYOK):** **cannot** rotate automatically; you must do it manually.
+
+A subtle and frequently asked point: why does old data still decrypt after a key is rotated?
+
+When KMS rotates a key, it generates new cryptographic material (a new <Tooltip content="The actual cryptographic material inside a KMS key — what performs the encryption/decryption. A single KMS key can have multiple backing key versions across rotations">backing key</Tooltip>) but keeps all the old backing keys around. Most importantly: the key ID and ARN **do not change**. Every ciphertext (or every encrypted data key) carries metadata recording which backing key version encrypted it. On decryption, KMS reads that metadata and automatically picks the matching backing key:
+
+- **Old** data: KMS reuses the old backing key (still retained) to decrypt it.
+- **New** data: encrypted with the new backing key.
+
+The key consequence: rotation does NOT re-encrypt old data. Old data stays under the old material until you actively re-encrypt it (for example with the `ReEncrypt` API). And because your application only references the key by its unchanged key ID, the whole process is **transparent** — you don't change any code or configuration.
+
+Combined with envelope encryption from section 3.2, this mechanism is also **very cheap**: when you rotate the KMS key, only new data keys get wrapped with the new backing key; old encrypted data keys still decrypt thanks to the old backing keys — and the actual large data blocks are never touched. That's why you can enable rotation across petabytes of data with no re-encryption cost.
+
+Two more properties the exam likes to ask about:
+
+- **A KMS key is tied to a single region** — a key cannot leave its region (the exception is Multi-Region Keys in section 3.4). When you copy an encrypted snapshot to another region, you must re-encrypt it with a key in the destination region.
+- **Throttling:** KMS has a per-second request limit. When exceeded, the API returns `ThrottlingException` — handle it with exponential backoff (retry with growing delays) or request a quota increase. This is the classic cause of failures in S3 replication or bulk encryption batch jobs.
+
+### 3.4. Multi-Region Keys
+
+By default a KMS key is locked inside a single region. **Multi-Region Keys** break that: a set of identical KMS keys placed in multiple regions, sharing the same key ID and the same key material (replicated by AWS). There is one primary key and one or more replica keys.
+
+The core benefit: you can encrypt data in region A and decrypt it in region B without a cross-region call or re-encryption — because the keys on both sides are the same. Note that these keys are managed independently (each has its own key policy) even though they share the same key material.
+
+Typical use cases:
+
+- DynamoDB Global Tables with client-side encryption
+- Aurora Global Database
+- Active-active multi-region architectures
+- Disaster recovery
+
+AWS's caveat: this is **not** a default choice — most data should stay in a single region; use Multi-Region Keys only when you genuinely have a multi-region need, because each key in each region is billed separately.
+
+### 3.5. S3 Replication with encrypted data
+
+When you enable **S3 Replication** (copying objects to another bucket), replicating encrypted objects has a few easy-to-forget rules:
+
+- Unencrypted objects and SSE-S3 objects are replicated **by default**.
+- **SSE-C** objects (customer-provided keys): supported.
+- **SSE-KMS** objects: must be enabled explicitly in the replication configuration. You need to specify the KMS key in the destination region, and grant the replication IAM role `kms:Decrypt` on the source key plus `kms:Encrypt` on the destination key. Because each object is one KMS call, bulk replication can easily hit the KMS throttling ceiling — in which case you request a quota increase.
+
+### 3.6. Sharing an encrypted AMI with another account
+
+A common real-world scenario: you have an **AMI** (a machine image for launching EC2) with volumes encrypted by a KMS CMK, and you want to share it with another account. The process:
+
+1. Modify the AMI's launch permission to add the target account.
+2. Share the KMS CMK used for encryption with the target account (via the key policy).
+3. The target account needs IAM permissions: `DescribeKey`, `ReEncrypt*`, `CreateGrant`, `Decrypt` on that key.
+4. When launching from the shared AMI, the target account can (optionally) re-encrypt the volumes with its own CMK.
+
+The gotcha: you cannot share an AMI encrypted with the default AWS Managed Key — you must use a **Customer Managed Key** in order to share the key.
+
+---
+
+## 4. AWS CloudHSM — when you need full hardware control
+
+With KMS, AWS manages the software that generates and stores keys (even though you control the policy). But some organizations (banks, governments) have stricter compliance requirements: the keys must live in dedicated hardware that AWS cannot touch. That's why **AWS CloudHSM** exists.
+
+CloudHSM provides single-tenant <Tooltip content="Hardware Security Module — a dedicated physical device for generating, storing, and processing encryption keys, with tamper resistance">HSMs</Tooltip> (reserved for you, not shared), meeting the **FIPS 140-2 Level 3** standard. AWS only provisions and maintains the hardware; you manage the keys and users yourself — AWS has no access to your keys.
+
+Things to remember:
+
+- Supports both symmetric and asymmetric keys, and is a good fit for SSE-C (since you hold the keys yourself).
+- Keys are accessed through industry-standard libraries: PKCS#11, JCE, CNG — **not** the AWS API. IAM here is only for managing the HSM cluster lifecycle, not for using keys.
+- Deployed as a multi-AZ cluster for high availability (HA).
+- **Custom Key Store:** KMS can use your CloudHSM cluster as its key store — you get the convenience of the KMS API while the physical keys live in your own HSM.
+
+A quick KMS vs CloudHSM comparison — a classic SAA question:
+
+| Criterion | AWS KMS | AWS CloudHSM |
+| --- | --- | --- |
+| Tenancy | Multi-tenant (shared) | Single-tenant (dedicated) |
+| Who controls the keys | AWS manages, you control via IAM/policy | Entirely you; AWS has no access |
+| Type | Managed software service | Dedicated hardware device |
+| Access | AWS API + IAM | PKCS#11 / JCE / CNG |
+| Standard | FIPS 140-2 Level 3 (some HSMs) | FIPS 140-2 Level 3 |
+| When to use | Default for encryption on AWS | Compliance requires a dedicated HSM, you must hold the keys |
+
+Exam rule of thumb: see "dedicated HSM," "FIPS 140-2 Level 3," "must control the keys yourself, AWS may not touch them" → CloudHSM. Otherwise, the default is KMS.
+
+---
+
+## 5. Secrets & config: SSM Parameter Store vs Secrets Manager
+
+The security team's second question — "where do the DB passwords and API keys live" — is solved by two services. Both store encrypted values, but they were built for slightly different purposes.
+
+### 5.1. SSM Parameter Store
+
+**AWS Systems Manager Parameter Store** is a hierarchical store for configuration data and secrets. You store values as plain text or SecureString (encrypted with KMS), organized along a path tree like `/my-app/prod/db-url`.
+
+Core features:
+
+- **Hierarchy + path-based permissions:** grant IAM access to a whole branch like `/my-app/prod/*`.
+- Versioning, auditing via CloudTrail, notifications via EventBridge.
+- Can reference Secrets Manager secrets (via the `/aws/reference/secretsmanager/...` path) and AWS public parameters (for example, fetching the latest Amazon Linux AMI ID).
+- **Two tiers:**
+
+| Tier | Parameter count | Value size | Parameter policies | Cost |
+| --- | --- | --- | --- | --- |
+| **Standard** | 10,000 / account / region | up to 4 KB | No | Free |
+| **Advanced** | 100,000 | up to 8 KB | Yes (TTL/expiration) | $0.05 / param / month |
+
+Point to remember: Parameter Store has **no** built-in automatic rotation — to rotate, you build it yourself with Lambda + EventBridge.
+
+### 5.2. AWS Secrets Manager
+
+**AWS Secrets Manager** is a purpose-built service for secrets, created to fill exactly what Parameter Store lacks: automatic rotation. This is the biggest differentiator.
+
+Core features:
+
+- **Automatic secret rotation** on a schedule, executed by a Lambda function. In particular, it has native integration with RDS, Aurora, Redshift, and DocumentDB — Secrets Manager can generate and rotate database credentials for you with no code.
+- **Mandatory KMS encryption** (there's no "leave it unencrypted" option like Parameter Store).
+- **Multi-region secrets:** replicate secrets to other regions (for DR and multi-region apps).
+- Dynamic reference integration in CloudFormation, App Runner, ECS, and more.
+
+The trade-off is cost: roughly **$0.40/secret/month** plus API charges — noticeably more than Parameter Store standard (free).
+
+---
+
+## 6. AWS Certificate Manager (ACM) — TLS/SSL certificates
+
+Back to encryption in flight from section 2: to run your site over HTTPS you need a **TLS/SSL certificate**. Buying, installing, and remembering to renew it every year is painful. **AWS Certificate Manager (ACM)** automates the whole thing: provisioning, managing, and deploying certificates.
+
+Core features:
+
+- **Free public certificates** — you only pay for the resources (ELB, CloudFront, etc.), not the cert.
+- **Automatic renewal** for ACM-issued certificates (a big plus — no more outages from a forgotten renewal).
+- **Supports importing third-party certificates**, but imported certs do not auto-renew.
+- **Two domain-ownership validation methods:** DNS validation (recommended — enables automatic renewal) and email validation.
+- **Private CA (ACM Private CA):** issues internal certificates for private systems (paid).
+
+Two gotchas the exam loves:
+
+- ACM integrates with ELB (ALB/NLB/CLB), CloudFront, and API Gateway — but **cannot be attached directly to EC2**, because you can't export the private key of a public cert. To run HTTPS on EC2 you must use a self-managed cert or sit behind a load balancer.
+- ACM is a regional service. For CloudFront, the certificate must live in **us-east-1** (N. Virginia) — one of the most-asked region gotchas.
+
+---
+
+## 7. Edge defense: WAF, Shield, Firewall Manager
+
+The third question — blocking web exploits and DDoS — belongs to three services that work together, each as a layer.
+
+### 7.1. AWS WAF — application-layer firewall (Layer 7)
+
+**AWS WAF (Web Application Firewall)** filters HTTP/HTTPS traffic at Layer 7 to block common web exploits: SQL injection, <Tooltip content="Cross-Site Scripting — injecting malicious scripts into a web page to run in the victim's browser">XSS</Tooltip>, and bad bots.
+
+You attach WAF to: Application Load Balancer, API Gateway, CloudFront, AppSync (GraphQL), Cognito User Pool, App Runner.
+
+> Note: it **cannot** be attached to a Network Load Balancer (NLB is Layer 4 and doesn't understand HTTP).
+
+It's configured through a **Web ACL** containing rules:
+
+- **IP set:** block/allow by IP list.
+- **HTTP content-matching rules:** by header, body, URI, query string.
+- **Size constraints, geo-match** (block by country).
+- **Managed rule groups:** prebuilt rule sets from AWS and partners on the Marketplace.
+- **Rate-based rules:** limit the number of requests per IP over a time window — this is the mechanism for Layer 7 DDoS protection.
+
+A Web ACL is regional, except when attached to CloudFront, where it's **global** (at the edge).
+
+A classic architecture gotcha: you need WAF but also need a static IP. Since WAF can't attach to an NLB (which provides static IPs), the solution is to put the ALB behind **AWS Global Accelerator** (which provides 2 static anycast IPs) and attach WAF to the ALB.
+
+### 7.2. AWS Shield — DDoS protection
+
+DDoS is an attack that overwhelms a system with a massive flood of traffic from many sources. AWS defends against DDoS via **Shield**, in two tiers:
+
+- **Shield Standard:** free, automatically on for every AWS customer. Protects against common Layer 3/4 attacks (SYN flood, UDP flood, reflection). Nothing to do.
+- **Shield Advanced:** paid, $3,000/month per organization (plus data transfer). Advanced protection for EC2, ELB, CloudFront, Global Accelerator, and Route 53, plus:
+  - **24/7 DDoS response team** (<Tooltip content="Shield Response Team — AWS experts who assist you directly during a large-scale DDoS attack">SRT</Tooltip>).
+  - **DDoS cost protection:** refunds the cost spikes caused by your system auto-scaling to absorb an attack.
+  - **Automatic application-layer DDoS mitigation:** auto-creates WAF rules (WAF is included free for protected resources).
+  - Real-time metrics and visibility.
+
+### 7.3. AWS Firewall Manager — centralized org-wide management
+
+**AWS Firewall Manager** solves the scale problem: when you have dozens of accounts in an AWS Organization, how do you apply the same set of security rules across all of them without configuring each account by hand?
+
+Firewall Manager lets you define centralized policies that manage: WAF rules (Web ACL), Shield Advanced, Security Groups, AWS Network Firewall (filtering traffic at the VPC level), and Route 53 Resolver DNS Firewall.
+
+Its biggest strength: rules are **automatically** applied to new resources the moment they're created across the entire organization → continuous compliance, with no account left behind.
+
+Telling the three apart — a question that comes up often. The core idea: WAF, Shield, and Firewall Manager are used together for comprehensive protection, but each answers a different need. The decision framework:
+
+- Defining rules is always WAF's job. The set of Web ACL rules is always declared in **WAF**, no matter what you use to manage them afterward.
+- Need granular protection for a few resources → **WAF** is enough and correct. When you just need Layer 7 request filtering for a handful of resources, WAF on its own is the right choice.
+- Need to use WAF across accounts, accelerate configuration, automatically protect new resources → **Firewall Manager** (+ WAF). Firewall Manager doesn't replace WAF; it manages and applies WAF rules at organization scale and auto-attaches them to new resources as they appear.
+- Prone to DDoS, need extra premium features → **Shield Advanced**. Shield Advanced sits on top of WAF: dedicated SRT support, advanced reporting, cost protection, and automatic application-layer DDoS mitigation. If you get hit by DDoS frequently, this is worth buying.
+
+The one-line mnemonic: WAF = granular rules on a resource; Firewall Manager = apply WAF/Shield across many accounts & automate it; Shield Advanced = a premium DDoS layer stacked on top of WAF.
+
+### 7.4. DDoS protection best practices
+
+AWS publishes a whitepaper on DDoS resiliency that bundles its recommendations into numbered best practices (BP1, BP2, ...) and layers them onto a reference architecture. The recurring theme: block attacks as close to the edge as possible, before they ever reach the core infrastructure in the VPC.
+
+![AWS DDoS Resiliency reference architecture — Users and Internet flow through edge services (Global Accelerator BP1, Route 53 BP3, WAF BP2, CloudFront BP1) into a Region (BP8) with a VPC (BP5), public subnet (WAF BP2, Elastic Load Balancing BP6, API Gateway BP4) and private subnet (Auto Scaling group BP7, Transit Gateway), plus a corporate data center connected via DX/VPN](/aws-security-encryption-ddos-best-practices.png)
+
+Read the architecture above in layers: user traffic enters through the edge services (Global Accelerator, Route 53, WAF, CloudFront) — where most of the attack is absorbed — and only then reaches the VPC holding the ELB, API Gateway, and the compute tier (Auto Scaling group) inside the subnets. A few core principles the exam likes to ask about:
+
+- **Mitigate at the edge:** push traffic through CloudFront, Global Accelerator, and Route 53 to absorb and disperse attacks right at the edge locations, before they reach the origin. Global Accelerator is also handy when your backend isn't compatible with CloudFront, and it integrates with Shield.
+- **Be ready to scale to absorb:** use Auto Scaling and CloudFront/Global Accelerator to "swallow" attack traffic instead of collapsing under it.
+- **Application-layer defense:** WAF with rate-based rules, geo-match, and managed rules; CloudFront caching to offload the origin; API Gateway throttling.
+- **Reduce the attack surface:** hide the origin (only allow CloudFront to reach it via a Security Group + custom header), use tight Security Groups/NACLs, and protect your API endpoints.
+
+---
+
+## 8. Threat detection & sensitive data: GuardDuty, Inspector, Macie
+
+The fourth question — "how do I know I'm being attacked or leaking data" — belongs to the detective group. These three services don't block attacks; they detect and alert. Telling these three apart is one of the questions you can count on appearing.
+
+### 8.1. Amazon GuardDuty — threat detection
+
+**Amazon GuardDuty** is an intelligent threat-detection service that uses machine learning, anomaly detection, and threat intelligence to find malicious activity. The big advantage: it's a one-click enable, no agents to install.
+
+It analyzes existing log sources:
+
+- **CloudTrail logs** (management events + S3 data events).
+- **VPC Flow Logs** (network traffic).
+- **DNS query logs**.
+- Optional extensions: EKS audit logs, RDS/Aurora login activity, Lambda network activity, S3, and malware scanning on EBS volumes.
+
+When it detects an anomaly, GuardDuty generates a finding and pushes it through EventBridge so you can respond automatically (invoke Lambda, send SNS). It catches threats like: an instance hijacked to mine cryptocurrency (**cryptomining**), reconnaissance behavior, anomalous API calls, and IAM credential exfiltration.
+
+A recent addition (December 2024): **GuardDuty Extended Threat Detection** automatically correlates multiple signals into a multi-stage attack sequence (for example: credential compromise → followed by data exfiltration) and rolls them up into a single critical-severity finding — free for every GuardDuty customer.
+
+Memory hook: see "analyze VPC Flow Logs / DNS logs / CloudTrail to detect anomalous behavior" or "stop crypto mining" → GuardDuty.
+
+### 8.2. Amazon Inspector — vulnerability management
+
+**Amazon Inspector** automates vulnerability management — scanning your workloads for known security vulnerabilities. It works with only three resource types:
+
+- **EC2 instances:** scans for software vulnerabilities (matching the <Tooltip content="Common Vulnerabilities and Exposures — a public catalog of known security vulnerabilities, each with a unique identifier">CVE</Tooltip> database) and network reachability, via the SSM agent.
+- **Container images in ECR:** scanned when the image is pushed.
+- **Lambda functions:** scans for vulnerabilities in code and dependencies.
+
+Inspector scans continuously, assigns a risk score to each vulnerability, and sends findings to Security Hub and EventBridge.
+
+Burn this in: Inspector only covers **EC2, ECR, Lambda** — it does not touch data in S3.
+
+Memory hook: see "CVE," "software vulnerability," "scan container images," "vulnerability" → Inspector.
+
+### 8.3. Amazon Macie — protecting sensitive data
+
+**Amazon Macie** is a data security and privacy service that uses machine learning and pattern matching to discover and protect sensitive data in S3. Specifically, it scans your S3 buckets and flags PII — <Tooltip content="Personally Identifiable Information — data such as names, ID/SSN numbers, credit card numbers, email">personally identifiable information</Tooltip> — then alerts via EventBridge.
+
+Use case: complying with privacy regulations (GDPR, PCI-DSS, etc.), answering the question "which buckets is my customers' PII scattered across?".
+
+Memory hook: see "PII," "sensitive data," "S3," "privacy" → Macie.
+
+### 8.4. Three services, three different questions
+
+| Service | The question it answers | What it analyzes |
+| --- | --- | --- |
+| **GuardDuty** | "Is someone attacking my account?" | CloudTrail, VPC Flow Logs, DNS logs |
+| **Inspector** | "Do my workloads have vulnerabilities?" | EC2, ECR images, Lambda (CVE) |
+| **Macie** | "Do I have exposed sensitive data (PII)?" | Data in S3 |
+
+---
+
+## 9. Quick comparison & picking the right service
+
+A roundup of the pairs/trios people mix up — this is where you score points in the exam:
+
+- **KMS vs CloudHSM:** default to KMS (AWS-managed, deeply integrated). Need a single-tenant hardware HSM, full control over the keys, FIPS 140-2 Level 3 → **CloudHSM**.
+- **Parameter Store vs Secrets Manager:** need automatic rotation or RDS/database credentials → **Secrets Manager**. Just need to store simple config/secrets cheaply → **Parameter Store**.
+- **GuardDuty vs Inspector vs Macie:** detect attacks/anomalous behavior → **GuardDuty**; find vulnerabilities (CVE) on EC2/ECR/Lambda → **Inspector**; find PII in S3 → **Macie**.
+- **WAF vs Shield vs Firewall Manager:** filter Layer 7 web exploits (SQLi/XSS) on a resource → **WAF**; defend against DDoS → **Shield** (Advanced for premium); manage rules across many accounts in an Organization → **Firewall Manager**.
+- **ACM for CloudFront:** the certificate must be in **us-east-1**; and ACM **cannot** be attached directly to EC2.
+- **Encryption at rest:** server-side (AWS encrypts, SSE-S3/SSE-KMS) vs client-side (you encrypt before sending); SSE-C is still **server-side** even though you supply the key.
+
+---
+
+## Conclusion: four questions, one family of services
+
+Back to the review with the security team. Now you have the map to answer each question:
+
+1. "Data encrypted, who holds the keys?" → **KMS** for most cases (envelope encryption for large data, multi-region keys for multi-region apps); **CloudHSM** when you need a dedicated hardware HSM.
+2. "Where do secrets live, do they rotate?" → **Secrets Manager** when you need auto-rotation/DB credentials; **Parameter Store** for simple, free config. For TLS certificates, **ACM**.
+3. "Block web exploits and DDoS?" → **WAF** at Layer 7, **Shield** for DDoS, **Firewall Manager** for org-wide management.
+4. "How do I know I'm attacked / leaking?" → **GuardDuty** (threats), **Inspector** (vulnerabilities), **Macie** (PII in S3).
+
+What to carry into the exam room:
+
+- **KMS is the center:** remember the 4 KB limit → envelope encryption (`GenerateDataKey`), the three kinds of key ownership, key policies that block even root, and that keys are tied to a region.
+- **KMS vs CloudHSM:** only pick CloudHSM when the question stresses a single-tenant HSM / full key control / AWS may not touch the keys.
+- **Secrets Manager = rotation + RDS integration;** Parameter Store = cheap, simple, no built-in rotation.
+- **ACM:** free certs + auto-renewal, but CloudFront needs the cert in **us-east-1** and it **cannot** be used directly on EC2.
+- **WAF (L7) ≠ Shield (DDoS) ≠ Firewall Manager (multi-account management).** WAF cannot attach to an NLB.
+- **GuardDuty (threats) ≠ Inspector (vulnerabilities/CVE) ≠ Macie (PII in S3)** — this detective trio is all but guaranteed to show up on the exam.
