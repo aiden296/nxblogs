@@ -29,7 +29,7 @@
 - When creating a new blog post, write the Vietnamese version first (`content/vi/posts/`), finalize it, then create the English translation (`content/en/posts/`)
 - Available MDX components: `<Posts />`, `<Tags />`, `<Avatar />`, and feature-specific components registered in `src/mdx-components.tsx`
 - When mentioning a technical concept or term (e.g., data shards, parity shards, erasure coding), always briefly explain what it is so the reader can understand without prior knowledge
-- For emphasis, use bold (`**text**`) only — never italic (`*text*` or `_text_`)
+- For emphasis, use bold (`**text**`) only — never italic (`*text*` or `_text_`). Default to plain text; bold is not a substitute for plain prose. Bold only: (1) a list item's leading label, (2) a key term on first definition (max one per section), (3) a single pivot word or critical warning. Never bold whole phrases or sentences; aim for ≤1 bold per paragraph. To emphasize multiple items, use a list, not bold
 
 # Code Style
 
