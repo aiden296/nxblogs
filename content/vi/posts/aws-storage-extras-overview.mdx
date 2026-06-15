@@ -1,0 +1,278 @@
+---
+title: 'AWS Storage Extras: Snow Family, FSx, Storage Gateway, Transfer Family & DataSync'
+date: '2026-06-15'
+tags: ['Devops', 'AWS', 'SAA']
+description: 'Tổng quan nhóm storage phụ trợ của AWS cho kỳ thi SAA — Snow Family, DataSync, FSx (Windows/Lustre/ONTAP/OpenZFS), Storage Gateway, Transfer Family — mỗi service giải quyết vấn đề gì và khi nào dùng cái nào.'
+enableComment: true
+---
+
+# AWS Storage Extras: Snow Family, FSx, Storage Gateway, Transfer Family & DataSync
+
+Khi nói đến lưu trữ trên AWS, ba cái tên hiện ra đầu tiên là **S3** (lưu object), **EBS** (ổ đĩa cho EC2) và **EFS** (file system chia sẻ). Nhưng thực tế đặt ra những bài toán mà ba dịch vụ đó không trực tiếp giải được:
+
+1. "Tôi có **500 TB** trong data center cần đưa lên S3. Đẩy qua internet sẽ mất **vài tháng** — có cách nào nhanh hơn không?"
+2. "Ứng dụng của tôi là phần mềm Windows, nó cần một **file share kiểu Windows** (SMB, tích hợp Active Directory) — chứ EFS chỉ nói tiếng Linux."
+3. "Đội tính toán cần một file system **throughput cực cao** cho mô phỏng HPC và training ML — EFS không kham nổi."
+4. "Công ty vẫn còn cả một hệ thống on-premises chạy ổn định, tôi **chưa muốn migrate**, nhưng muốn dùng storage AWS làm backup và mở rộng dung lượng."
+5. "Đối tác chỉ biết gửi file cho tôi qua **SFTP**. Làm sao để file họ gửi rơi thẳng vào S3 mà tôi không phải dựng và bảo trì một server FTP?"
+
+Đây chính là chỗ nhóm **"storage extras"** xuất hiện. Điểm mấu chốt cần hiểu ngay từ đầu: **đây không phải các nơi lưu trữ chính**, mà là **công cụ để đưa dữ liệu vào/ra AWS** và **kết nối các loại storage chuyên biệt hoặc hybrid**. Mỗi dịch vụ sinh ra để giải một bài toán rất cụ thể — và đề thi SAA rất thích đưa ra một tình huống rồi hỏi bạn chọn dịch vụ nào, trong khi vài phương án còn lại đều "nghe có vẻ đúng".
+
+Bài viết này là tấm bản đồ giúp bạn phân biệt rạch ròi. Với mỗi dịch vụ, mình sẽ đi qua: nó **giải quyết vấn đề gì**, **tính năng cốt lõi**, và **use case** thực tế — cùng những cặp dễ nhầm hay bị hỏi.
+
+> **Lưu ý:** Đây là góc nhìn overview để xây mental model và nhận diện nhanh trong phòng thi. Mỗi dịch vụ ở đây đều có thể viết thành một bài deep-dive riêng; bài này tập trung vào **ranh giới giữa chúng** và lý do tồn tại của từng cái.
+
+---
+
+## 1. Bức tranh tổng thể: mỗi dịch vụ giải một bài toán
+
+Trước khi đi vào chi tiết, hãy ghim cái khung này. Thay vì học theo thứ tự ngẫu nhiên, hãy gắn mỗi dịch vụ với **bài toán** nó sinh ra để giải:
+
+| Bài toán                                    | Câu hỏi nó trả lời                                          | Dịch vụ            |
+| ------------------------------------------- | ----------------------------------------------------------- | ------------------ |
+| **Di chuyển dữ liệu lớn — offline**         | "Chuyển hàng trăm TB–PB khi mạng quá chậm/đắt"             | AWS Snow Family    |
+| **Di chuyển / đồng bộ dữ liệu — online**    | "Chuyển dữ liệu qua mạng, tự động và có lịch"               | AWS DataSync       |
+| **File system chuyên dụng**                 | "Cần Windows SMB / HPC / ONTAP / ZFS, không phải EFS"       | Amazon FSx         |
+| **Kết nối hybrid on-premises ↔ AWS**            | "Vẫn chạy on-premises nhưng muốn dùng storage AWS"             | AWS Storage Gateway |
+| **Truyền file qua giao thức FTP**           | "App/đối tác chỉ biết FTP/FTPS/SFTP"                        | AWS Transfer Family |
+
+Hai trục tư duy xuyên suốt cả bài:
+
+- **Đưa dữ liệu vào AWS có hai con đường: vật lý (offline) và qua mạng (online).** Khi dữ liệu quá lớn so với băng thông, ta chở **đĩa vật lý** (Snow Family). Khi mạng đủ và muốn tự động hóa, ta truyền **qua mạng** (DataSync).
+- **"Di chuyển một lần" khác "truy cập liên tục".** DataSync và Snow là để **migrate** (chuyển xong là thôi). Storage Gateway là để **sống chung lâu dài** — on-premises và cloud cùng tồn tại, gateway làm cầu nối thường trực.
+
+---
+
+## 2. Đưa dữ liệu vào AWS: offline vs online
+
+Đây là nhóm trả lời câu hỏi "làm sao chuyển một khối lượng lớn dữ liệu từ on-premises lên AWS". Có hai cách, và ranh giới giữa chúng là một câu hỏi kinh điển của SAA.
+
+### 2.1. AWS Snow Family — chở dữ liệu bằng thiết bị vật lý
+
+**Vấn đề:** Bạn có hàng trăm TB tới hàng PB dữ liệu. Đẩy qua internet sẽ mất nhiều tuần đến nhiều tháng, ngốn băng thông và đắt đỏ. **AWS Snow Family** giải bài toán này theo cách "thô mà hiệu quả": AWS gửi cho bạn một **thiết bị lưu trữ vật lý**, bạn copy dữ liệu vào, gửi trả lại, và AWS nạp dữ liệu thẳng vào S3.
+
+Nếu việc truyền qua mạng mất **hơn khoảng một tuần**, hãy cân nhắc Snow Family thay vì truyền online.
+
+Snow Family có ba "kích cỡ":
+
+- **AWS Snowcone** — thiết bị **nhỏ gọn, bền, di động** (vừa balo), dung lượng **8 TB (HDD)** hoặc **14 TB (SSD)**. Hợp với nơi không gian chật, điều kiện khắc nghiệt. Có thể chuyển dữ liệu **offline** (gửi thiết bị về) hoặc **online** qua chính DataSync (agent được cài sẵn).
+- **AWS Snowball Edge** — "con ngựa thồ" cho migration lớn, có hai biến thể:
+  - **Storage Optimized**: tối đa dung lượng (210TB SSD), dùng để **di chuyển khối lượng lớn**.
+  - **Compute Optimized**: nhiều vCPU/RAM hơn, để chạy **EC2 và Lambda ngay trên thiết bị** — phục vụ <Tooltip content="Edge computing — xử lý dữ liệu ngay tại nơi sinh ra dữ liệu thay vì gửi hết về cloud, hữu ích khi mạng yếu/chập chờn hoặc cần độ trễ thấp">edge computing</Tooltip> ở những nơi mạng yếu.
+  - <Tooltip content="Block storage là khối ổ đĩa thô như EBS; object storage là kho object như S3 (lưu file kèm metadata, truy cập qua API)">Cả block lẫn object storage</Tooltip> đều có trên thiết bị.
+- **AWS Snowmobile** — quy mô **exabyte**: một **xe container 45 foot** chở tới **100 PB** mỗi chuyến. Dùng khi cần di chuyển cả một data center khổng lồ (10+ PB).
+
+Hai use case chính của Snow Family:
+
+- **Data migration:** đưa lượng dữ liệu lớn lên cloud khi mạng không kham nổi — backup lịch sử, kho video, dữ liệu khoa học...
+- **Edge computing:** với Snowcone và Snowball Edge Compute Optimized, bạn **xử lý dữ liệu tại chỗ** (tàu biển, giàn khoan, mỏ, xe quân sự, vùng sâu) — nơi internet chập chờn hoặc không có — rồi mới gửi kết quả/thiết bị về sau.
+
+Snow Family **không nạp trực tiếp** dữ liệu vào <Tooltip content="Lớp lưu trữ S3 giá rất rẻ dành cho dữ liệu archive ít truy cập, đổi lại thời gian lấy ra lâu hơn">S3 Glacier</Tooltip>. Dữ liệu luôn vào **S3 (Standard)** trước, sau đó bạn dùng một **S3 Lifecycle rule** để tự động chuyển nó sang Glacier.
+
+Lý do: dữ liệu sẽ đi vào S3 thông qua phương thức **import**, thay vì sử dụng S3 API như các service khác.
+
+### 2.2. AWS DataSync — đồng bộ dữ liệu qua mạng, có lịch
+
+**Vấn đề:** Mạng của bạn **đủ tốt** để truyền online, nhưng bạn cần một cách **tự động, đáng tin cậy, có lịch** để di chuyển hoặc đồng bộ lượng lớn file — và muốn giữ nguyên metadata, quyền truy cập. **AWS DataSync** là dịch vụ chuyên cho việc đó.
+
+Tính năng cốt lõi:
+
+- **Hai chiều và đa điểm:** chuyển dữ liệu qua giữa on-premises và AWS, giữa các regions/services trong AWS. Phía on-premises, bạn cài một **DataSync agent** (một máy ảo) để đọc dữ liệu qua <Tooltip content="Network File System — giao thức chia sẻ file phổ biến trên Linux/Unix">NFS</Tooltip> hoặc <Tooltip content="Server Message Block — giao thức chia sẻ file của Windows">SMB</Tooltip>.
+- **Đích đa dạng:** S3, EFS, và FSx.
+- **Theo lịch, không real-time:** bạn lên lịch chạy theo **giờ / ngày / tuần**. DataSync không phải công cụ replication thời gian thực — nó là các "đợt đồng bộ" định kỳ.
+- **Giữ nguyên metadata & permissions:** quyền sở hữu file, timestamp, quyền truy cập đều được bảo toàn — quan trọng khi migrate file server thật.
+
+Use case: **di chuyển dữ liệu một lần** (one-time migration) lên cloud, hoặc **đồng bộ định kỳ** cho mục đích backup/archive, replication giữa các region, hoặc dồn dữ liệu từ nhiều file server về một chỗ.
+
+---
+
+## 3. File system chuyên dụng: Amazon FSx
+
+**Vấn đề:** EFS rất tốt, nhưng nó là file system dành cho Linux, truy cập thông qua giao thức NFS - gọi chung là file share. Thực tế bạn có thể cần một file share kiểu **Windows**, một file system **hiệu năng siêu cao cho HPC**, hoặc tương thích với các nền tảng doanh nghiệp như **NetApp ONTAP** hay **OpenZFS**.
+
+**Amazon FSx** là dịch vụ cung cấp các **file system bên thứ ba được AWS quản lý hoàn toàn** để lấp đúng những khoảng trống đó.
+
+FSx có **bốn dòng**, mỗi dòng nhắm một thế giới khác nhau:
+
+### 3.1. FSx for Windows File Server
+
+File system **Windows native** thật sự: dùng giao thức **SMB**, hệ thống file **NTFS**, tích hợp <Tooltip content="Active Directory — dịch vụ thư mục của Microsoft để quản lý người dùng, máy tính và quyền truy cập trong môi trường Windows">Active Directory</Tooltip> để phân quyền người dùng, kèm <Tooltip content="Access Control List — danh sách kiểm soát truy cập, quy định ai được đọc/ghi từng file hay thư mục">ACLs</Tooltip> và **user quotas**. Hỗ trợ các tính năng doanh nghiệp Windows như <Tooltip content="Distributed File System (DFS) Namespaces — gộp nhiều file system thành một không gian tên thống nhất, giúp người dùng truy cập qua một đường dẫn chung dù dữ liệu nằm rải rác">DFS Namespaces</Tooltip> để gom file trải trên nhiều file system.
+
+Những điểm hay được hỏi:
+
+- **Không chỉ cho Windows:** dù là file system Windows, nó **mount được lên cả EC2 Linux**, không riêng EC2 Windows.
+- **Hiệu năng cao:** scale tới **hàng chục GB/s** throughput, **hàng triệu IOPS**, và **hàng trăm PB** dữ liệu.
+- **Hai lựa chọn storage:** **SSD** cho workload nhạy với độ trễ (database, xử lý media, data analytics) và **HDD** cho workload phổ thông, rẻ hơn (home directory, <Tooltip content="Content Management System — hệ quản trị nội dung như WordPress, Drupal">CMS</Tooltip>).
+- **Truy cập từ on-premises:** kết nối được từ hạ tầng on-premises qua <Tooltip content="VPN — đường hầm mã hóa qua internet công cộng để nối mạng on-premises với VPC">VPN</Tooltip> hoặc <Tooltip content="AWS Direct Connect — đường truyền vật lý riêng, ổn định, nối thẳng data center của bạn vào AWS, không đi qua internet">Direct Connect</Tooltip>.
+- **High availability:** có thể cấu hình **Multi-AZ** (trải trên nhiều Availability Zone) để chịu lỗi; dữ liệu được **backup hằng ngày lên S3**.
+
+**Use case:** ứng dụng Windows on-premises cần file share trên cloud.
+
+### 3.2. FSx for Lustre
+
+**Lustre** là một file system **song song, phân tán** (parallel distributed) mã nguồn mở cho tính toán quy mô lớn — tên ghép từ "Linux" + "cluster". FSx for Lustre cho **throughput tới hàng trăm GB/s**, **hàng triệu IOPS**, độ trễ **sub-millisecond** — sinh ra cho các workload <Tooltip content="High Performance Computing — tính toán hiệu năng cao, dùng nhiều máy chạy song song cho mô phỏng khoa học, phân tích lớn, training ML">HPC</Tooltip>.
+
+Những điểm hay được hỏi:
+
+- **Hai lựa chọn storage:** **SSD** cho workload **độ trễ thấp, nhiều IOPS**, thao tác file **nhỏ & ngẫu nhiên**; **HDD** cho workload **thiên về throughput**, thao tác file **lớn & tuần tự**.
+- **Tích hợp liền mạch với S3:** có thể **đọc S3 như một file system** (qua FSx) và **ghi kết quả tính toán trở lại S3** — rất hợp pattern "lấy dữ liệu thô từ S3, xử lý tốc độ cao trên Lustre, đẩy output về S3".
+- **Truy cập từ on-premises:** dùng được từ server on-premises qua <Tooltip content="VPN — đường hầm mã hóa qua internet công cộng để nối mạng on-premises với VPC">VPN</Tooltip> hoặc <Tooltip content="AWS Direct Connect — đường truyền vật lý riêng, ổn định, nối thẳng data center của bạn vào AWS, không đi qua internet">Direct Connect</Tooltip>.
+
+**Use case:** Machine Learning, HPC, xử lý video, mô hình tài chính, <Tooltip content="Electronic Design Automation — phần mềm thiết kế và mô phỏng vi mạch/chip, đòi hỏi I/O rất lớn">Electronic Design Automation (EDA)</Tooltip> — nói chung là các workload cần tốc độ I/O cực cao trên tập dữ liệu lớn.
+
+### 3.3. FSx for NetApp ONTAP
+
+**Vấn đề**: Mang workload ONTAP lên cloud.
+
+<Tooltip content="NetApp ONTAP — hệ điều hành lưu trữ doanh nghiệp rất phổ biến, nhiều công ty đang chạy on-premises và muốn mang nguyên workload lên cloud">NetApp ONTAP</Tooltip> là một nền tảng storage doanh nghiệp dùng rộng rãi. FSx for NetApp ONTAP là phiên bản managed của nó trên AWS, nổi bật vì **đa giao thức**: hỗ trợ cùng lúc **NFS, SMB và <Tooltip content="iSCSI — giao thức cho phép truy cập ổ đĩa khối (block) qua mạng IP, như thể đó là ổ cứng gắn trực tiếp">iSCSI</Tooltip>**. Nhờ đó nó là dòng FSx **tương thích rộng nhất**.
+
+Những điểm hay được hỏi:
+
+- **Tương thích gần như mọi nền tảng:** Linux, Windows, macOS, VMware Cloud on AWS, Amazon WorkSpaces & AppStream 2.0, và Amazon EC2/ECS/EKS.
+- **Dung lượng tự co giãn:** storage tự động **tăng hoặc giảm** theo nhu cầu, không phải cấp phát trước.
+- **Tính năng ONTAP đầy đủ:** snapshot, replication, compression, deduplication, và chi phí thấp.
+- **Point-in-time cloning:** tạo một bản sao tức thời tại một thời điểm — rất hữu ích để **test workload mới** trên dữ liệu thật mà không đụng tới bản gốc.
+
+**Use case:** di chuyển các workload đang chạy NetApp ONTAP hoặc <Tooltip content="Network Attached Storage — thiết bị lưu trữ gắn mạng, phục vụ file qua NFS/SMB cho nhiều máy trong mạng nội bộ">NAS</Tooltip> on-premises lên AWS **mà gần như không phải đổi gì**, hoặc cần một file system làm việc tốt với cả Linux lẫn Windows.
+
+### 3.4. FSx for OpenZFS
+
+**Vấn đề**: Mang workload ZFS lên cloud.
+
+Phiên bản managed của file system **OpenZFS** trên AWS, tương thích **NFS (v3, v4, v4.1, v4.2)**. Cũng tương thích rộng như ONTAP (Linux, Windows, macOS, VMware Cloud on AWS, WorkSpaces & AppStream 2.0, EC2/ECS/EKS).
+
+Những điểm hay được hỏi:
+
+- **Hiệu năng rất cao:** tới **1.000.000 IOPS** với độ trễ **dưới 0,5 ms**.
+- **Tính năng:** snapshot, compression, chi phí thấp.
+- **Point-in-time cloning:** giống ONTAP — tạo bản sao tức thời để **test workload mới** mà không đụng dữ liệu gốc.
+
+**Use case:** di chuyển các workload đang chạy **ZFS** lên AWS mà không cần thay đổi ứng dụng.
+
+> **Phân biệt ONTAP vs OpenZFS:** cả hai đều cho snapshot, compression, low-cost và point-in-time cloning. Khác biệt cốt lõi cho phòng thi: **ONTAP đa giao thức (NFS/SMB/iSCSI) + có deduplication**, hợp khi đang dùng NetApp hoặc cần cả Windows lẫn Linux; **OpenZFS chỉ NFS**, hợp khi đang chạy ZFS và workload thuần Linux/Unix.
+
+---
+
+## 4. Cầu nối hybrid: AWS Storage Gateway
+
+**Vấn đề:** Không phải ai cũng "all-in" lên cloud ngay. Rất nhiều doanh nghiệp vẫn chạy hệ thống **on-premises** và sẽ còn chạy lâu dài, nhưng muốn **tận dụng storage AWS** cho backup, disaster recovery, mở rộng dung lượng, hoặc đưa dữ liệu nguội lên cloud — **mà không phải viết lại ứng dụng**.
+
+**AWS Storage Gateway** là cầu nối hybrid thường trực giữa hai thế giới đó: ứng dụng on-premises vẫn nói các giao thức storage quen thuộc (NFS, SMB, iSCSI, tape), còn dữ liệu thực chất nằm trên S3, Glacier hay EBS snapshot ở phía AWS.
+
+Bạn sử dụng gateway thông qua việc cài đặt Gateway Appliance trên on-premises server của bạn. Nó đóng vài là 1 agent, hoạt động giữa on-premises và AWS.
+
+> **Lưu ý:** Ngoài bản phần mềm (cài trên máy ảo của bạn), Storage Gateway còn có dạng **hardware appliance** vật lý cho các site không tiện chạy máy ảo.
+
+Có **bốn loại gateway**, phân theo "ứng dụng on-premises của bạn đang nói thứ tiếng nào". Bức tranh tổng thể như sau: ứng dụng on-premises nói giao thức quen thuộc với gateway, gateway mã hóa và đẩy dữ liệu qua **internet hoặc Direct Connect** lên các kho lưu trữ AWS tương ứng:
+
+<ExcalidrawDiagram
+  src="/aws-storage-gateway-architecture.excalidraw"
+  alt="AWS Storage Gateway overview — On-premises: User/group file shares connect to File Gateway via NFS/SMB, Application Server to Volume Gateway via iSCSI, Backup Application to Tape Gateway via iSCSI VTL (each gateway keeps a local cache). Traffic is encrypted in transit over Internet or Direct Connect to the central Storage Gateway, then to AWS Cloud: File Gateway maps to Amazon S3 (any class including Glacier), Volume Gateway maps to Amazon S3 backed by AWS EBS snapshots, Tape Gateway maps to Amazon S3 Tape Library archived to Glacier and Glacier Deep Archive"
+/>
+
+### 4.1. Amazon S3 File Gateway
+
+Phơi bày một bucket S3 ra dưới dạng **file share NFS/SMB**. Ứng dụng on-premises đọc/ghi file như bình thường, nhưng bên dưới mỗi file là một **object trong S3**; gateway giao tiếp với AWS qua **HTTPS**. Những điểm cần nắm:
+
+- **Cache cục bộ:** gateway giữ **dữ liệu mới dùng gần đây** (most recently used) trong cache để truy cập nhanh, phần còn lại nằm trên S3.
+- **Hỗ trợ nhiều storage class:** S3 Standard, S3 Standard-IA, S3 One Zone-IA, S3 Intelligent-Tiering — và **chuyển sang S3 Glacier qua Lifecycle policy** (đúng mô hình bạn thấy ở phần Snow Family: muốn vào Glacier thì đi qua S3 + lifecycle).
+- **Phân quyền:** mỗi File Gateway truy cập bucket bằng một **IAM role** riêng; giao thức **SMB tích hợp Active Directory** để xác thực người dùng (như môi trường Windows thật).
+
+**Use case:** đưa file của ứng dụng on-premises lên S3 một cách trong suốt — kho tài liệu, dữ liệu phân tích, tiered storage.
+
+### 4.2. Amazon FSx File Gateway
+
+Cho phép truy cập **FSx for Windows File Server** từ on-premises với một **bản cache cục bộ** cho các file hay dùng — giúp người dùng tại văn phòng truy cập file share trên cloud với độ trễ thấp như đang ở local.
+
+**Use case:** chi nhánh/văn phòng cần truy cập nhanh tới file share Windows tập trung đặt trên AWS.
+
+### 4.3. Volume Gateway
+
+Cung cấp **block storage** (ổ đĩa khối) qua giao thức **iSCSI**, được sao lưu lên AWS dưới dạng **EBS snapshot**. Có hai chế độ:
+
+- **Cached volumes:** dữ liệu **chính nằm trên S3**, chỉ giữ phần hay dùng ở cache local. Tiết kiệm dung lượng on-premises.
+- **Stored volumes:** dữ liệu **chính nằm on-premises** (toàn bộ), backup **bất đồng bộ** lên AWS. Truy cập độ trễ thấp, AWS là bản dự phòng.
+
+**Use case:** backup các volume on-premises lên cloud, hoặc làm disaster recovery cho dữ liệu khối.
+
+### 4.4. Tape Gateway
+
+Nhiều doanh nghiệp vẫn có quy trình backup bằng **băng từ (tape)**. Tape Gateway giả lập một <Tooltip content="Virtual Tape Library — thư viện băng từ ảo, mô phỏng các ổ băng và thư viện băng để phần mềm backup cũ tưởng như đang ghi ra băng thật">Virtual Tape Library (VTL)</Tooltip>: phần mềm backup hiện có cứ ghi ra "băng" như cũ, nhưng thực chất dữ liệu được lưu vào **S3 và Glacier**. **Use case:** thay thế hạ tầng băng từ vật lý đắt đỏ bằng cloud, **không cần đổi phần mềm backup**.
+
+---
+
+## 5. Truyền file qua giao thức: AWS Transfer Family
+
+**Vấn đề:** Hệ sinh thái cũ của bạn (hoặc của đối tác, khách hàng) vẫn trao đổi dữ liệu qua **FTP**. Bạn muốn dữ liệu đó nằm trong S3 hoặc EFS để xử lý tiếp, nhưng **không muốn tự dựng và bảo trì một FTP server** (vá lỗi, scale, đảm bảo uptime). **AWS Transfer Family** là dịch vụ **managed** đặt một "mặt tiền" giao thức truyền file trước S3/EFS.
+
+Tính năng cốt lõi:
+
+- Hỗ trợ ba giao thức: **SFTP** (<Tooltip content="SSH File Transfer Protocol — truyền file an toàn qua kênh SSH được mã hóa">SSH File Transfer Protocol</Tooltip>), **FTPS** (<Tooltip content="FTP over SSL/TLS — FTP có thêm lớp mã hóa">FTP có mã hóa TLS</Tooltip>), và **FTP** (không mã hóa, chỉ dùng trong mạng nội bộ).
+- Lưu trữ phía sau là **Amazon S3** hoặc **Amazon EFS**.
+- **Tích hợp xác thực** với hệ thống danh tính sẵn có: Microsoft Active Directory, LDAP, **Amazon Cognito**, hoặc custom (qua Lambda).
+- Hạ tầng được AWS quản lý, **tự scale**, tính phí theo endpoint dựng lên (theo giờ) cộng lượng dữ liệu truyền.
+
+**Use case:** nhận/gửi file với đối tác qua SFTP mà đích đến là S3 (ví dụ đối tác đẩy báo cáo hằng đêm vào bucket), hiện đại hóa các quy trình truyền file dựa trên FTP **mà không phải đổi phía client**.
+
+---
+
+## 6. Tổng hợp: đặt nhóm extras vào bức tranh storage AWS
+
+Để chọn đúng, hãy lùi lại nhìn toàn cảnh. Mọi lựa chọn storage trên AWS đều rơi vào một trong bốn **bản chất**:
+
+- **Block storage** — ổ đĩa khối thô gắn vào một máy chủ: **EBS** (bền, theo từng AZ).
+- **Instance Store** - đĩa vật lý gắn liền EC2, **ephemeral** — mất khi instance dừng, nhưng cực nhanh.
+- **File storage** — file share truy cập qua NFS/SMB: **EFS** (NFS cho Linux, multi-AZ), **FSx** (Windows/Lustre/ONTAP/ZFS).
+- **Object storage** — kho object truy cập qua API: **S3**, và lớp archive **Glacier**.
+- **Hybrid** — cầu nối giữa on-premises và cloud: **Storage Gateway**.
+
+Còn **Snow Family, DataSync, Transfer Family** không phải "nơi lưu trữ" — chúng là **công cụ đưa dữ liệu vào/ra** các nơi lưu trữ trên.
+
+| Dịch vụ              | Loại        | Phạm vi / giao thức              | Use case tiêu biểu                                        |
+| -------------------- | ----------- | -------------------------------- | --------------------------------------------------------- |
+| **EBS**              | Block       | Một AZ, gắn vào EC2              | Ổ đĩa cho database, boot volume                            |
+| **Instance Store**   | Block       | Ephemeral, gắn liền EC2          | Cache/scratch tốc độ cao, chấp nhận mất dữ liệu           |
+| **EFS**              | File (NFS)  | Multi-AZ, Linux                  | File share chia sẻ giữa nhiều EC2 Linux                    |
+| **FSx**              | File        | SMB/NFS/Lustre/iSCSI tùy dòng    | Windows share, HPC/ML, workload ONTAP/ZFS                 |
+| **S3**               | Object      | Region, qua API/HTTP             | Lưu trữ object phổ quát, data lake, static asset          |
+| **Glacier**          | Object      | Region, archive                  | Lưu trữ lâu dài, ít truy cập, giá rẻ                      |
+| **Storage Gateway**  | Hybrid      | NFS/SMB/iSCSI/VTL                | On-prem dùng storage AWS (backup, DR, tiered)             |
+| **Snow Family**      | Di chuyển   | Thiết bị vật lý (offline)        | Migrate dữ liệu cực lớn, edge computing                   |
+| **DataSync**         | Di chuyển   | Qua mạng (online), có lịch       | Migrate/đồng bộ định kỳ on-premises ↔ AWS, AWS ↔ AWS          |
+| **Transfer Family**  | Truyền file | SFTP/FTPS/FTP → S3/EFS           | Nhận/gửi file qua FTP với đối tác, lưu vào S3/EFS          |
+
+Để hiểu sâu hơn về object storage và cách chọn lớp lưu trữ trong S3, xem thêm [S3 Storage Classes: Chọn đúng class cho dữ liệu của bạn](/vi/posts/s3-storage-classes).
+
+---
+
+## Kết: năm bài toán, năm dịch vụ
+
+Quay lại năm câu hỏi ở đầu bài. Giờ bạn có bản đồ để xử lý từng cái:
+
+- "500 TB cần lên S3, mạng quá chậm" → **Snow Family** (chở thiết bị vật lý).
+- "Cần file share kiểu Windows" → **FSx for Windows File Server**.
+- "Cần file system throughput cực cao cho HPC/ML" → **FSx for Lustre**.
+- "Vẫn chạy on-premises nhưng muốn dùng storage AWS" → **Storage Gateway**.
+- "Đối tác chỉ gửi file qua SFTP, muốn rơi vào S3" → **Transfer Family**.
+
+Những cặp dễ nhầm — ghim lại cho chắc trước khi vào phòng thi:
+
+| Hỏi gì                                                  | Chọn gì                                                       |
+| ------------------------------------------------------- | ------------------------------------------------------------- |
+| Dữ liệu **khổng lồ, mạng yếu** → migrate                | **Snow Family** (offline) — không phải DataSync               |
+| Đồng bộ/migrate **qua mạng, có lịch**                   | **DataSync** (online) — không phải Snow                       |
+| **Di chuyển một lần** (xong là thôi)                    | **DataSync / Snow**                                           |
+| **Truy cập hybrid liên tục** (on-premises + cloud sống chung) | **Storage Gateway** — không phải DataSync                    |
+| File share **Linux NFS**                                | **EFS**                                                       |
+| File share **Windows / HPC / ONTAP / ZFS**              | **FSx** (đúng dòng tương ứng)                                 |
+| Nhận file qua **FTP/SFTP** vào S3/EFS                   | **Transfer Family**                                           |
+| Backup **tape** lên cloud không đổi phần mềm            | **Tape Gateway** (loại của Storage Gateway)                   |
+
+Vài điều cốt lõi cần mang theo:
+
+- **Snow vs DataSync = vật lý vs mạng.** Ngưỡng quyết định kinh điển: truyền online mất **hơn ~1 tuần** thì nghiêng về Snow.
+- **DataSync/Snow là migrate (một lần / có lịch); Storage Gateway là hybrid sống chung lâu dài.** Đừng lẫn "chuyển xong là thôi" với "cầu nối thường trực".
+- **Snow không nạp thẳng vào Glacier:** luôn vào **S3 trước**, rồi Lifecycle rule chuyển sang Glacier.
+- **EFS là NFS-Linux; FSx là phần còn lại** (Windows-SMB, Lustre-HPC, ONTAP-đa giao thức, OpenZFS-ZFS).
+- **Storage Gateway có 4 loại** theo "tiếng nói" của app on-premises: **S3 File** (NFS/SMB→S3), **FSx File** (truy cập FSx Windows), **Volume** (iSCSI block), **Tape** (VTL→S3/Glacier).
+- **Transfer Family = mặt tiền FTP/SFTP/FTPS managed cho S3/EFS** — bạn không phải tự dựng FTP server.
