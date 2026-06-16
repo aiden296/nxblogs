@@ -77,10 +77,17 @@ Lý do: dữ liệu sẽ đi vào S3 thông qua phương thức import, thay vì
 
 Tính năng cốt lõi:
 
-- **Hai chiều và đa điểm:** chuyển dữ liệu qua giữa on-premises và AWS, giữa các regions/services trong AWS. Phía on-premises, bạn cài một DataSync agent (một máy ảo) để đọc dữ liệu qua <Tooltip content="Network File System — giao thức chia sẻ file phổ biến trên Linux/Unix">NFS</Tooltip> hoặc <Tooltip content="Server Message Block — giao thức chia sẻ file của Windows">SMB</Tooltip>.
+- **Hai chiều và đa điểm:** chuyển dữ liệu qua giữa on-premises và AWS, giữa các regions/storage services trong AWS. Phía on-premises, bạn cài một DataSync agent (một máy ảo) để đọc dữ liệu qua <Tooltip content="Network File System — giao thức chia sẻ file phổ biến trên Linux/Unix">NFS</Tooltip> hoặc <Tooltip content="Server Message Block — giao thức chia sẻ file của Windows">SMB</Tooltip>.
 - **Đích đa dạng:** S3, EFS, và FSx.
 - **Theo lịch, không real-time:** bạn lên lịch chạy theo giờ / ngày / tuần. DataSync không phải công cụ replication thời gian thực — nó là các "đợt đồng bộ" định kỳ.
 - **Giữ nguyên metadata & permissions:** quyền sở hữu file, timestamp, quyền truy cập đều được bảo toàn — quan trọng khi migrate file server thật.
+
+Toàn cảnh kiến trúc: agent ở on-premises đọc dữ liệu qua NFS/SMB, mã hóa rồi truyền qua <Tooltip content="Transport Layer Security — giao thức mã hóa dữ liệu trên đường truyền, đảm bảo dữ liệu không bị đọc trộm khi đi qua internet">TLS</Tooltip> tới dịch vụ DataSync trong Region, rồi ghi xuống các đích lưu trữ — S3 (mọi storage class), EFS, hoặc FSx:
+
+<ExcalidrawDiagram
+  src="/aws-datasync-architecture.excalidraw"
+  alt="AWS DataSync architecture. On the left, an On-Premises group contains an NFS or SMB server connected to an AWS DataSync agent over NFS or SMB. The agent transfers data over an encrypted TLS connection to the AWS DataSync service inside an AWS Region. From there, DataSync writes to AWS Storage Resources: Amazon S3 across storage classes (S3 Standard, S3 Intelligent-Tiering, S3 Standard-IA, S3 One Zone-IA, S3 Glacier, S3 Glacier Deep Archive), Amazon EFS, and Amazon FSx. Arrows are bidirectional, showing DataSync can move data in either direction."
+/>
 
 Use case: di chuyển dữ liệu một lần (one-time migration) lên cloud, hoặc đồng bộ định kỳ cho mục đích backup/archive, replication giữa các region, hoặc dồn dữ liệu từ nhiều file server về một chỗ.
 
@@ -197,7 +204,9 @@ Cung cấp **block storage** (ổ đĩa khối) qua giao thức iSCSI, được 
 
 ### 4.4. Tape Gateway
 
-Nhiều doanh nghiệp vẫn có quy trình backup bằng **băng từ (tape)**. Tape Gateway giả lập một <Tooltip content="Virtual Tape Library — thư viện băng từ ảo, mô phỏng các ổ băng và thư viện băng để phần mềm backup cũ tưởng như đang ghi ra băng thật">Virtual Tape Library (VTL)</Tooltip>: phần mềm backup hiện có cứ ghi ra "băng" như cũ, nhưng thực chất dữ liệu được lưu vào S3 và Glacier. **Use case:** thay thế hạ tầng băng từ vật lý đắt đỏ bằng cloud, không cần đổi phần mềm backup.
+Nhiều doanh nghiệp vẫn có quy trình backup bằng **băng từ (tape)**. Tape Gateway giả lập một <Tooltip content="Virtual Tape Library — thư viện băng từ ảo, mô phỏng các ổ băng và thư viện băng để phần mềm backup cũ tưởng như đang ghi ra băng thật">Virtual Tape Library (VTL)</Tooltip>: phần mềm backup hiện có cứ ghi ra "băng" như cũ, nhưng thực chất dữ liệu được lưu vào S3 và Glacier.
+
+**Use case:** thay thế hạ tầng băng từ vật lý đắt đỏ bằng cloud, không cần đổi phần mềm backup.
 
 ---
 

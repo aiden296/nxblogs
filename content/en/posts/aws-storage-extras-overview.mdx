@@ -77,10 +77,17 @@ The reason: the data enters S3 through an import process, rather than using the 
 
 Core features:
 
-- **Bidirectional and multi-point:** moves data between on-premises and AWS, and between regions/services within AWS. On the on-premises side, you install a DataSync agent (a virtual machine) to read data over <Tooltip content="Network File System — a popular file-sharing protocol on Linux/Unix">NFS</Tooltip> or <Tooltip content="Server Message Block — the Windows file-sharing protocol">SMB</Tooltip>.
+- **Bidirectional and multi-point:** moves data between on-premises and AWS, and between regions/storage services within AWS. On the on-premises side, you install a DataSync agent (a virtual machine) to read data over <Tooltip content="Network File System — a popular file-sharing protocol on Linux/Unix">NFS</Tooltip> or <Tooltip content="Server Message Block — the Windows file-sharing protocol">SMB</Tooltip>.
 - **Diverse targets:** S3, EFS, and FSx.
 - **Scheduled, not real-time:** you schedule runs by the hour / day / week. DataSync is not a real-time replication tool — it runs periodic "sync passes."
 - **Preserves metadata & permissions:** file ownership, timestamps, and access permissions are all retained — important when migrating a real file server.
+
+The big picture: the on-premises agent reads data over NFS/SMB, encrypts it, and ships it over <Tooltip content="Transport Layer Security — the protocol that encrypts data in transit so it cannot be read while crossing the internet">TLS</Tooltip> to the DataSync service inside the Region, which writes it down to the storage targets — S3 (any storage class), EFS, or FSx:
+
+<ExcalidrawDiagram
+  src="/aws-datasync-architecture.excalidraw"
+  alt="AWS DataSync architecture. On the left, an On-Premises group contains an NFS or SMB server connected to an AWS DataSync agent over NFS or SMB. The agent transfers data over an encrypted TLS connection to the AWS DataSync service inside an AWS Region. From there, DataSync writes to AWS Storage Resources: Amazon S3 across storage classes (S3 Standard, S3 Intelligent-Tiering, S3 Standard-IA, S3 One Zone-IA, S3 Glacier, S3 Glacier Deep Archive), Amazon EFS, and Amazon FSx. Arrows are bidirectional, showing DataSync can move data in either direction."
+/>
 
 Use cases: a one-time migration to the cloud, or periodic sync for backup/archive, cross-region replication, or consolidating data from many file servers into one place.
 
@@ -197,7 +204,9 @@ Provides **block storage** (raw disk volumes) over the iSCSI protocol, backed up
 
 ### 4.4. Tape Gateway
 
-Many enterprises still have **tape**-based backup processes. Tape Gateway emulates a <Tooltip content="Virtual Tape Library — a virtual tape library that simulates tape drives and libraries so legacy backup software thinks it is writing to real tape">Virtual Tape Library (VTL)</Tooltip>: the existing backup software keeps writing to "tape" as before, but the data is actually stored in S3 and Glacier. **Use case:** replace expensive physical tape infrastructure with the cloud, without changing the backup software.
+Many enterprises still have **tape**-based backup processes. Tape Gateway emulates a <Tooltip content="Virtual Tape Library — a virtual tape library that simulates tape drives and libraries so legacy backup software thinks it is writing to real tape">Virtual Tape Library (VTL)</Tooltip>: the existing backup software keeps writing to "tape" as before, but the data is actually stored in S3 and Glacier.
+
+**Use case:** replace expensive physical tape infrastructure with the cloud, without changing the backup software.
 
 ---
 
