@@ -220,6 +220,19 @@ When you need to bring a large block of data (files/objects) into AWS, the core 
 - It runs on a schedule (hourly/daily/weekly) and incrementally — after the first run, it only transfers what changed.
 - It preserves metadata (permissions, timestamps...) — important when migrating file systems.
 
+**Performance lives in the Agent.** DataSync's throughput (transfer speed) depends heavily on the resources you give the Agent — the software that runs on the on-premises side, typically deployed on a <Tooltip content="Virtualization software that runs multiple virtual machines on a single physical host, e.g. VMware ESXi, Microsoft Hyper-V, or Linux KVM">hypervisor</Tooltip>. Starve the Agent of resources and transfers stay slow no matter how fast the network is. Three things to provision generously:
+
+- **CPU:** handles compression, encryption, and orchestrating the transfer.
+- **RAM (memory):** processes many files in parallel.
+- **Network I/O:** enough bandwidth to push data out fast.
+
+Beyond the Agent's resources, there are two **task**-level settings the exam likes to probe:
+
+- **Bandwidth throttling:** caps how much bandwidth DataSync may use, so it doesn't swallow the whole link and starve other running applications.
+- **Data verification:** checks integrity — making sure the data at the destination matches the source exactly, with no corruption during transfer.
+
+> **Exam tip:** "DataSync is slow / need higher throughput" → give the Agent more resources (CPU/RAM/network). "Must not congest the network for other apps" → bandwidth throttling. "Ensure the destination data matches the source / integrity" → enable data verification.
+
 > **Note:** DataSync does **not** sync continuously in real time; it runs on a schedule. If you need a permanent hybrid bridge between on-premises and the cloud, that's a job for Storage Gateway, not DataSync.
 
 ### 8.2. AWS Snow Family — offline transfer via physical devices
