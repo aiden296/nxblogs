@@ -1,0 +1,387 @@
+---
+title: 'AWS Caching Strategies: What Problem Each Pattern Solves for the SAA Exam'
+date: '2026-06-18'
+tags: ['Devops', 'AWS', 'SAA', 'Cache']
+description: 'A caching map for the SAA exam — Cache-Aside, Read-Through, Write-Through, Write-Back, Write-Around, TTL and eviction, mapped directly onto ElastiCache, DAX, CloudFront, and API Gateway.'
+enableComment: true
+---
+
+# AWS Caching Strategies: What Problem Each Pattern Solves for the SAA Exam
+
+You're running a product detail page for an e-commerce store, with the data living on RDS. A flash sale kicks off and traffic jumps 20x within minutes. Database CPU climbs to 100%, every query queues up, and p99 latency leaps from 80ms to 4 seconds. The page is basically frozen.
+
+So you do the "obvious" thing: drop an ElastiCache layer in front of the database. Latency drops immediately, the database can breathe. But then new trouble shows up. A product's price was just discounted for the sale, yet customers keep seeing the old price for 10 minutes — the cache is serving stale data. Worse, at midnight a cache node gets replaced, a whole batch of keys vanishes at once, and all the traffic slams straight into the database as if there were never a cache at all.
+
+The root of the problem: "add a cache" sounds like one decision, but it's really **four** separate ones — how to read (read strategy), how to write (write strategy), how long data lives (TTL), and what to drop when full (eviction). Get any of them wrong and you trade one problem (slow) for another (wrong data, or a mass outage).
+
+The SAA exam tests exactly this skill: read a scenario, recognize which caching strategy it needs, and map that strategy onto the right AWS service. This post is that map — what problem each strategy solves, and where it "shows up" in ElastiCache, DAX, CloudFront, and API Gateway.
+
+<ExcalidrawDiagram
+  src="/aws-caching-strategies-overview.excalidraw"
+  alt="AWS caching layers — CloudFront (edge cache), API Gateway (API cache), ElastiCache (Lazy Loading + Write-Through) with RDS/Aurora, and DAX with DynamoDB"
+/>
+
+> This post focuses on the **AWS-service angle for the SAA exam**. If you want to go deep on the general caching theory (consistency, the classic traps, scaling), read the Cache Handbook series: [Caching fundamentals](/posts/cache-fundamentals), [Cache Consistency](/posts/cache-consistency), [6 classic traps](/posts/cache-pitfalls), and [Cache Stampede](/posts/cache-stampede).
+
+---
+
+## 1. Why "add a cache" isn't one decision
+
+First, a clear definition. A **cache** is a fast intermediate store that keeps a copy of data so that later reads don't have to touch the slower source of truth. A cache doesn't create new data — it just holds a copy of something that already exists somewhere (a database, an API, a disk).
+
+When a read finds the data in the cache, we call it a <Tooltip content="Cache hit — the request finds the data already in the cache and never touches the source of truth">cache hit</Tooltip>. When it doesn't, that's a <Tooltip content="Cache miss — the data isn't in the cache, so you must go down to the source to fetch it and (usually) repopulate the cache">cache miss</Tooltip>, and you pay for it: one trip down to the cache (a miss), one trip to the database, then one trip back up to write the cache. Three trips for a single miss. That's why a cache only truly pays off when the hit rate is high enough.
+
+A complete caching system has to answer four questions — and this is also the lens for reading every SAA question about caching:
+
+- **Read strategy** — on a read, who is responsible for loading data into the cache on a miss?
+- **Write strategy** — when data changes, how is the cache updated so it doesn't serve the old copy?
+- **Expiration (TTL)** — how long is a copy allowed to "live" in the cache before it's considered stale?
+- **Eviction** — when the cache runs out of memory, which key do you drop to make room?
+
+The four sections below dissect each question in turn, then map them onto specific AWS services.
+
+---
+
+## 2. Read strategies — how data gets into the cache
+
+There are two approaches for the read path, differing in **who** loads data into the cache on a miss: the application does it, or the cache layer does it.
+
+### 2.1. Cache-Aside (Lazy Loading)
+
+**Cache-Aside** is the strategy where the application sits in the middle, checks the cache itself first, and only loads data into the cache when a read misses. The cache only holds what has actually been requested at least once — which is why it's also called **Lazy Loading**, and this is exactly the term AWS uses in the ElastiCache documentation.
+
+The read flow:
+
+<ExcalidrawDiagram
+  src="/aws-caching-strategies-lazy-loading.excalidraw"
+  alt="Cache-Aside / Lazy Loading flow — the application reads the cache, and on a miss queries the database then writes the result back into the cache"
+/>
+
+```ts
+import Redis from 'ioredis'
+import { getProductFromDb } from './db'
+
+const redis = new Redis(process.env.ELASTICACHE_ENDPOINT)
+
+async function getProduct(id: string) {
+  const cached = await redis.get(`product:${id}`)
+
+  if (cached) {
+    return JSON.parse(cached)
+  }
+
+  const product = await getProductFromDb(id)
+
+  await redis.set(`product:${id}`, JSON.stringify(product), 'EX', 300)
+
+  return product
+}
+```
+
+The problem it solves: don't waste cache memory on data nobody reads. The cache only "warms up" with exactly what users actually need. Another big benefit — if the cache node dies, the system keeps working (just slower), because every miss automatically falls through to the database. Cache-Aside is therefore very resilient to node failure.
+
+The price has two faces. First is the **cache miss penalty**: every miss costs three trips, and those misses can create noticeable latency for the first user. Second is stale data: because the cache is only written on a miss, it has no idea the database just changed — exactly the stale-price scene from the opening. This is why Cache-Aside almost always has to be paired with a TTL or a write strategy.
+
+When writing data with Cache-Aside, the canonical choice is to **delete the key** rather than overwrite it, so the next read repopulates the latest version from the database:
+
+```ts
+async function updateProduct(id: string, data: Product) {
+  await saveProductToDb(id, data)
+
+  await redis.del(`product:${id}`)
+}
+```
+
+Why delete rather than overwrite, and the subtle edge cases around operation ordering (Zombie reader, replication lag), are analyzed in depth in [Cache Consistency](/posts/cache-consistency) — here we only need the conclusion: with Cache-Aside, a write is a cache delete.
+
+### 2.2. Read-Through
+
+**Read-Through** is the strategy where the application talks only to the cache, and loading data from the database on a miss is handled transparently by the cache layer itself (a library or a service). The application no longer writes the "on miss, query then set" logic.
+
+The core difference from Cache-Aside is **who loads the cache**: with Cache-Aside the application loads it (the miss logic lives in your code); with Read-Through the cache layer loads it (the miss logic lives inside the cache). To the end user the effect is nearly the same, but Read-Through centralizes the logic in one place and reduces the chance that every service implements it a little differently.
+
+In the AWS world, **ElastiCache does not do Read-Through for you** — you have to write Cache-Aside in your application. The service that embodies Read-Through (and Write-Through too) transparently is **DAX** for DynamoDB: the application calls the familiar DynamoDB API but points at the DAX endpoint, and DAX handles reading down to DynamoDB on a miss. We'll come back to DAX in section 6.4.
+
+---
+
+## 3. Write strategies — keeping the cache from lying
+
+Read strategy decides how the cache gets loaded; write strategy decides how the cache is handled when data changes so it doesn't serve the old copy. There are three approaches, each optimizing for a different trade-off.
+
+<ExcalidrawDiagram
+  src="/aws-caching-strategies-write-strategies.excalidraw"
+  alt="The three write strategies compared — Write-Through (write to both synchronously), Write-Back (write cache first, flush to DB later), Write-Around (write straight to DB, skip the cache)"
+/>
+
+### 3.1. Write-Through
+
+**Write-Through** is the strategy where every write updates the cache and the database at the same time, synchronously — the operation is only considered successful once both have been written.
+
+```ts
+async function updateProduct(id: string, data: Product) {
+  await saveProductToDb(id, data)
+  await redis.set(`product:${id}`, JSON.stringify(data), 'EX', 300)
+  return data
+}
+```
+
+The problem it solves: stale data. Because the cache is updated on every write, a read immediately afterward always sees the latest version. This is the key difference from Lazy Loading, which lets the cache "drift" away from the database between misses.
+
+In return there are three downsides. One is the **write penalty**: every write costs two trips (cache and database), adding latency to the write path. Two is the cache bloating with data nobody reads — because we write everything to the cache, including things that will never be queried again. Three is the "missing data" problem: right after creating a new cache node (or one being replaced), the cache is empty, and data that was only written in the past won't be in the cache until the next write. Because of the second and third reasons, AWS recommends **combining** Write-Through with Lazy Loading and adding a TTL, rather than using it alone.
+
+### 3.2. Write-Back (Write-Behind)
+
+**Write-Back** (or **Write-Behind**) is the strategy where the application writes to the cache first and considers itself done immediately, while pushing the data down to the database asynchronously afterward (in batches, on a schedule, or when idle).
+
+The problem it solves: an extremely fast write path under very high write volume. Because the user only waits for the in-memory write (the cache), write latency is nearly instant, and many writes can be coalesced into fewer database writes. This is a familiar mechanism inside databases (for example, <Tooltip content="Write-ahead log / buffer — a mechanism that buffers writes in memory then flushes them to disk in batches, making writes fast while staying durable">Postgres's write buffer</Tooltip>), where durability is protected by dedicated techniques.
+
+The fatal downside is the **risk of data loss**: if the cache dies before it can flush to the database, the unflushed data is gone. Because of this trade-off, **no AWS cache service offers managed write-back to your database** — it's an application-layer pattern and rarely the answer on the SAA exam. You need to recognize the name so you can rule it out when the question stresses "no data loss."
+
+### 3.3. Write-Around
+
+**Write-Around** is the strategy where data is written straight to the database and skips the cache entirely; the cache is only populated later via the read path (Lazy Loading) if that data is actually read.
+
+The problem it solves: avoiding "polluting" the cache with write-heavy, read-rarely data. Think of event logs or sensor data: written continuously but rarely read back right away. With Write-Through, every write stuffs something useless into the cache, pushing the genuinely hot keys out (cache churn). Write-Around avoids that by letting the cache hold only what gets read.
+
+In return, freshly written data causes one cache miss on its first read — acceptable if that data is rarely read right after being written.
+
+---
+
+## 4. TTL & Expiration — putting an expiry date on the copy
+
+Most of the strategies above share one weakness: the cache can drift away from the database. **TTL** (Time To Live) is the universal patch for that weakness — it attaches a "best-before" time, in seconds, to each cache entry; once it expires, the entry is considered invalid and the next read has to go down to the source for a fresh copy.
+
+TTL turns the question "how do I keep the cache absolutely correct" (very hard) into "how much staleness can I tolerate" (easy to answer from the business side). A product catalog might tolerate a 5-minute TTL; an exchange-rate table might only tolerate a few seconds.
+
+TTL appears at every AWS caching layer, but with different meanings and limits:
+
+| Service | Default TTL | Limit | Exam note |
+| --- | --- | --- | --- |
+| ElastiCache (Redis/Memcached) | Set by you when writing a key | Up to you | Usually paired with Lazy Loading to bound staleness |
+| DAX — item cache | 5 minutes | Configurable | Applies to `GetItem` / `BatchGetItem` |
+| CloudFront | Default TTL (configurable) | Min 0s … Max 1 year (default) | Governed by `Cache-Control` / `Expires` from the origin |
+| API Gateway cache | 300 seconds | Up to 3600 seconds; `0` = off | Set per stage, override per method |
+
+There's a classic trap to disambiguate: **DynamoDB TTL is not a cache TTL**. DynamoDB has an attribute called TTL, but it's used to **automatically delete expired items from the table** (e.g., cleaning up sessions or temporary data) — a data-cleanup mechanism that has nothing to do with keeping a copy around for speed. If the question asks "automatically remove old items from a DynamoDB table," that's DynamoDB TTL; if it asks "reduce DynamoDB read latency to microseconds," that's DAX.
+
+One important operational note: if a large batch of keys all get the exact same TTL, they'll expire at the same moment and create a wave of simultaneous misses pouring into the database (exactly the "node replaced at midnight" scene). The fix is to add a bit of randomness to the TTL (**TTL jitter**); the mechanism and related solutions are covered in detail in [Cache Stampede](/posts/cache-stampede).
+
+---
+
+## 5. Eviction policies — what to drop when the cache is full
+
+TTL answers "when does an entry expire." Eviction answers a completely different question: **the cache is out of memory — to write more, which entry do we drop?** These two are often confused, but they're fundamentally different — expiration is decided by time (TTL), while eviction is decided by **memory pressure** and can drop even keys that haven't expired at all.
+
+For Redis (via ElastiCache), this behavior is controlled by the `maxmemory-policy` parameter. The policies split into two groups by the scope of eviction candidates: the `allkeys-*` group considers every key, while the `volatile-*` group only considers keys that have a TTL set.
+
+| Policy | Which key it drops | When it fits |
+| --- | --- | --- |
+| `noeviction` | Drops nothing; new writes are rejected (error) | When losing cached data is unacceptable |
+| `allkeys-lru` | The least recently used key (among all keys) | A good default for a pure cache |
+| `allkeys-lfu` | The least frequently used key | When "hotness" by frequency matters more than by recency |
+| `allkeys-random` | A random key | When all keys are roughly equal |
+| `volatile-lru` | LRU, but only among keys with a TTL | When the cache also holds data meant to be kept long-term |
+| `volatile-ttl` | The key with the shortest remaining TTL | When you want to prefer dropping things about to expire |
+
+<Tooltip content="Least Recently Used — drops the entry that has gone the longest without being accessed">LRU</Tooltip> and <Tooltip content="Least Frequently Used — drops the entry with the lowest access frequency">LFU</Tooltip> are the two foundational algorithms; their theory and implementation live in [Caching fundamentals](/posts/cache-fundamentals).
+
+A few exam-worthy points:
+
+- **ElastiCache for Redis defaults to `volatile-lru`**. There's a subtle consequence: the `volatile-*` group can only evict keys with a TTL, so if you don't set a TTL on any key, it behaves exactly like `noeviction` — new writes will error out when memory is full.
+- **DAX uses LRU** for its item cache: when the cache is full, DAX drops the least-used items even if they haven't expired.
+- An abnormally high eviction rate is an important monitoring signal (the cache is too small for the working set); see [Cache Monitoring & Scaling](/posts/cache-monitoring-and-scaling).
+
+---
+
+## 6. The AWS caching layers
+
+The four sections above are strategy theory. This one maps them onto the four AWS services you'll meet most often in SAA questions, moving from the network edge (close to the user) inward to the database.
+
+### 6.1. CloudFront — caching at the edge (CDN)
+
+A <Tooltip content="Content Delivery Network — a network of servers spread around the globe, serving content from the point closest to the user to reduce latency">CDN</Tooltip> is a network of servers spread worldwide that serves content from the point closest to the user. **CloudFront** is AWS's CDN: it caches content at <Tooltip content="Edge location — a CloudFront point of presence placed near users, where content is cached and served">edge locations</Tooltip> right next to users, so a user in Hanoi doesn't have to reach all the way to an origin in Singapore or the US for every request.
+
+With CloudFront, cache duration is determined by the interaction between the headers from the origin and the three TTL settings of the cache policy:
+
+- If the origin does **not** return `Cache-Control` or `Expires`, CloudFront uses the **Default TTL**.
+- If the origin **does** return a header, CloudFront clamps that value into the range [Minimum TTL, Maximum TTL]: below Min it uses Min, above Max it uses Max.
+- By default, Minimum TTL is `0` and Maximum TTL is `31536000` seconds (one year).
+- A trap: if Minimum TTL is set greater than 0, CloudFront obeys the Min TTL **even when** the origin sends `Cache-Control: no-cache, no-store, private`.
+
+Two other CloudFront concepts that come up often:
+
+- **Cache key** — what CloudFront uses to tell "different content" apart. By default it's the domain + path; you can add headers, query strings, or cookies to the cache key via a cache policy. The more components, the more "fragmented" the cache becomes and the lower the hit rate.
+- **Invalidation** — proactively removing content from the edge before its TTL. CloudFront gives **1,000 free invalidation paths per month**, then charges `$0.005` per path. So the practical (and frequently tested) tip is to **use versioned file names** (e.g., `app.v2.js`) so every content change is a new URL, avoiding invalidation entirely.
+
+**Use case:** distributing static content (images, JS, CSS, video) and even dynamic content at global scale, reducing load on the origin (S3, ALB, or a self-managed server).
+
+**Keyword cues:** "global users," "reduce latency by geographic region," "CDN," "cache static content at edge," "offload the origin / S3."
+
+### 6.2. API Gateway — caching API responses
+
+API Gateway can cache the response of each endpoint, so identical requests within a window don't have to call the backend again (Lambda, or a service behind it).
+
+- **Default TTL of 300 seconds**, up to **3600 seconds**; set `TTL = 0` to disable caching.
+- Enabled per **stage**, but can be overridden (on/off, change TTL) per **method**.
+- The **cache key** is built from the request parameters (query string, header, path) you choose to include.
+- You can **encrypt cached data** (AES-256); it doesn't yet support using your own KMS key.
+- The maximum cacheable response size is **1 MB** (1,048,576 bytes).
+
+**Use case:** read-heavy APIs with rarely-changing data (catalogs, configuration) that want to reduce backend calls and lower Lambda cost.
+
+**Keyword cues:** "reduce backend/Lambda calls," "read-heavy API," "cache REST API responses," "TTL 300/3600."
+
+### 6.3. ElastiCache — Redis vs Memcached
+
+ElastiCache is a managed in-memory cache service, **sub-millisecond** latency, and the place where you implement the strategies from sections 2–3 yourself (mostly Cache-Aside). The SAA exam almost always asks one question: **Redis or Memcached?** The answer comes down to whether the workload needs the "advanced" features.
+
+| Criterion | Memcached | Redis (Valkey) |
+| --- | --- | --- |
+| Data model | Simple key-value | Many structures: string, hash, list, set, sorted set, bitmap, geospatial |
+| Multi-threaded | Yes (uses multiple cores) | Mostly single-threaded for command processing |
+| Persistence | No | Yes (snapshot / AOF) |
+| Replication & Multi-AZ | No | Yes (read replica, automatic failover) |
+| Backup / restore | No | Yes |
+| Pub/Sub, transactions | No | Yes |
+| Scaling | Add/remove nodes (simple sharding) | Cluster mode (sharding + replica) |
+
+A quick way to remember: **Memcached** fits when you need the simplest thing possible — a pure key-value cache, want to use multiple cores on a large node, scale horizontally by adding/removing nodes, and **accept losing the whole cache** when a node dies. **Redis** fits nearly every other case: when you need persistence, replicas and high availability, complex data structures (a leaderboard using a sorted set — see [Redis Sorted Set](/posts/redis-sorted-set-internals)), pub/sub, or transactions.
+
+**Common use cases:** caching expensive query results, session storage, counting/rate limiting, leaderboards, pub/sub.
+
+**Keyword cues:** "sub-millisecond," "in-memory cache," "session store," "leaderboard → Redis sorted set," "simple + multi-threaded → Memcached," "persistence / replication / HA → Redis."
+
+### 6.4. DAX — a transparent cache for DynamoDB
+
+**DAX** (DynamoDB Accelerator) is an in-memory cache layer sitting right in front of DynamoDB, pushing read latency from **single-digit milliseconds** (DynamoDB's) down to **microseconds**.
+
+What's special: DAX is a **transparent read-through and write-through** cache — the application uses the exact same DynamoDB API and only changes the endpoint to point at DAX, with no cache logic to write.
+
+```ts
+import AmazonDaxClient from 'amazon-dax-client'
+import { DynamoDB } from 'aws-sdk'
+
+const dax = new AmazonDaxClient({
+  endpoints: [process.env.DAX_ENDPOINT],
+  region: 'ap-southeast-1',
+})
+
+const client = new DynamoDB.DocumentClient({ service: dax })
+
+async function getProduct(id: string) {
+  const result = await client.get({ TableName: 'Products', Key: { id } }).promise()
+
+  return result.Item
+}
+```
+
+Internally, DAX keeps **two independent caches**:
+
+- **Item cache** — stores the results of `GetItem` and `BatchGetItem`, keyed by primary key, default TTL of 5 minutes, using LRU when full.
+- **Query cache** — stores the results of `Query` and `Scan`. These two caches operate independently: writing an item does not refresh results already cached in the query cache.
+
+Two important limits for the exam:
+
+- DAX only serves **eventually consistent reads**. If the application requests a <Tooltip content="Strongly consistent read — a read guaranteed to reflect the results of all writes completed before it">strongly consistent read</Tooltip>, that request goes straight down to DynamoDB, bypassing DAX.
+- DAX runs **inside a VPC** and is **only for DynamoDB**. It accelerates nothing for RDS, S3, or any other data source.
+
+**When NOT to use DAX:** write-heavy, read-light workloads (write-through only adds latency), needing strongly consistent reads, or an application that doesn't use DynamoDB. When you need a cache for something other than DynamoDB, the answer is ElastiCache.
+
+**Keyword cues:** "microsecond read latency + DynamoDB," "read-heavy DynamoDB," "speed up DynamoDB without changing code," "reduce DynamoDB read cost (RCU)."
+
+---
+
+## 7. Putting it together — a quick decision framework
+
+In practice (and in SAA's long scenario questions), the strategies don't exclude each other — they **complement** each other. AWS's default recommendation is to combine three things: **Lazy Loading + Write-Through + TTL**. Lazy Loading ensures you only cache what's read and stay resilient to node failure; Write-Through keeps the hot records fresh; TTL caps whatever staleness is left over.
+
+And caching on AWS is multi-layered, not a single point. A request might be served right at CloudFront (the edge); on a miss it reaches the API Gateway cache, then ElastiCache at the application tier, and only when all of them miss does it touch the database. Each layer absorbs part of the load for the one below it.
+
+Don't forget the **cost** angle — a motivation often hidden in SAA questions:
+
+- DAX and ElastiCache reduce the number of reads down to the database, i.e., reduce DynamoDB's <Tooltip content="Read Capacity Unit — the unit of read capacity you pay for on DynamoDB">RCU</Tooltip> or RDS's load.
+- CloudFront reduces the volume of requests (and bandwidth) reaching the origin, lowering S3/ALB cost and data-transfer-out cost too.
+- The API Gateway cache reduces the number of Lambda invocations.
+
+In other words, when a question stresses "reduce cost" alongside "reduce latency," caching is often part of the answer.
+
+> **Important note:** The "keyword cues" in this post are for quickly picking an answer in the exam room, where each scenario usually maps to exactly one service. In the real world, choosing a caching strategy takes much more deliberation: the business's actual consistency requirements, the latency budget, operational cost, and what damage stale data would actually cause. A keyword rarely maps as cleanly as it does on the exam.
+
+---
+
+## 8. Tips & Tricks — reading the SAA keyword cues
+
+This is the most worthwhile part for the exam. Catch the keyword in the question, map it straight to a strategy or service.
+
+### By service
+
+| The question mentions… | Choose |
+| --- | --- |
+| Microseconds + DynamoDB, read-heavy | DAX |
+| Sub-millisecond, in-memory, cache SQL queries, session | ElastiCache |
+| Leaderboard, ranking, pub/sub, needs persistence/HA | ElastiCache for Redis |
+| Simple key-value cache, multi-threaded, large node, no durability needed | ElastiCache for Memcached |
+| Static content for global users, cache at the edge, CDN | CloudFront |
+| Reduce backend/Lambda calls for a read-heavy REST API | API Gateway caching |
+| Automatically delete expired items from a DynamoDB table | DynamoDB TTL (not a cache) |
+
+### By strategy
+
+| The question describes the problem… | Strategy |
+| --- | --- |
+| Only want to cache what's actually read; resilient to node failure | Cache-Aside / Lazy Loading |
+| A read right after a write must see the new version; fight stale data | Write-Through |
+| Extremely high writes, need a fast write path, accept the risk | Write-Back (rare in SAA) |
+| Write-heavy, read-light data polluting the cache | Write-Around |
+| Cap the maximum time data is allowed to be stale | TTL |
+| Cache out of memory, need to choose what to drop | Eviction policy (LRU/LFU…) |
+
+### A few common traps
+
+- "Strongly consistent read" + DynamoDB means **DAX doesn't help** (the request goes straight down to DynamoDB).
+- "No data loss" rules out **Write-Back** and rules out **Memcached** (no durability, no replication).
+- "Automatically delete old sessions" in DynamoDB is **DynamoDB TTL**, not DAX or ElastiCache.
+- CloudFront's Min TTL greater than 0 will **override** even `no-cache` from the origin.
+- `volatile-*` with no TTL set on any key behaves like `noeviction`.
+
+---
+
+## 9. Summary comparison tables
+
+Strategies:
+
+| Strategy | Type | Problem it solves | Main trade-off | How it shows up on AWS |
+| --- | --- | --- | --- | --- |
+| Cache-Aside (Lazy Loading) | Read | Only caches what's read; resilient to node death | Miss penalty, prone to staleness | ElastiCache (you code it) |
+| Read-Through | Read | Centralizes cache-loading logic in the cache layer | Depends on the cache layer | DAX (transparent) |
+| Write-Through | Write | Cache always fresh after every write | Write penalty, cache bloat | ElastiCache, DAX |
+| Write-Back | Write | Extremely fast write path | Risk of data loss | Application pattern (not managed) |
+| Write-Around | Write | Avoids cache pollution by read-light data | Miss on the first read | ElastiCache + Lazy Loading |
+| TTL | Expiry | Caps how long data can be stale | Still stale within the TTL window | Every caching layer |
+| Eviction | Memory | Picks a key to drop when memory is full | May drop a still-used key | Redis `maxmemory-policy`, DAX LRU |
+
+Services:
+
+| Service | Layer | Latency | Caches | Recognition cue |
+| --- | --- | --- | --- | --- |
+| CloudFront | Edge (CDN) | milliseconds (near user) | Global static/dynamic content | Global, edge, offload origin |
+| API Gateway cache | API | — | REST API responses | TTL 300/3600, fewer backend calls |
+| ElastiCache | Application/DB | sub-millisecond | Any data (you code it) | Redis vs Memcached |
+| DAX | DynamoDB | microseconds | DynamoDB only | Transparent read-through/write-through |
+
+---
+
+## Conclusion
+
+Back to the flash-sale product page from the opening. Now you can see clearly why "adding a cache" didn't fully rescue it: the latency dropped thanks to a read strategy (Lazy Loading), but the wrong price was because of a missing write strategy (Write-Through or deleting the key) and a missing TTL; and the midnight outage was because many keys expired at once — an expiration and stampede problem. A cache isn't a switch — it's four decisions that have to mesh.
+
+A few things to remember:
+
+- **The four questions** of every caching system: how to read, how to write, how long it lives (TTL), what to drop when full (eviction). Read SAA questions through this lens.
+- **Read:** Cache-Aside (Lazy Loading) is the default and resilient to node death; transparent Read-Through is DAX.
+- **Write:** Write-Through fights stale data; Write-Around avoids cache pollution; Write-Back is fast but risks data loss and has no managed service.
+- **AWS recommends** combining Lazy Loading + Write-Through + TTL, and caching is multi-layered (CloudFront, API Gateway, ElastiCache, DAX).
+- **Easily confused pairs:** DAX (microseconds, DynamoDB only, eventually consistent) vs ElastiCache (sub-ms, any source, you code it); DynamoDB TTL (deletes items) vs cache TTL (expires copies).
+- When a question mentions "reduce cost" next to "reduce latency," think caching — it cuts RCU, cuts origin load, cuts Lambda invocations.
+
+Recognize the **problem** the scenario describes first, and the strategy and service will reveal themselves.

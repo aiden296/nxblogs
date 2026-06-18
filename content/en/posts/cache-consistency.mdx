@@ -228,21 +228,7 @@ def read_data_with_cas_lease(key):
 
 ---
 
-## 5. Comparison Matrix: Edge Cases vs. Solutions
-
-| | Zombie Reader | Replication Lag | Partial Failure | Complexity |
-|---|---|---|---|---|
-| **Cache-Aside** | :x: | :x: | :x: | Low |
-| **Delayed Double Delete** | :warning: (OK if lag < T) | :warning: (OK if lag < T) | :x: | Medium |
-| **CDC** | :x: | :warning: (if using Update Mode) | :white_check_mark: | High |
-| **Lease** | :white_check_mark: | :x: | :x: | Very High |
-| **Lease + Remote Marker** | :white_check_mark: | :white_check_mark: | :x: | Very High |
-
-> :white_check_mark: Solved — :warning: Mitigated — :x: Failed
-
----
-
-## 6. Practical Advice
+## 5. Practical Advice
 
 In System Design, perfection often comes with a high cost. For most applications (social networks, news, e-commerce, blogs...), users seeing stale data for a few seconds is perfectly acceptable.
 

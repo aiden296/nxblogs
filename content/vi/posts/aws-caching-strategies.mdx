@@ -1,0 +1,390 @@
+---
+title: 'AWS Caching Strategies: Mỗi Pattern Giải Quyết Bài Toán Gì Cho Kỳ Thi SAA'
+date: '2026-06-18'
+tags: ['Devops', 'AWS', 'SAA', 'Cache']
+description: 'Bản đồ cache cho kỳ thi SAA — Cache-Aside, Read-Through, Write-Through, Write-Back, Write-Around, TTL và eviction, ánh xạ thẳng vào ElastiCache, DAX, CloudFront và API Gateway.'
+enableComment: true
+---
+
+# AWS Caching Strategies: Mỗi Pattern Giải Quyết Bài Toán Gì Cho Kỳ Thi SAA
+
+Bạn đang chạy một trang chi tiết sản phẩm cho sàn thương mại điện tử, dữ liệu nằm trên RDS. Một chiến dịch flash sale bắt đầu, traffic tăng gấp 20 lần trong vài phút. CPU của database leo lên 100%, mọi truy vấn xếp hàng, p99 latency từ 80ms vọt lên 4 giây. Trang gần như đứng hình.
+
+Bạn làm điều "hiển nhiên": đặt một lớp ElastiCache trước database. Latency tụt xuống ngay, database thở được. Nhưng rồi rắc rối mới xuất hiện. Giá sản phẩm vừa được giảm trong sale, nhưng khách vẫn nhìn thấy giá cũ suốt 10 phút — cache đang trả về dữ liệu cũ. Tệ hơn, đến nửa đêm một cache node bị thay, hàng loạt key biến mất cùng lúc, và toàn bộ traffic lại đổ thẳng xuống database như chưa từng có cache.
+
+Gốc rễ của vấn đề: "thêm cache" nghe như một quyết định, nhưng thực ra là **bốn** quyết định tách biệt — đọc thế nào (read strategy), ghi thế nào (write strategy), dữ liệu sống bao lâu (TTL), và bỏ gì khi đầy (eviction). Chọn sai bất kỳ cái nào, bạn đổi một vấn đề (chậm) lấy một vấn đề khác (sai dữ liệu, hoặc sập hàng loạt).
+
+Đề thi SAA kiểm tra đúng khả năng này: đọc một tình huống, nhận ra nó cần chiến lược cache nào, và ánh xạ chiến lược đó vào đúng dịch vụ AWS. Bài viết này là tấm bản đồ đó — mỗi chiến lược giải quyết bài toán gì, và nó "hiện hình" ở đâu trong ElastiCache, DAX, CloudFront, và API Gateway.
+
+<ExcalidrawDiagram
+  src="/aws-caching-strategies-overview.excalidraw"
+  alt="Các tầng cache trên AWS — CloudFront (edge cache), API Gateway (API cache), ElastiCache (Lazy Loading + Write-Through) với RDS/Aurora, và DAX với DynamoDB"
+/>
+
+> Bài viết này tập trung vào góc nhìn **dịch vụ AWS cho kỳ thi SAA**. Nếu bạn muốn đào sâu phần lý thuyết caching tổng quát (consistency, các cái bẫy, scaling), hãy đọc series Cache Handbook: [Nền tảng cốt lõi của Caching](/posts/cache-fundamentals), [Cache Consistency](/posts/cache-consistency), [6 cái bẫy kinh điển](/posts/cache-pitfalls), và [Cache Stampede](/posts/cache-stampede).
+
+---
+
+## 1. Tại sao "thêm cache" không phải một quyết định
+
+Trước hết, định nghĩa cho rõ. **Cache** là một kho lưu trữ trung gian, nhanh, giữ một bản sao của dữ liệu để các lần đọc sau không phải chạm tới nguồn gốc chậm hơn. Bản thân cache không tạo ra dữ liệu mới — nó chỉ giữ lại một bản sao của thứ đã có ở đâu đó (database, API, ổ đĩa).
+
+Khi một yêu cầu đọc tìm thấy dữ liệu trong cache, ta gọi là <Tooltip content="Cache hit — yêu cầu tìm thấy dữ liệu sẵn trong cache, không phải chạm tới nguồn gốc">cache hit</Tooltip>. Khi không tìm thấy, đó là <Tooltip content="Cache miss — dữ liệu không có trong cache, phải đi xuống nguồn gốc để lấy rồi (thường) nạp lại vào cache">cache miss</Tooltip>, và bạn phải trả giá: một chuyến xuống cache (trượt), một chuyến xuống database, rồi một chuyến ghi ngược lên cache. Ba chuyến đi cho một lần trượt. Vì vậy cache chỉ thực sự có lời khi tỷ lệ hit đủ cao.
+
+Một hệ thống cache hoàn chỉnh phải trả lời bốn câu hỏi, và đây cũng là khung để đọc mọi câu hỏi SAA về caching:
+
+- **Read strategy** — khi đọc, ai chịu trách nhiệm nạp dữ liệu vào cache lúc miss?
+- **Write strategy** — khi dữ liệu thay đổi, cache được cập nhật thế nào để không trả về bản cũ?
+- **Expiration (TTL)** — một bản sao được phép "sống" trong cache bao lâu trước khi bị coi là cũ?
+- **Eviction** — khi cache đầy bộ nhớ, bỏ key nào ra để nhường chỗ?
+
+Bốn phần sau lần lượt mổ xẻ từng câu hỏi, rồi ghép chúng vào các dịch vụ AWS cụ thể.
+
+---
+
+## 2. Read strategies — nạp dữ liệu vào cache thế nào
+
+Có hai cách tiếp cận cho đường đọc, khác nhau ở chỗ **ai** là người nạp dữ liệu vào cache khi xảy ra miss: ứng dụng tự làm, hay lớp cache tự làm.
+
+### 2.1. Cache-Aside (Lazy Loading)
+
+**Cache-Aside** là chiến lược trong đó ứng dụng đứng giữa, tự mình kiểm tra cache trước, và chỉ nạp dữ liệu vào cache khi có một lần đọc bị miss. Cache chỉ chứa thứ đã thực sự được yêu cầu ít nhất một lần — nên còn gọi là **Lazy Loading** (nạp lười), và đây chính là thuật ngữ AWS dùng trong tài liệu của ElastiCache.
+
+Luồng xử lý khi đọc:
+
+<ExcalidrawDiagram
+  src="/aws-caching-strategies-lazy-loading.excalidraw"
+  alt="Luồng Cache-Aside / Lazy Loading — ứng dụng đọc cache, nếu miss thì query database rồi ghi ngược kết quả vào cache"
+/>
+
+```ts
+import Redis from 'ioredis'
+import { getProductFromDb } from './db'
+
+const redis = new Redis(process.env.ELASTICACHE_ENDPOINT)
+
+async function getProduct(id: string) {
+  const cached = await redis.get(`product:${id}`)
+
+  if (cached) {
+    return JSON.parse(cached)
+  }
+
+  const product = await getProductFromDb(id)
+
+  await redis.set(`product:${id}`, JSON.stringify(product), 'EX', 300)
+
+  return product
+}
+```
+
+Bài toán nó giải quyết: không lãng phí bộ nhớ cache cho dữ liệu chẳng ai đọc. Cache chỉ "ấm" dần với đúng những gì người dùng thực sự cần. Một lợi ích lớn khác — nếu cache node chết, hệ thống vẫn chạy được (chỉ chậm hơn), vì mọi miss tự động rơi xuống database. Cache-Aside vì thế rất bền trước sự cố node.
+
+Cái giá phải trả có hai mặt. Thứ nhất là **cache miss penalty**: mỗi lần miss tốn ba chuyến đi, và những lần miss này có thể tạo độ trễ thấy rõ với người dùng đầu tiên. Thứ hai là dữ liệu cũ (stale): vì cache chỉ được ghi khi miss, nó không hề biết database vừa thay đổi — đúng như cảnh giá sản phẩm cũ trong tình huống mở đầu. Đây là lý do Cache-Aside gần như luôn phải đi kèm TTL hoặc một chiến lược ghi.
+
+Khi ghi dữ liệu với Cache-Aside, lựa chọn chuẩn mực là **xóa key** thay vì ghi đè, để lần đọc kế tiếp tự nạp lại bản mới nhất từ database:
+
+```ts
+async function updateProduct(id: string, data: Product) {
+  await saveProductToDb(id, data)
+
+  await redis.del(`product:${id}`)
+}
+```
+
+Vì sao là xóa chứ không phải ghi đè, và những edge case tinh vi quanh thứ tự thao tác (Zombie reader, replication lag) đã được phân tích kỹ trong bài [Cache Consistency](/posts/cache-consistency) — ở đây ta chỉ cần nhớ kết luận: với Cache-Aside, ghi là xóa cache.
+
+### 2.2. Read-Through
+
+**Read-Through** là chiến lược trong đó ứng dụng chỉ nói chuyện với cache, còn việc nạp dữ liệu từ database khi miss do chính lớp cache (một thư viện hoặc một dịch vụ) đảm nhận một cách trong suốt. Ứng dụng không còn viết logic "miss thì query rồi set" nữa.
+
+Khác biệt cốt lõi so với Cache-Aside nằm ở chỗ **ai nạp cache**: Cache-Aside thì ứng dụng tự nạp (logic miss nằm trong code của bạn); Read-Through thì lớp cache tự nạp (logic miss nằm bên trong cache). Với người dùng cuối hiệu quả gần giống nhau, nhưng Read-Through gom logic vào một chỗ và giảm khả năng mỗi service tự cài đặt một kiểu.
+
+Trong thế giới AWS, **ElastiCache không tự làm Read-Through** — bạn phải tự viết Cache-Aside trong ứng dụng. Dịch vụ thể hiện đúng tinh thần Read-Through (và cả Write-Through) một cách trong suốt là **DAX** cho DynamoDB: ứng dụng gọi đúng API DynamoDB quen thuộc nhưng trỏ vào endpoint của DAX, và DAX tự lo phần đọc xuống DynamoDB khi miss. Ta sẽ quay lại DAX ở phần 6.4.
+
+---
+
+## 3. Write strategies — giữ cache không nói dối
+
+Read strategy quyết định cache được nạp thế nào; write strategy quyết định khi dữ liệu thay đổi thì cache được xử lý ra sao để không trả về bản cũ. Có ba cách, mỗi cách tối ưu cho một loại đánh đổi khác nhau.
+
+<ExcalidrawDiagram
+  src="/aws-caching-strategies-write-strategies.excalidraw"
+  alt="So sánh ba write strategy — Write-Through (ghi đồng bộ cả hai), Write-Back (ghi cache trước, flush DB sau), Write-Around (ghi thẳng DB, bỏ qua cache)"
+/>
+
+### 3.1. Write-Through
+
+**Write-Through** là chiến lược trong đó mỗi lần ghi dữ liệu, ứng dụng cập nhật cache và database cùng lúc, một cách đồng bộ — thao tác chỉ coi là thành công khi cả hai đã được ghi.
+
+```ts
+async function updateProduct(id: string, data: Product) {
+  await saveProductToDb(id, data)
+  await redis.set(`product:${id}`, JSON.stringify(data), 'EX', 300)
+  return data
+}
+```
+
+Bài toán nó giải quyết: dữ liệu cũ. Vì cache được cập nhật theo từng lần ghi, một lần đọc ngay sau đó luôn thấy bản mới nhất. Đây là điểm khác biệt then chốt so với Lazy Loading vốn để cache "trôi" khỏi database giữa các lần miss.
+
+Đổi lại có ba nhược điểm. Một là **write penalty**: mỗi lần ghi tốn hai chuyến đi (cache và database), thêm độ trễ cho đường ghi. Hai là cache phình to với cả những dữ liệu chẳng ai đọc — vì ta ghi vào cache mọi thứ được ghi, kể cả thứ sẽ không bao giờ được truy vấn lại. Ba là vấn đề "missing data": ngay sau khi tạo một cache node mới (hoặc node bị thay), cache rỗng, và những dữ liệu chỉ-được-ghi-trong-quá-khứ sẽ không có trong cache cho tới lần ghi tiếp theo. Vì lý do thứ hai và thứ ba, AWS khuyến nghị **kết hợp** Write-Through với Lazy Loading và gắn TTL, thay vì dùng đơn lẻ.
+
+### 3.2. Write-Back (Write-Behind)
+
+**Write-Back** (hay **Write-Behind**) là chiến lược trong đó ứng dụng ghi vào cache trước và coi như xong ngay, còn việc đẩy dữ liệu xuống database được làm bất đồng bộ sau đó (theo lô, theo lịch, hoặc khi nhàn rỗi).
+
+Bài toán nó giải quyết: đường ghi cực nhanh dưới khối lượng ghi rất lớn. Vì người dùng chỉ chờ thao tác ghi vào bộ nhớ (cache), độ trễ ghi gần như tức thì, và nhiều lần ghi có thể được gộp lại thành ít lần ghi database hơn. Đây là cơ chế quen thuộc bên trong các database (ví dụ <Tooltip content="Write-ahead log / buffer — cơ chế đệm ghi trong bộ nhớ rồi flush xuống đĩa theo lô, giúp ghi nhanh mà vẫn bền">buffer ghi của Postgres</Tooltip>), nơi tính bền vững được bảo vệ bằng các kỹ thuật riêng.
+
+Nhược điểm chí mạng là **nguy cơ mất dữ liệu**: nếu cache chết trước khi flush kịp xuống database, phần dữ liệu chưa flush biến mất. Vì đánh đổi này, **không có dịch vụ cache nào của AWS cung cấp write-back được quản lý sẵn cho database của bạn** — nó là một pattern ở tầng ứng dụng, hiếm khi là đáp án trong đề SAA. Bạn cần nhận ra cái tên để loại trừ nó khi đề nhấn mạnh "không được mất dữ liệu".
+
+### 3.3. Write-Around
+
+**Write-Around** là chiến lược trong đó dữ liệu được ghi thẳng xuống database và bỏ qua cache hoàn toàn; cache chỉ được nạp về sau qua đường đọc (Lazy Loading) nếu dữ liệu đó thực sự được đọc.
+
+Bài toán nó giải quyết: tránh làm "ô nhiễm" cache bằng dữ liệu ghi-nhiều-đọc-ít. Hãy nghĩ tới log sự kiện hoặc dữ liệu cảm biến: ghi liên tục nhưng hiếm khi đọc lại ngay. Nếu dùng Write-Through, mỗi lần ghi lại nhét một thứ vô dụng vào cache, đẩy những key thật sự nóng ra ngoài (cache churn). Write-Around tránh điều đó bằng cách chỉ để cache chứa thứ được đọc.
+
+Đổi lại, dữ liệu vừa ghi sẽ gây một lần cache miss ở lần đọc đầu tiên — chấp nhận được nếu dữ liệu đó hiếm khi được đọc ngay sau khi ghi.
+
+---
+
+## 4. TTL & Expiration — đặt hạn sử dụng cho bản sao
+
+Hầu hết các chiến lược trên đều có chung một điểm yếu: cache có thể trôi khỏi database. **TTL** (Time To Live) là miếng vá phổ quát cho điểm yếu đó — nó gắn cho mỗi mục cache một "hạn sử dụng" tính bằng giây, hết hạn thì mục đó bị coi là không còn hợp lệ và lần đọc kế tiếp sẽ phải xuống nguồn gốc để lấy bản mới.
+
+TTL biến câu hỏi "làm sao để cache luôn đúng tuyệt đối" (rất khó) thành "tôi chấp nhận dữ liệu cũ tối đa bao lâu" (dễ trả lời theo nghiệp vụ). Một danh mục sản phẩm có thể chịu được TTL 5 phút; một bảng tỷ giá có thể chỉ chịu được vài giây.
+
+TTL xuất hiện ở mọi tầng cache của AWS, nhưng với ý nghĩa và giới hạn khác nhau:
+
+| Dịch vụ                       | TTL mặc định           | Giới hạn                      | Ghi chú cho kỳ thi                                |
+| ----------------------------- | ---------------------- | ----------------------------- | ------------------------------------------------- |
+| ElastiCache (Redis/Memcached) | Do bạn đặt khi ghi key | Tùy bạn                       | Thường đi kèm Lazy Loading để chặn dữ liệu cũ     |
+| DAX — item cache              | 5 phút                 | Cấu hình được                 | Áp cho `GetItem` / `BatchGetItem`                 |
+| CloudFront                    | Default TTL (cấu hình) | Min 0s … Max 1 năm (mặc định) | Bị `Cache-Control` / `Expires` từ origin chi phối |
+| API Gateway cache             | 300 giây               | Tối đa 3600 giây; `0` = tắt   | Đặt theo stage, override theo method              |
+
+Có một cái bẫy kinh điển cần phân biệt: **TTL của DynamoDB không phải là cache TTL**. DynamoDB có một thuộc tính tên là TTL, nhưng nó dùng để **tự động xóa item hết hạn khỏi bảng** (ví dụ dọn session, dọn dữ liệu tạm) — một cơ chế dọn dẹp dữ liệu, không liên quan gì tới việc lưu bản sao cho nhanh. Nếu đề hỏi "tự xóa item cũ khỏi bảng DynamoDB", đó là DynamoDB TTL; nếu hỏi "giảm độ trễ đọc DynamoDB xuống micro-giây", đó là DAX.
+
+Một lưu ý vận hành quan trọng: nếu hàng loạt key cùng đặt một TTL giống hệt nhau, chúng sẽ hết hạn cùng lúc và tạo ra một làn sóng miss đồng loạt đổ xuống database (đúng cảnh "node bị thay lúc nửa đêm"). Cách phòng là thêm một chút ngẫu nhiên vào TTL (**TTL jitter**); cơ chế và các giải pháp liên quan được trình bày chi tiết trong bài [Cache Stampede](/posts/cache-stampede).
+
+---
+
+## 5. Eviction policies — bỏ gì khi cache đầy
+
+TTL trả lời "khi nào một mục hết hạn". Eviction trả lời một câu khác hẳn: **cache đầy bộ nhớ rồi, giờ ghi thêm thì bỏ mục nào ra?** Hai khái niệm này hay bị nhầm, nhưng bản chất khác nhau — expiration do thời gian (TTL) quyết định, còn eviction do **áp lực bộ nhớ** quyết định và có thể bỏ cả những key chưa hề hết hạn.
+
+Với Redis (qua ElastiCache), hành vi này do tham số `maxmemory-policy` điều khiển. Các chính sách chia thành hai nhóm theo phạm vi ứng viên bị bỏ: nhóm `allkeys-*` xét mọi key, nhóm `volatile-*` chỉ xét những key có gắn TTL.
+
+| Chính sách       | Bỏ key nào                                    | Khi nào hợp                                               |
+| ---------------- | --------------------------------------------- | --------------------------------------------------------- |
+| `noeviction`     | Không bỏ gì; ghi mới bị từ chối (báo lỗi)     | Khi mất dữ liệu cache là không chấp nhận được             |
+| `allkeys-lru`    | Key ít được dùng gần đây nhất (trong mọi key) | Mặc định tốt cho cache thuần                              |
+| `allkeys-lfu`    | Key ít được dùng thường xuyên nhất            | Khi độ "nóng" theo tần suất quan trọng hơn theo thời điểm |
+| `allkeys-random` | Một key ngẫu nhiên                            | Khi mọi key gần như ngang nhau                            |
+| `volatile-lru`   | LRU, nhưng chỉ trong các key có TTL           | Khi cache lẫn cả dữ liệu cần giữ lâu dài                  |
+| `volatile-ttl`   | Key có TTL còn lại ngắn nhất                  | Khi muốn ưu tiên bỏ thứ sắp hết hạn                       |
+
+<Tooltip content="Least Recently Used — bỏ mục lâu nhất chưa được truy cập">LRU</Tooltip> và
+<Tooltip content="Least Frequently Used — bỏ mục có tần suất truy cập thấp nhất">LFU</Tooltip> là hai thuật toán nền
+tảng; phần lý thuyết và cài đặt của chúng nằm trong bài [Nền tảng cốt lõi của Caching](/posts/cache-fundamentals).
+
+Vài điểm dễ ra đề:
+
+- Mặc định của **ElastiCache for Redis là `volatile-lru`**. Có một hệ quả tinh vi: nhóm `volatile-*` chỉ bỏ được key có TTL, nên nếu bạn không gắn TTL cho key nào, nó hành xử y hệt `noeviction` — ghi mới sẽ bị lỗi khi đầy bộ nhớ.
+- **DAX dùng LRU** cho item cache: khi cache đầy, DAX bỏ các item ít dùng nhất kể cả khi chúng chưa hết TTL.
+- Eviction nhiều bất thường là một tín hiệu giám sát quan trọng (cache quá nhỏ so với working set); xem [Cache Monitoring & Scaling](/posts/cache-monitoring-and-scaling).
+
+---
+
+## 6. Các tầng cache trên AWS
+
+Bốn phần trên là lý thuyết chiến lược. Phần này ghép chúng vào bốn dịch vụ AWS hay gặp nhất trong đề SAA, đi từ rìa mạng (gần người dùng) vào tới database.
+
+### 6.1. CloudFront — cache ở biên (CDN)
+
+<Tooltip content="Content Delivery Network — mạng các máy chủ đặt rải khắp toàn cầu, phục vụ nội dung từ điểm gần người dùng nhất để giảm độ trễ">CDN</Tooltip> là một mạng máy chủ đặt rải toàn cầu, phục vụ nội dung từ điểm gần người dùng nhất. **CloudFront** là CDN của AWS: nó
+cache nội dung tại các <Tooltip content="Edge location — điểm hiện diện của CloudFront đặt gần người dùng, nơi nội dung được cache và phục vụ">edge location</Tooltip> nằm sát người dùng, nên một người dùng ở Hà Nội không phải gọi tận origin ở Singapore hay Mỹ cho mỗi request.
+
+Với CloudFront, thời gian cache được quyết định bởi sự tương tác giữa header từ origin và ba mốc TTL của cache policy:
+
+- Nếu origin **không** trả `Cache-Control` hay `Expires`, CloudFront dùng **Default TTL**.
+- Nếu origin **có** trả header, CloudFront kẹp giá trị đó trong khoảng [Minimum TTL, Maximum TTL]: nhỏ hơn Min thì dùng Min, lớn hơn Max thì dùng Max.
+- Mặc định Minimum TTL là `0` và Maximum TTL là `31536000` giây (một năm).
+- Một bẫy: nếu Minimum TTL được đặt lớn hơn 0, CloudFront sẽ tuân theo Min TTL **kể cả khi** origin gửi `Cache-Control: no-cache, no-store, private`.
+
+Hai khái niệm CloudFront khác hay xuất hiện:
+
+- **Cache key** — thứ CloudFront dùng để phân biệt "nội dung khác nhau". Mặc định là domain + đường dẫn; bạn có thể thêm header, query string, hoặc cookie vào cache key qua cache policy. Càng nhiều thành phần thì cache càng "vỡ vụn" và hit rate càng giảm.
+- **Invalidation** — chủ động xóa nội dung khỏi edge trước hạn. CloudFront cho **1000 invalidation path miễn phí mỗi tháng**, sau đó tính `$0.005` mỗi path. Vì vậy mẹo thực hành (và hay được hỏi) là **đặt tên file có version** (ví dụ `app.v2.js`) để mỗi lần đổi nội dung là một URL mới, khỏi phải invalidation.
+
+**Use case:** **phân phối nội dung tĩnh** (ảnh, JS, CSS, video) và cả nội dung động ở quy mô toàn cầu, **giảm tải** cho origin (S3, ALB, hay server tự quản).
+
+**Keyword nhận diện:** "global users", "giảm latency theo vùng địa lý", "CDN", "cache static content at edge", "giảm tải cho origin / S3".
+
+### 6.2. API Gateway — cache phản hồi API
+
+API Gateway có thể cache lại phản hồi của từng endpoint, để các request giống nhau trong một khoảng thời gian không phải gọi lại backend (Lambda, hay service phía sau).
+
+- **TTL mặc định 300 giây**, tối đa **3600 giây**; đặt `TTL = 0` để tắt cache.
+- Bật theo từng **stage**, nhưng có thể override (bật/tắt, đổi TTL) theo từng **method**.
+- **Cache key** được tạo từ các tham số của request (query string, header, path) mà bạn chọn đưa vào.
+- Có thể **mã hóa dữ liệu cache** (AES-256); hiện chưa cho dùng khóa KMS của riêng bạn.
+- Kích thước phản hồi tối đa được cache là **1 MB** (1048576 byte).
+
+**Use case:** API đọc-nhiều với dữ liệu ít đổi (danh mục, cấu hình), muốn giảm số lần gọi backend và hạ chi phí Lambda.
+
+**Keyword nhận diện:** "giảm số lần gọi backend / Lambda", "API đọc nhiều", "cache response của REST API", "TTL 300/3600".
+
+### 6.3. ElastiCache — Redis vs Memcached
+
+ElastiCache là dịch vụ cache trong bộ nhớ được quản lý, độ trễ **sub-millisecond**, và là nơi bạn tự cài đặt các chiến lược ở phần 2–3 (chủ yếu là Cache-Aside). Đề SAA gần như luôn hỏi một câu: **Redis hay Memcached?** Câu trả lời nằm ở việc workload có cần các tính năng "nâng cao" hay không.
+
+| Tiêu chí               | Memcached                         | Redis (Valkey)                                                          |
+| ---------------------- | --------------------------------- | ----------------------------------------------------------------------- |
+| Mô hình dữ liệu        | Key-value đơn giản                | Nhiều cấu trúc: string, hash, list, set, sorted set, bitmap, geospatial |
+| Đa luồng               | Có (tận dụng nhiều core)          | Chủ yếu đơn luồng cho xử lý lệnh                                        |
+| Bền vững (persistence) | Không                             | Có (snapshot / AOF)                                                     |
+| Replication & Multi-AZ | Không                             | Có (read replica, tự failover)                                          |
+| Backup / restore       | Không                             | Có                                                                      |
+| Pub/Sub, transaction   | Không                             | Có                                                                      |
+| Mở rộng                | Thêm/bớt node (sharding đơn giản) | Cluster mode (sharding + replica)                                       |
+
+Cách nhớ nhanh: **Memcached** hợp khi bạn cần thứ đơn giản nhất có thể — cache key-value thuần, muốn tận dụng nhiều core trên node lớn, scale ngang bằng cách thêm/bớt node, và **chấp nhận mất sạch cache** khi node chết. **Redis** hợp với gần như mọi trường hợp còn lại: cần bền vững, cần bản sao và high availability, cần cấu trúc dữ liệu phức tạp (bảng xếp hạng dùng sorted set — xem [Redis Sorted Set](/posts/redis-sorted-set-internals)), pub/sub, hay transaction.
+
+**Use case chung:** cache kết quả query tốn kém, lưu session, đếm/giới hạn tần suất, bảng xếp hạng, pub/sub.
+
+**Keyword nhận diện:** "sub-millisecond", "in-memory cache", "session store", "leaderboard → Redis sorted set", "đơn giản + đa luồng → Memcached", "persistence / replication / HA → Redis".
+
+### 6.4. DAX — cache trong suốt cho DynamoDB
+
+**DAX** (DynamoDB Accelerator) là một lớp cache trong bộ nhớ đặt ngay trước DynamoDB, đẩy độ trễ đọc từ **single-digit millisecond** (của DynamoDB) xuống **micro-giây**.
+
+Điểm đặc biệt: DAX là **read-through và write-through trong suốt** — ứng dụng dùng đúng API DynamoDB, chỉ đổi endpoint trỏ sang DAX, không phải viết logic cache nào.
+
+```ts
+import AmazonDaxClient from 'amazon-dax-client'
+import { DynamoDB } from 'aws-sdk'
+
+const dax = new AmazonDaxClient({
+  endpoints: [process.env.DAX_ENDPOINT],
+  region: 'ap-southeast-1',
+})
+
+const client = new DynamoDB.DocumentClient({ service: dax })
+
+async function getProduct(id: string) {
+  const result = await client.get({ TableName: 'Products', Key: { id } }).promise()
+  
+  return result.Item
+}
+```
+
+Bên trong, DAX giữ **hai cache độc lập**:
+
+- **Item cache** — lưu kết quả của `GetItem` và `BatchGetItem`, đánh theo khóa chính, TTL mặc định 5 phút, dùng LRU khi đầy.
+- **Query cache** — lưu kết quả của `Query` và `Scan`. Hai cache này hoạt động độc lập: một lần ghi item không làm mới kết quả đã cache trong query cache.
+
+Hai giới hạn quan trọng cho kỳ thi:
+
+- DAX chỉ phục vụ **eventually consistent reads**. Nếu ứng dụng yêu cầu <Tooltip content="Strongly consistent read — đọc đảm bảo thấy kết quả của mọi ghi đã hoàn tất trước đó">strongly consistent read</Tooltip>, request đó đi thẳng xuống DynamoDB, không qua DAX.
+- DAX chạy **trong VPC** và chỉ dành cho **DynamoDB**. Nó không tăng tốc gì cho RDS, S3, hay nguồn dữ liệu khác.
+
+**Khi nào KHÔNG dùng DAX:** workload ghi-nhiều-đọc-ít (write-through chỉ thêm độ trễ), cần strongly consistent read, hoặc ứng dụng không dùng DynamoDB. Khi cần cache cho thứ khác DynamoDB, đáp án là ElastiCache.
+
+**Keyword nhận diện:** "độ trễ đọc micro-giây + DynamoDB", "read-heavy DynamoDB", "tăng tốc DynamoDB mà không sửa code", "giảm chi phí read (RCU) cho DynamoDB".
+
+---
+
+## 7. Ghép lại — một framework chọn nhanh
+
+Trong thực tế (và trong các câu hỏi tình huống dài của SAA), các chiến lược không loại trừ nhau mà **bổ sung** cho nhau. AWS khuyến nghị mặc định là kết hợp ba thứ: **Lazy Loading + Write-Through + TTL**. Lazy Loading đảm bảo chỉ cache thứ được đọc và bền trước sự cố node; Write-Through giữ những bản ghi nóng luôn mới; TTL chặn trần cho mọi sai lệch còn sót lại.
+
+Và cache trên AWS là nhiều tầng, không phải một điểm. Một request có thể được phục vụ ngay tại CloudFront (biên), nếu trượt thì tới API Gateway cache, rồi tới ElastiCache ở tầng ứng dụng, và chỉ khi tất cả đều trượt mới chạm database. Mỗi tầng chặn bớt một phần tải cho tầng dưới.
+
+Đừng quên góc **chi phí** — một động cơ rất hay được giấu trong đề SAA:
+
+- DAX và ElastiCache giảm số lần đọc xuống database, tức giảm <Tooltip content="Read Capacity Unit — đơn vị đo dung lượng đọc bạn trả tiền trên DynamoDB">RCU</Tooltip> của DynamoDB hoặc tải của RDS.
+- CloudFront giảm lượng request (và băng thông) đổ về origin, hạ chi phí S3/ALB và cả chi phí truyền dữ liệu ra Internet.
+- API Gateway cache giảm số lần invoke Lambda.
+
+Nói cách khác, khi đề nhấn "giảm chi phí" bên cạnh "giảm độ trễ", cache thường là một phần của đáp án.
+
+> **Lưu ý quan trọng:** Các "keyword nhận diện" trong bài là để chọn nhanh đáp án trong phòng thi, nơi mỗi tình huống thường ánh xạ tới đúng một dịch vụ. Ngoài thực tế, chọn chiến lược cache phải cân nhắc kỹ hơn nhiều: yêu cầu consistency thật sự của nghiệp vụ, ngân sách độ trễ, chi phí vận hành, và rủi ro dữ liệu cũ gây hậu quả gì. Một keyword hiếm khi ánh xạ sạch sẽ như trong đề.
+
+---
+
+## 8. Tips & Tricks — đọc vị keyword đề thi SAA
+
+Đây là phần đáng nhớ nhất khi đi thi. Bắt keyword trong đề, ánh xạ thẳng sang chiến lược hoặc dịch vụ.
+
+### Theo dịch vụ
+
+| Đề nhắc tới…                                                | Chọn                            |
+| ----------------------------------------------------------- | ------------------------------- |
+| Micro-giây + DynamoDB, read-heavy                           | DAX                             |
+| Sub-millisecond, in-memory, cache query SQL, session        | ElastiCache                     |
+| Leaderboard, bảng xếp hạng, pub/sub, cần persistence/HA     | ElastiCache for Redis           |
+| Cache key-value đơn giản, đa luồng, node lớn, không cần bền | ElastiCache for Memcached       |
+| Static content cho người dùng toàn cầu, cache ở biên, CDN   | CloudFront                      |
+| Giảm số lần gọi backend/Lambda cho REST API đọc nhiều       | API Gateway caching             |
+| Tự xóa item hết hạn khỏi bảng DynamoDB                      | DynamoDB TTL (không phải cache) |
+
+### Theo chiến lược
+
+| Đề mô tả vấn đề…                                          | Chiến lược                  |
+| --------------------------------------------------------- | --------------------------- |
+| Chỉ muốn cache thứ thực sự được đọc; bền trước sự cố node | Cache-Aside / Lazy Loading  |
+| Đọc ngay sau ghi phải thấy bản mới; chống dữ liệu cũ      | Write-Through               |
+| Ghi cực nhiều, cần đường ghi nhanh, chấp nhận rủi ro      | Write-Back (hiếm trong SAA) |
+| Dữ liệu ghi-nhiều-đọc-ít làm ô nhiễm cache                | Write-Around                |
+| Giới hạn tối đa thời gian dữ liệu được phép cũ            | TTL                         |
+| Cache đầy bộ nhớ, cần chọn cái để bỏ                      | Eviction policy (LRU/LFU…)  |
+
+### Vài cái bẫy hay gặp
+
+- "Strongly consistent read" + DynamoDB thì **DAX không giúp** (request đi thẳng xuống DynamoDB).
+- "Không được mất dữ liệu" thì loại **Write-Back** và loại **Memcached** (không bền, không replication).
+- "Tự động xóa session cũ" trong DynamoDB là **DynamoDB TTL**, không phải DAX hay ElastiCache.
+- Min TTL của CloudFront lớn hơn 0 sẽ **đè** cả `no-cache` từ origin.
+- `volatile-*` mà không gắn TTL cho key nào thì hành xử như `noeviction`.
+
+---
+
+## 9. Bảng so sánh tổng hợp
+
+Chiến lược:
+
+| Chiến lược                 | Loại   | Bài toán giải quyết                         | Đánh đổi chính             | Hiện hình trên AWS                |
+| -------------------------- | ------ | ------------------------------------------- | -------------------------- | --------------------------------- |
+| Cache-Aside (Lazy Loading) | Read   | Chỉ cache thứ được đọc; bền trước node chết | Miss penalty, dễ stale     | ElastiCache (tự code)             |
+| Read-Through               | Read   | Gom logic nạp cache vào lớp cache           | Phụ thuộc lớp cache        | DAX (trong suốt)                  |
+| Write-Through              | Write  | Cache luôn mới sau mỗi ghi                  | Write penalty, phình cache | ElastiCache, DAX                  |
+| Write-Back                 | Write  | Đường ghi cực nhanh                         | Rủi ro mất dữ liệu         | Pattern ứng dụng (không managed)  |
+| Write-Around               | Write  | Tránh ô nhiễm cache bởi dữ liệu ít đọc      | Miss ở lần đọc đầu         | ElastiCache + Lazy Loading        |
+| TTL                        | Expiry | Chặn trần thời gian dữ liệu cũ              | Vẫn cũ trong phạm vi TTL   | Mọi tầng cache                    |
+| Eviction                   | Memory | Chọn key bỏ khi đầy bộ nhớ                  | Có thể bỏ key còn dùng     | Redis `maxmemory-policy`, DAX LRU |
+
+Dịch vụ:
+
+| Dịch vụ           | Tầng        | Độ trễ               | Cache cho                    | Điểm nhận diện                        |
+| ----------------- | ----------- | -------------------- | ---------------------------- | ------------------------------------- |
+| CloudFront        | Biên (CDN)  | mili-giây (gần user) | Nội dung tĩnh/động toàn cầu  | Global, edge, giảm tải origin         |
+| API Gateway cache | API         | —                    | Phản hồi REST API            | TTL 300/3600, giảm gọi backend        |
+| ElastiCache       | Ứng dụng/DB | sub-millisecond      | Bất kỳ dữ liệu nào (tự code) | Redis vs Memcached                    |
+| DAX               | DynamoDB    | micro-giây           | Chỉ DynamoDB                 | Read-through/write-through trong suốt |
+
+---
+
+## Kết luận
+
+Quay lại trang sản phẩm flash sale ở đầu bài. Bây giờ bạn thấy rõ vì sao "thêm cache" không cứu được nó một cách trọn vẹn: latency giảm là nhờ một read strategy (Lazy Loading), nhưng giá hiển thị sai là vì thiếu một write strategy (Write-Through hoặc xóa key) và thiếu TTL; còn cú sập lúc nửa đêm là do nhiều key cùng hết hạn — một vấn đề về expiration và stampede. Cache không phải một cái công tắc, mà là bốn quyết định ăn khớp nhau.
+
+Vài điều cần nhớ:
+
+- **Bốn câu hỏi** của mọi hệ thống cache: đọc thế nào, ghi thế nào, sống bao lâu (TTL), bỏ gì khi đầy (eviction). Đọc đề SAA qua khung này.
+- **Read:** Cache-Aside (Lazy Loading) là mặc định và bền trước node chết; Read-Through trong suốt chính là DAX.
+- **Write:** Write-Through chống dữ liệu cũ; Write-Around tránh ô nhiễm cache; Write-Back nhanh nhưng rủi ro mất dữ liệu và không có dịch vụ managed.
+- **AWS recommend** kết hợp Lazy Loading + Write-Through + TTL, và cache là nhiều tầng (CloudFront, API Gateway, ElastiCache, DAX).
+- **Cặp đôi dễ nhầm:** DAX (micro-giây, chỉ DynamoDB, eventually consistent) vs ElastiCache (sub-ms, mọi nguồn, tự code); DynamoDB TTL (xóa item) vs cache TTL (hết hạn bản sao).
+- Khi đề nhắc "giảm chi phí" cạnh "giảm độ trễ", hãy nghĩ tới cache — nó cắt RCU, cắt tải origin, cắt số lần invoke Lambda.
+
+Nhận ra **bài toán** mà tình huống mô tả trước, rồi chiến lược và dịch vụ sẽ tự lộ ra.

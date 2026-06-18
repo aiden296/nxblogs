@@ -228,21 +228,7 @@ def read_data_with_cas_lease(key):
 
 ---
 
-## 5. Ma trận so sánh: Edge Cases vs. Solutions
-
-| | Zombie Reader | Replication Lag | Partial Failure | Complexity |
-|---|---|---|---|---|
-| **Cache-Aside** | ❌ | ❌ | ❌ | Thấp |
-| **Delayed Double Delete** | ⚠️ (Ổn nếu lag < T) | ⚠️ (Ổn nếu lag < T) | ❌ | Trung bình |
-| **CDC** | ❌ | ⚠️ (nếu dùng Update Mode) | ✅ | Cao |
-| **Lease** | ✅ | ❌ | ❌ | Rất cao |
-| **Lease + Remote Marker** | ✅ | ✅ | ❌ | Rất cao |
-
-> ✅ Solved — ⚠️ Mitigated — ❌ Failed
-
----
-
-## 6. Lời khuyên thực tế
+## 5. Lời khuyên thực tế
 
 Trong System Design, sự hoàn hảo thường đi kèm với chi phí lớn. Với đa số ứng dụng (mạng xã hội, tin tức, e-commerce, blog...), việc user nhìn thấy dữ liệu cũ trong vài giây là hoàn toàn chấp nhận được.
 
