@@ -202,6 +202,18 @@ Cung cấp **block storage** (ổ đĩa khối) qua giao thức iSCSI, được 
 
 **Use case:** backup các volume on-premises lên cloud, hoặc làm disaster recovery cho dữ liệu khối.
 
+**Recovery point — chỗ dựa để khôi phục sau sự cố.** Volume Gateway định kỳ tạo ra một <Tooltip content="Recovery point — một bản chụp nhất quán của volume tại một thời điểm, lưu bền vững trên AWS; có thể dùng để tạo lại volume hoặc xuất thành EBS snapshot">recovery point</Tooltip> cho mỗi volume — một bản chụp nhất quán của volume tại một thời điểm, lưu bền vững trên AWS. Đây chính là chỗ dựa cho disaster recovery: dù thiết bị gateway on-premises có hỏng hoàn toàn, dữ liệu và các recovery point vẫn còn nguyên trên AWS.
+
+Từ đó suy ra quy trình khôi phục đúng khi phần cứng chạy gateway chết hẳn:
+
+1. Dựng một gateway appliance mới ở on-premises (thay cho cái đã hỏng).
+2. Trên gateway mới, tạo các volume mới bằng cách clone từ recovery point gần nhất của volume cũ.
+
+Hai cái bẫy hay gặp ở đề thi:
+
+- **Không gắn thẳng volume cũ sang gateway mới được.** Volume cũ vốn gắn với gateway đã chết; bạn không "attach" lại nó — volume mới luôn phải được tạo (clone) từ một recovery point.
+- **Khôi phục cho on-premises thì phải dựng lại gateway ở on-premises.** Tạo một EBS volume từ backup rồi gắn vào một EC2 instance là kịch bản khôi phục trên cloud — nó giải bài toán khác, không trả lại quyền truy cập cho ứng dụng on-premises.
+
 ### 4.4. Tape Gateway
 
 Nhiều doanh nghiệp vẫn có quy trình backup bằng **băng từ (tape)**. Tape Gateway giả lập một <Tooltip content="Virtual Tape Library — thư viện băng từ ảo, mô phỏng các ổ băng và thư viện băng để phần mềm backup cũ tưởng như đang ghi ra băng thật">Virtual Tape Library (VTL)</Tooltip>: phần mềm backup hiện có cứ ghi ra "băng" như cũ, nhưng thực chất dữ liệu được lưu vào S3 và Glacier.

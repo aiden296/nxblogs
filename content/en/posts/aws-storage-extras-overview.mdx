@@ -202,6 +202,18 @@ Provides **block storage** (raw disk volumes) over the iSCSI protocol, backed up
 
 **Use case:** back up on-premises volumes to the cloud, or provide disaster recovery for block data.
 
+**Recovery points — the anchor for recovering after a failure.** A Volume Gateway periodically creates a <Tooltip content="Recovery point — a consistent point-in-time snapshot of a volume, stored durably in AWS; it can be used to recreate a volume or be exported as an EBS snapshot">recovery point</Tooltip> for each volume — a consistent point-in-time snapshot of the volume, stored durably in AWS. This is what disaster recovery rests on: even if the on-premises gateway hardware fails completely, the data and its recovery points remain intact in AWS.
+
+From that, the correct recovery process when the hardware running the gateway dies completely is:
+
+1. Deploy a new gateway appliance on-premises (to replace the failed one).
+2. On the new gateway, create new volumes by cloning them from the last recovery point of the original volumes.
+
+Two traps that show up on the exam:
+
+- **You cannot directly attach the old volumes to the new gateway.** The old volumes were bound to the failed gateway; you do not re-attach them — a new volume must always be created (cloned) from a recovery point.
+- **Recovering for on-premises means rebuilding the gateway on-premises.** Creating an EBS volume from a backup and attaching it to an EC2 instance is a cloud-based recovery scenario — it solves a different problem and does not restore access for the on-premises applications.
+
 ### 4.4. Tape Gateway
 
 Many enterprises still have **tape**-based backup processes. Tape Gateway emulates a <Tooltip content="Virtual Tape Library — a virtual tape library that simulates tape drives and libraries so legacy backup software thinks it is writing to real tape">Virtual Tape Library (VTL)</Tooltip>: the existing backup software keeps writing to "tape" as before, but the data is actually stored in S3 and Glacier.
