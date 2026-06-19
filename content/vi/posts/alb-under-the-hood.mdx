@@ -16,7 +16,7 @@ Bài viết này sẽ "lật mặt" kiến trúc ẩn sau ALB — từ đội qu
 
 ## 1. Load Balancer Nodes — "Đội Quân Ẩn Mình"
 
-Khi bạn tạo ALB và chọn 3 Availability Zones (AZ), AWS **không** tạo ra "một cái load balancer". Thay vào đó, AWS triển khai **ít nhất 1 load balancer node trong mỗi AZ** mà bạn đã chọn. Vậy với 3 AZs, bạn có tối thiểu 3 nodes.
+Khi bạn tạo ALB và gán cho nó 3 subnet (mỗi subnet thuộc một AZ khác nhau), AWS không tạo ra "một cái load balancer" duy nhất.Khi bạn tạo ALB và gán cho nó 3 subnet (mỗi subnet thuộc một AZ khác nhau), AWS không tạo ra "một cái load balancer" duy nhất. Thay vào đó, AWS kích hoạt ít nhất 1 load balancer node trong mỗi AZ mà bạn đã chọn — node này nằm trong subnet bạn gán cho AZ đó. Vậy với 3 AZ, bạn có tối thiểu 3 node.
 
 ### Nodes scale như thế nào?
 

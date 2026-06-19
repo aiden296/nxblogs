@@ -16,7 +16,7 @@ This article will reveal the hidden architecture behind ALB — from the army of
 
 ## 1. Load Balancer Nodes — "The Hidden Army"
 
-When you create an ALB and select 3 Availability Zones (AZs), AWS **doesn't** create "one load balancer". Instead, AWS deploys **at least 1 load balancer node in each AZ** you selected. So with 3 AZs, you have a minimum of 3 nodes.
+When you create an ALB and assign it 3 subnets (each belonging to a different AZ), AWS doesn't create a single "load balancer". Instead, AWS spins up at least 1 load balancer node in each AZ you selected — this node lives in the subnet you assigned to that AZ. So with 3 AZs, you have a minimum of 3 nodes.
 
 ### How do nodes scale?
 

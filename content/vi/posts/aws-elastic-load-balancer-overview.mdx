@@ -1,0 +1,241 @@
+---
+title: 'Elastic Load Balancer: Bốn Loại, Bốn Bài Toán — Chọn Đúng ALB, NLB, GWLB hay CLB Trong Đề SAA'
+date: '2026-06-19'
+tags: ['AWS', 'SAA', 'Exam Prep', 'Devops']
+description: 'Tổng quan chuyên sâu về AWS Elastic Load Balancing cho kỳ thi SAA — bộ khung chung (Listener, Target Group, Health Check, cross-zone, sticky session), và bốn loại load balancer ALB, NLB, GWLB, CLB: mỗi loại hoạt động ra sao bên dưới, giải quyết bài toán gì, dùng khi nào, và những bẫy hay gặp trong phòng thi.'
+enableComment: true
+---
+
+# Elastic Load Balancer: Bốn Loại, Bốn Bài Toán — Chọn Đúng ALB, NLB, GWLB hay CLB Trong Đề SAA
+
+Bạn vừa deploy một web app lên một con <Tooltip content="Elastic Compute Cloud — máy chủ ảo trên AWS">EC2</Tooltip> duy nhất. Mọi thứ chạy ngon, cho tới ngày traffic tăng vọt. Một buổi sáng, con EC2 đó chết — và vì nó là điểm vào duy nhất, toàn bộ hệ thống sập theo. Bạn dựng thêm vài EC2 nữa để chia tải, nhưng lập tức vấp câu hỏi: client biết gọi vào EC2 nào? Nếu một EC2 chết, ai phát hiện và ngừng đẩy traffic vào nó? Khi traffic giảm, ai gom client về ít máy hơn cho đỡ tốn tiền?
+
+Đây chính là bài toán mà **load balancer** (bộ cân bằng tải) sinh ra để giải: đứng trước một nhóm server, nhận mọi request từ client, rồi phân phối tới những server đang khỏe mạnh — để hệ thống vừa chịu tải tốt, vừa không sập khi một máy chết.
+
+Nhưng rồi nhu cầu của bạn không dừng ở web. Tuần sau, team game cần cân bằng tải cho lưu lượng <Tooltip content="User Datagram Protocol — giao thức truyền dữ liệu nhanh, không thiết lập kết nối, hay dùng cho game và streaming">UDP</Tooltip> với độ trễ gần bằng 0. Tháng sau, một đối tác B2B yêu cầu bạn cung cấp một địa chỉ IP tĩnh để họ whitelist. Rồi team security muốn chèn một dàn firewall của bên thứ ba vào giữa đường đi của gói tin để soi mọi luồng traffic. Mỗi nhu cầu này, hóa ra, lại gọi tên một **loại** load balancer khác nhau trong họ <Tooltip content="Elastic Load Balancing — dịch vụ cân bằng tải được quản lý của AWS, gồm bốn loại: ALB, NLB, GWLB, CLB">Elastic Load Balancing</Tooltip> của AWS.
+
+Bài viết này là tấm bản đồ giúp bạn phân biệt bốn loại đó. Với mỗi loại, chúng ta sẽ đi qua: nó hoạt động ra sao bên dưới, giải quyết bài toán gì, dùng khi nào, và những điểm hay bị hỏi trong phòng thi <Tooltip content="AWS Certified Solutions Architect – Associate — chứng chỉ kiến trúc sư giải pháp AWS mức Associate">SAA</Tooltip>.
+
+> **Lưu ý:** Đây là bài tổng quan để xây mental model và nhận diện nhanh đáp án khi đi thi. Phần lớn bẫy trong đề SAA nằm ở **ranh giới** giữa các loại — ALB hay NLB, NLB hay GWLB — nên bài tập trung vào lý do tồn tại và sự khác nhau giữa chúng. Hai bài đào sâu riêng đã có sẵn: cơ chế ẩn sau ALB (load balancer nodes, scaling, vì sao không có static IP) trong [ALB Under The Hood](/vi/posts/alb-under-the-hood), và so sánh chi phí ALB với NLB trong [Chọn ALB hay NLB](/vi/posts/alb-or-nlb).
+
+---
+
+## 1. Elastic Load Balancing là gì?
+
+**Elastic Load Balancing (ELB)** là dịch vụ cân bằng tải được AWS quản lý hoàn toàn. Bạn không phải tự dựng máy chủ HAProxy hay Nginx, không phải lo vá lỗi, không phải tự scale: bạn khai báo một load balancer, AWS lo phần hạ tầng bên dưới.
+
+Điểm quan trọng đầu tiên cần ghim: một ELB không phải "một cái máy". Bên dưới, AWS triển khai các **load balancer node** trải trên nhiều <Tooltip content="Availability Zone — một hoặc nhiều trung tâm dữ liệu độc lập trong một Region, cách ly lỗi với nhau">Availability Zone (AZ)</Tooltip> mà bạn chọn. Nhờ vậy, nếu cả một AZ gặp sự cố, các node ở AZ còn lại vẫn nhận traffic — bản thân load balancer đã có sẵn tính sẵn sàng cao (high availability). Các node này tự co giãn theo lưu lượng, nên ELB hấp thụ được cả những đợt traffic tăng đột biến mà bạn không phải làm gì.
+
+Những giá trị cốt lõi mà mọi loại ELB đều mang lại:
+
+- **Phân phối tải** tới nhiều target để không máy nào quá tải.
+- **Health check**: tự động ngừng đẩy traffic vào target đang lỗi, và đẩy lại khi nó khỏe.
+- **High availability** sẵn có nhờ trải trên nhiều AZ.
+- **Tách rời** client khỏi server: client chỉ biết một điểm vào duy nhất, server phía sau có thể thêm/bớt thoải mái.
+- **Tích hợp Auto Scaling**: khi <Tooltip content="Auto Scaling Group — nhóm EC2 tự động tăng/giảm số lượng instance theo tải hoặc theo lịch">Auto Scaling Group</Tooltip> thêm hay bớt EC2, target tự động được đăng ký hoặc gỡ khỏi load balancer.
+
+AWS chia ELB thành bốn loại, mỗi loại làm việc ở một **tầng** khác nhau trong mô hình mạng. Một mẹo nhớ về "tầng": tầng càng thấp thì load balancer càng "ngây thơ" và nhanh (chỉ nhìn IP, cổng); tầng càng cao thì nó càng "hiểu" nội dung và định tuyến thông minh hơn, đổi lại tốn xử lý hơn.
+
+| Loại                                | Tầng        | "Nhìn" được gì                    | Sinh ra để giải bài toán                                 |
+| ----------------------------------- | ----------- | --------------------------------- | -------------------------------------------------------- |
+| **ALB** (Application Load Balancer) | Layer 7     | Nội dung HTTP: path, host, header | Định tuyến thông minh cho web/microservices              |
+| **NLB** (Network Load Balancer)     | Layer 4     | IP và cổng (TCP/UDP)              | Hiệu năng cực cao, static IP, mọi giao thức TCP/UDP      |
+| **GWLB** (Gateway Load Balancer)    | Layer 3     | Gói tin IP thô                    | Chèn dàn thiết bị bảo mật bên thứ ba một cách trong suốt |
+| **CLB** (Classic Load Balancer)     | Layer 4 + 7 | Hạn chế                           | Thế hệ cũ — đừng chọn cho thiết kế mới                   |
+
+Trước khi đi vào từng loại, có một bộ khái niệm dùng chung cho tất cả. Nắm chắc bộ khung này thì việc học từng loại chỉ còn là điền vào chỗ khác biệt.
+
+---
+
+## 2. Bộ khung chung của mọi ELB
+
+Dù bạn dùng loại nào, kiến trúc logic đều xoay quanh ba mảnh ghép: **Listener** nhận kết nối, **Target Group** gom các đích, và **Health Check** quyết định đích nào đủ khỏe để nhận traffic.
+
+<ExcalidrawDiagram
+  src="/aws-elastic-load-balancer-anatomy.excalidraw"
+  alt="Giải phẫu một load balancer: client request đi vào Load Balancer qua một Listener (cổng 443/HTTPS), Listener chứa các Listener Rules quyết định định tuyến — nếu path là /api thì tới Target Group A (containers), nếu host là img thì tới Target Group B (Lambda), mặc định tới Target Group C (EC2 instances); mỗi Target Group gắn một health check. Ghi chú: ALB ngắt kết nối và thêm header X-Forwarded-For/Proto/Port để backend vẫn thấy client gốc; bộ khung này áp dụng cho mọi loại ELB, chỉ khác phần listener thông minh tới đâu"
+/>
+
+### 2.1. Listener và Rule
+
+**Listener** là một tiến trình lắng nghe trên một cặp giao thức và cổng cụ thể, ví dụ HTTPS cổng `443`. Mọi kết nối từ client đập vào load balancer đều đi qua một listener. Listener của ALB còn chứa các **rule** (luật định tuyến) được đánh số thứ tự ưu tiên: load balancer duyệt rule từ ưu tiên cao xuống thấp, gặp rule nào khớp điều kiện thì thực thi hành động của rule đó, và luôn có một rule mặc định ở cuối để bắt mọi request không khớp rule nào.
+
+### 2.2. Target Group và các loại target
+
+**Target Group** là một nhóm các đích cùng nhận traffic từ load balancer. Một điểm hay nhầm: load balancer không trỏ thẳng vào EC2, nó trỏ vào target group, còn target group mới chứa các đích thật. Tùy loại load balancer, một target có thể là:
+
+- **Instance**: một EC2 cụ thể (định danh bằng instance ID).
+- **IP**: một địa chỉ IP — cho phép trỏ tới target nằm ngoài (on-premises qua VPN/Direct Connect, hoặc container có IP riêng).
+- **Lambda**: chỉ ALB hỗ trợ
+- **Application Load Balancer**: chỉ NLB hỗ trợ
+
+### 2.3. Health Check — trái tim của high availability
+
+Load balancer định kỳ gửi một request thăm dò tới mỗi target (gọi là **active health check**). Bạn cấu hình giao thức, cổng, đường dẫn (ví dụ `GET /health`), khoảng cách giữa các lần thăm dò, và ngưỡng số lần thất bại liên tiếp để coi một target là "unhealthy". Khi một target rớt ngưỡng, load balancer ngừng đẩy traffic vào nó; khi nó hồi phục đủ số lần thành công, traffic được đẩy lại. Đây chính là cơ chế giúp một EC2 chết không kéo theo lỗi cho user.
+
+### 2.4. Cross-zone load balancing — một bẫy kinh điển
+
+Giả sử AZ-a có 2 target, AZ-b có 8 target. Khi **cross-zone load balancing** bật, mỗi node load balancer phân phối đều ra **toàn bộ 10 target ở mọi AZ**. Khi tắt, một node chỉ phân phối cho các target **trong cùng AZ với nó** — nghĩa là 2 target ở AZ-a phải gánh phần traffic ngang với 8 target ở AZ-b, gây lệch tải nặng.
+
+Điểm dễ bị hỏi là **mặc định khác nhau theo loại**:
+
+| Loại     | Cross-zone mặc định                                | Ghi chú chi phí                                              |
+| -------- | -------------------------------------------------- | ------------------------------------------------------------ |
+| **ALB**  | Bật (không tắt được ở mức load balancer)           | Miễn phí, không tính data transfer giữa các AZ               |
+| **NLB**  | Tắt                                                | Khi bật, lưu lượng giữa các AZ **bị tính phí** data transfer |
+| **GWLB** | Tắt                                                | Tương tự NLB                                                 |
+| **CLB**  | Tắt nếu tạo bằng API/CLI, bật nếu tạo bằng Console | —                                                            |
+
+### 2.5. Sticky session
+
+**Sticky session** buộc các request của cùng một client luôn về cùng một target — hữu ích khi server giữ trạng thái phiên trong bộ nhớ - stateful. Cơ chế cũng khác nhau theo từng loại:
+
+- ALB và CLB dùng cookie (ALB sinh cookie `AWSALB` cho kiểu theo thời lượng, hoặc bám theo cookie ứng dụng của bạn cho kiểu application-based)
+- NLB không dùng cookie mà dính theo địa chỉ IP nguồn của client.
+
+### 2.6. Những tính năng dùng chung khác
+
+- **SSL/TLS termination**: load balancer có thể giữ chứng chỉ TLS (quản lý qua <Tooltip content="AWS Certificate Manager — dịch vụ cấp và quản lý chứng chỉ TLS miễn phí">ACM</Tooltip>) và giải mã HTTPS, giảm tải cho backend. Cả ALB và NLB hỗ trợ <Tooltip content="Server Name Indication — kỹ thuật cho phép gắn nhiều chứng chỉ TLS cho nhiều tên miền trên cùng một listener">SNI</Tooltip> để phục vụ nhiều tên miền với nhiều chứng chỉ trên một listener.
+- **Connection draining** (ALB/NLB gọi là **deregistration delay**, mặc định 300 giây): khi gỡ một target, load balancer ngừng gửi request mới nhưng vẫn để các request đang dở chạy xong, tránh cắt ngang giữa chừng.
+- **Access logs**: ghi lại mọi request ra <Tooltip content="Simple Storage Service — dịch vụ lưu trữ object của AWS">S3</Tooltip> để phân tích hay điều tra sự cố.
+- **Deletion protection**: chống xóa nhầm load balancer production.
+
+Xong bộ khung. Giờ đi vào từng loại và phần khác biệt làm nên bản sắc của chúng.
+
+---
+
+## 3. ALB — Application Load Balancer (Layer 7)
+
+### 3.1. Bài toán nó giải
+
+ALB hoạt động ở **Layer 7** (tầng ứng dụng), nghĩa là nó "mở" được gói tin HTTP/HTTPS ra đọc. Vì hiểu nội dung, nó định tuyến dựa trên những thứ bên trong request — đường dẫn, tên miền, header — chứ không chỉ IP và cổng. Đây là load balancer bạn đặt trước web app, <Tooltip content="Kiến trúc chia ứng dụng thành nhiều dịch vụ nhỏ độc lập, mỗi dịch vụ lo một nghiệp vụ">microservices</Tooltip>, hay cụm container.
+
+### 3.2. Cơ chế định tuyến bên dưới
+
+Trái tim của ALB là bộ luật trên mỗi listener. Mỗi rule gồm **điều kiện** và **hành động**. Người ta thường gọi tên các kiểu định tuyến của ALB theo chính điều kiện mà rule dựa vào:
+
+- **Host-based routing**: định tuyến theo tên miền trong request (điều kiện `host-header`) — ví dụ `api.example.com` đi tới cụm API, còn `img.example.com` đi tới cụm phục vụ ảnh.
+- **Path-based routing**: định tuyến theo đường dẫn URL (điều kiện `path-pattern`) — ví dụ `/api/*` tới cụm API, `/static/*` tới cụm static.
+- **Header-based routing**: định tuyến theo một HTTP header tùy ý (`http-header`) — ví dụ tách traffic theo một header phiên bản API hay theo `User-Agent`.
+- **Method-based routing**: định tuyến theo phương thức HTTP (`http-request-method`) — ví dụ tách `GET` khỏi `POST`.
+- **Query string-based routing**: định tuyến theo tham số trên query string (`query-string`).
+- **Source IP-based routing**: định tuyến theo dải IP nguồn của client (`source-ip`).
+
+Các hành động có thể là:
+
+- `forward`: đẩy tới một target group
+- `redirect`: chuyển hướng, ví dụ ép HTTP sang HTTPS
+- `fixed-response`: trả thẳng một response cố định, ví dụ trang `503` bảo trì
+- `authenticate`: xác thực người dùng trước khi cho qua
+
+Về cách chọn target trong một group, ALB mặc định dùng **round robin** (lần lượt từng target), nhưng có thể chuyển sang <Tooltip content="Least Outstanding Requests — gửi request mới tới target đang xử lý ít request dở dang nhất">least outstanding requests</Tooltip> để ưu tiên target đang rảnh nhất — hợp khi thời gian xử lý mỗi request chênh lệch lớn.
+
+Một đặc điểm cốt lõi: ALB **ngắt kết nối** (connection termination). Nó đóng vai một <Tooltip content="Reverse proxy — máy chủ trung gian nhận kết nối từ client rồi mở một kết nối mới tới backend thay cho client">reverse proxy</Tooltip> — kết thúc kết nối từ client rồi mở một kết nối mới tới backend. Hệ quả là backend không còn thấy IP gốc của client;
+
+Để bù lại, ALB chèn các header `X-Forwarded-For` (IP client gốc), `X-Forwarded-Proto` (http hay https), và `X-Forwarded-Port`. Nếu ứng dụng cần biết client thật, hãy đọc các header này thay vì IP của kết nối.
+
+### 3.3. Những tính năng riêng đáng nhớ
+
+- **Target là Lambda**: ALB có thể gọi thẳng một hàm Lambda, biến nó thành backend phục vụ HTTP mà không cần EC2.
+- **Authentication offload**: ALB tự xử lý đăng nhập qua <Tooltip content="Amazon Cognito — dịch vụ quản lý người dùng và xác thực của AWS">Cognito</Tooltip> hoặc bất kỳ <Tooltip content="OpenID Connect — chuẩn xác thực dựa trên OAuth 2.0, dùng cho đăng nhập một lần (SSO)">OIDC</Tooltip> provider, để ứng dụng không phải tự viết tầng login.
+- **Tích hợp WAF**: gắn được <Tooltip content="Web Application Firewall — tường lửa lọc request HTTP tầng 7, chặn SQL injection, XSS...">WAF</Tooltip> để chặn tấn công web tầng ứng dụng.
+- **gRPC, HTTP/2, WebSocket**: hỗ trợ các giao thức hiện đại trên nền HTTP, phù hợp microservices và realtime.
+- **mTLS**: hỗ trợ <Tooltip content="Mutual TLS — xác thực hai chiều, cả client và server đều trình chứng chỉ; client không có chứng chỉ hợp lệ sẽ bị từ chối">mutual TLS</Tooltip>, hữu ích cho API B2B yêu cầu client phải trình chứng chỉ.
+
+Một điểm cần nhớ cho phòng thi: ALB **không có IP tĩnh**, chỉ có một DNS name. Lý do nằm ở cơ chế scale liên tục thêm/bớt node — chi tiết trong [ALB Under The Hood](/vi/posts/alb-under-the-hood). Nếu đề bài đòi static IP mà vẫn cần định tuyến Layer 7, đó là gợi ý ghép NLB đứng trước ALB (phần 4.4).
+
+---
+
+## 4. NLB — Network Load Balancer (Layer 4)
+
+### 4.1. Bài toán nó giải
+
+NLB làm việc ở **Layer 4**: nó chỉ nhìn IP và cổng, không mở gói tin ra đọc nội dung. Đổi lại sự "ngây thơ" đó là tốc độ — NLB xử lý được hàng triệu request mỗi giây với độ trễ cỡ micro-giây, và làm việc với mọi giao thức trên nền TCP/UDP chứ không riêng HTTP.
+
+### 4.2. Cơ chế bên dưới: flow hashing, không ngắt kết nối
+
+Khác với ALB, NLB **không ngắt kết nối**. Khi một kết nối mới tới, NLB tính một <Tooltip content="Hàm băm gộp nhiều trường thành một giá trị để chọn target một cách nhất quán">hash</Tooltip> trên **5-tuple** — gồm IP nguồn, cổng nguồn, IP đích, cổng đích, và giao thức — rồi dùng giá trị đó chọn ra một target. Mọi gói tin của kết nối đó cứ thế chảy thẳng tới target đã chọn, NLB không xen vào ở giữa như một proxy.
+
+Chính vì không phải dựng/duy trì hai kết nối và không phải đọc nội dung, NLB mới đạt độ trễ cực thấp. NLB cũng sẽ **giữ nguyên IP nguồn của client** (source IP preservation). Backend thấy thẳng IP thật của client mà không cần đọc header `X-Forwarded-For` như với ALB.
+
+### 4.3. Static IP — đặc sản của NLB
+
+NLB cấp **một địa chỉ IP tĩnh cho mỗi AZ**, và bạn có thể gắn <Tooltip content="Elastic IP — địa chỉ IPv4 public tĩnh mà bạn sở hữu và gắn vào tài nguyên AWS">Elastic IP</Tooltip> cố định cho từng AZ. Đây là lý do số một để chọn NLB: khi đối tác hay một firewall doanh nghiệp yêu cầu whitelist một IP cố định, ALB (chỉ có DNS, IP đổi liên tục) không đáp ứng được, còn NLB thì có sẵn.
+
+### 4.4. Những tính năng riêng đáng nhớ
+
+- **Đứng trước PrivateLink**: chỉ NLB (và GWLB) được làm mặt tiền cho một <Tooltip content="VPC Endpoint Service — cách phơi một dịch vụ trong VPC của bạn cho các VPC khác truy cập riêng tư qua PrivateLink, không qua internet">endpoint service</Tooltip>. Muốn phơi một dịch vụ nội bộ cho VPC của khách hàng truy cập riêng tư qua PrivateLink, bạn đặt NLB ở trước.
+- **NLB đứng trước ALB**: target của NLB có thể là một ALB. Ghép này cho bạn cả hai thứ tốt nhất — IP tĩnh của NLB ở ngoài cùng, và định tuyến Layer 7 của ALB ở phía trong.
+- **Hỗ trợ Security Group**: trước đây NLB không gắn được <Tooltip content="Security Group — tường lửa có trạng thái ở mức instance/ENI, kiểm soát lưu lượng vào ra">Security Group</Tooltip>, nhưng từ năm 2023 NLB đã hỗ trợ — một thay đổi tương đối mới, đừng dựa vào kiến thức cũ cho rằng NLB luôn thiếu tính năng này.
+- **Idle timeout** mặc định 350 giây cho luồng TCP, dài hơn nhiều mức 60 giây của ALB — hợp với kết nối giữ lâu.
+
+---
+
+## 5. GWLB — Gateway Load Balancer (Layer 3)
+
+### 5.1. Bài toán nó giải
+
+Đây là loại lạ nhất và hay bị nhầm nhất. GWLB **không phục vụ traffic ứng dụng** như ALB hay NLB.
+
+Thay vào đó, nó sinh ra để giải một bài toán bảo mật rất cụ thể: bạn muốn chèn một **dàn thiết bị ảo bên thứ ba** — firewall, hệ thống phát hiện xâm nhập (<Tooltip content="Intrusion Detection System — hệ thống phát hiện xâm nhập, cảnh báo khi thấy lưu lượng đáng ngờ">IDS</Tooltip>), hệ thống ngăn chặn xâm nhập (<Tooltip content="Intrusion Prevention System — hệ thống ngăn chặn xâm nhập, chủ động chặn lưu lượng tấn công">IPS</Tooltip>), hay thiết bị soi gói sâu — vào **giữa đường đi** của lưu lượng để kiểm tra, mà vẫn phải vừa sẵn sàng cao vừa tự co giãn theo tải.
+
+GWLB làm hai việc cùng lúc: vừa là một **cổng mạng trong suốt** (transparent gateway, một điểm vào/ra duy nhất cho traffic), vừa là một **load balancer** phân phối lưu lượng đó ra dàn appliance.
+
+### 5.2. Cơ chế bên dưới: GENEVE và GWLB Endpoint
+
+GWLB hoạt động ở **Layer 3** — nó thao tác trên gói tin IP thô. Hai khái niệm làm nên cơ chế "trong suốt" của nó:
+
+- **GENEVE port 6081**: GWLB dùng giao thức <Tooltip content="Generic Network Virtualization Encapsulation — giao thức bọc (đóng gói) gói tin gốc vào một gói tin mới để truyền tới thiết bị kiểm tra, chạy trên cổng 6081">GENEVE</Tooltip> để bọc nguyên gói tin gốc rồi truyền tới appliance qua một đường hầm. Appliance phải biết "nói" GENEVE thì mới giải gói ra kiểm tra được — đây cũng là lý do chính không phục vụ traffic ứng dụng như ALB và NLB.
+- **GWLB Endpoint (GWLBe)**: là một dạng VPC endpoint (chạy trên nền <Tooltip content="AWS PrivateLink — công nghệ kết nối riêng tư tới một dịch vụ mà không đi qua internet">PrivateLink</Tooltip>) đặt trong VPC ứng dụng. Bạn sửa **route table** để lái lưu lượng đi qua GWLBe; GWLBe chuyển tiếp sang GWLB ở một VPC khác (thường là một VPC kiểm tra tập trung), GWLB phân phối ra dàn appliance, rồi traffic quay ngược lại đúng đường.
+
+Điểm tinh tế giúp GWLB hợp với firewall **có trạng thái**: nó giữ **flow stickiness** — mọi gói của cùng một luồng (mặc định theo 5-tuple, có thể là 3-tuple hoặc 2-tuple) luôn về cùng một appliance, và cả chiều đi lẫn chiều về đều qua đúng appliance đó (luồng đối xứng — symmetric flow). Nhờ vậy một stateful firewall mới thấy đủ cả hai chiều của một phiên để ra quyết định.
+
+Vì sao NLB không thay được GWLB ở đây? NLB là proxy phân phối kết nối, không phải cổng trong suốt: nếu ép NLB làm thiết bị soi inline, bạn phải cấu hình định tuyến phức tạp và thường phải <Tooltip content="Source Network Address Translation — đổi địa chỉ IP nguồn của gói tin, khiến backend không còn thấy IP gốc">source NAT</Tooltip>, làm mất tính trong suốt mà bài toán đòi hỏi. GWLB là thứ AWS làm sẵn cho đúng nhu cầu này.
+
+---
+
+## 6. CLB — Classic Load Balancer (thế hệ cũ)
+
+**Classic Load Balancer** là load balancer đời đầu của AWS, ra mắt từ thời mạng <Tooltip content="EC2-Classic — mô hình mạng phẳng đời đầu của AWS, đã ngừng từ 2022, tiền thân trước khi có VPC">EC2-Classic</Tooltip>. Nó làm được cả Layer 4 (TCP/SSL) lẫn Layer 7 (HTTP/HTTPS) một cách cơ bản, nhưng thiếu gần hết tính năng làm nên sức mạnh của ALB và NLB: không có bộ rule định tuyến theo path/host, chỉ gắn được một chứng chỉ TLS (không SNI), không hỗ trợ target Lambda, không gRPC, không các giao thức hiện đại.
+
+Cần nói rõ một điểm hay bị hiểu nhầm: CLB **chưa bị khai tử**. Cái đã ngừng vào năm 2022 là **mạng EC2-Classic**, không phải bản thân Classic Load Balancer — CLB vẫn chạy được trong VPC. Nhưng nó là **thế hệ cũ** (previous generation), và AWS khuyến nghị chuyển sang ALB hoặc NLB cho mọi thiết kế mới.
+
+Với phòng thi, CLB gần như không bao giờ là đáp án đúng cho một kiến trúc mới. Vai trò của nó trong đề thường là một distractor mang từ khóa "legacy" hay "Classic" — thấy là gần như loại được ngay, trừ khi đề nói thẳng về một hệ thống cũ đang cần migrate.
+
+---
+
+## 7. Chọn loại nào? Bản đồ quyết định cho phòng thi
+
+Khi đọc một câu hỏi SAA, hãy lần theo cây quyết định: bắt đầu từ nhu cầu rõ ràng nhất (định tuyến HTTP thông minh, hay chèn thiết bị bảo mật, hay hiệu năng/IP tĩnh) rồi loại dần.
+
+<ExcalidrawDiagram
+  src="/aws-elastic-load-balancer-decision-tree.excalidraw"
+  alt="Cây quyết định chọn load balancer cho kỳ thi SAA: nếu là HTTP/HTTPS và cần định tuyến theo path/host/header, WAF hay Cognito thì chọn ALB (Layer 7); nếu không, hỏi tiếp có cần chèn dàn firewall/IDS bên thứ ba để soi traffic inline không — nếu có thì chọn GWLB (GENEVE 6081, trong suốt); nếu không, hỏi tiếp có cần TCP/UDP, IP tĩnh, hiệu năng cực cao hay PrivateLink không — nếu có thì chọn NLB (Layer 4); nếu tất cả đều không và chỉ là hệ thống legacy/EC2-Classic thì mới tới CLB, và nên migrate"
+/>
+
+Bảng dưới gom các **từ khóa** hay xuất hiện trong đề và loại load balancer chúng gợi tới:
+
+| Từ khóa trong đề                                                                                                   | Loại                                             |
+| ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| Định tuyến theo path/host/header, microservices, container, WAF, Cognito, redirect, Lambda target                  | **ALB**                                          |
+| Static IP / Elastic IP, hàng triệu request, độ trễ cực thấp, TCP/UDP, game, IoT/MQTT, PrivateLink endpoint service | **NLB**                                          |
+| Third-party security appliance, firewall/IDS/IPS, GENEVE, transparent inspection, centralized inspection VPC       | **GWLB**                                         |
+| Giữ nguyên IP client gốc                                                                                           | **NLB** (và GWLB); ALB thì qua `X-Forwarded-For` |
+| Legacy, Classic, EC2-Classic                                                                                       | **CLB** (gần như luôn nên loại / migrate)        |
+
+---
+
+## Lời kết
+
+Quay lại câu chuyện đầu bài: bạn không cần một load balancer "vạn năng", bạn cần đúng loại cho đúng bài toán. Khi traffic web tăng và cần định tuyến thông minh, đó là ALB. Khi cần tốc độ, IP tĩnh, hay giao thức TCP/UDP, đó là NLB. Khi cần chèn dàn thiết bị bảo mật vào giữa đường đi một cách trong suốt, đó là GWLB. Còn CLB chỉ là di sản của quá khứ.
+
+Những điều cần ghim cho phòng thi:
+
+- **Bốn loại, bốn tầng**: ALB (Layer 7, nội dung HTTP), NLB (Layer 4, IP và cổng), GWLB (Layer 3, gói tin thô), CLB (thế hệ cũ, tránh dùng).
+- **Bộ khung chung**: Listener nhận kết nối, Target Group gom đích, Health Check giữ high availability — học một lần dùng cho mọi loại.
+- **Cross-zone mặc định khác nhau**: ALB bật và miễn phí; NLB và GWLB tắt, và NLB tính phí data transfer giữa các AZ khi bật.
+- **ALB không có static IP** (chỉ DNS); **NLB có static/Elastic IP** và giữ nguyên IP client — đây là cặp đối lập hay được hỏi.
+- **GWLB là duy nhất cho thiết bị bảo mật bên thứ ba**: nhận diện qua GENEVE port 6081, GWLB Endpoint, và yêu cầu "trong suốt"; đừng chọn NLB cho bài toán này.
+- **NLB và GWLB** là hai loại duy nhất đứng trước được PrivateLink endpoint service.
+
+Bạn đang đặt loại load balancer nào trước hệ thống của mình, và vì lý do gì? Hãy chia sẻ bên dưới.
