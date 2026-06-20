@@ -1,0 +1,325 @@
+---
+title: 'AWS PrivateLink Under The Hood: Một ENI, Một DNS Name, Và Cỗ Máy Hyperplane Vô Hình Phía Sau'
+date: '2026-06-19'
+tags: ['Devops', 'AWS']
+description: 'Mổ xẻ cơ chế bên trong của AWS PrivateLink — endpoint ENI, private DNS, endpoint service trước NLB, NAT một chiều, và lớp Hyperplane phân tán thật sự đẩy từng packet.'
+enableComment: true
+---
+
+# AWS PrivateLink Under The Hood: Một ENI, Một DNS Name, Và Cỗ Máy Hyperplane Vô Hình Phía Sau
+
+Bạn vận hành một SaaS. Khách hàng lớn nhất vừa gửi một yêu cầu bảo mật: họ muốn gọi API nội bộ của bạn mà **traffic không bao giờ ra internet**, kể cả khi đã có TLS.
+
+Phương án đầu tiên ai cũng nghĩ tới là <Tooltip content="VPC Peering — kết nối ngang hàng hai VPC để chúng định tuyến tới nhau bằng private IP như thể cùng một mạng">VPC Peering</Tooltip>. Nó chạy được với một khách. Rồi khách thứ hai, thứ mười, thứ năm mươi kéo tới. Đột nhiên bạn ngập trong rắc rối: hai VPC có dải địa chỉ <Tooltip content="Classless Inter-Domain Routing — cách biểu diễn một dải địa chỉ IP, ví dụ 10.0.0.0/16 gồm 65536 địa chỉ">CIDR</Tooltip> trùng nhau thì không peer được; mỗi peering phải sửa route table ở cả hai phía; và tệ nhất, peering mở một con đường **hai chiều** — về lý thuyết phía khách cũng có thể khởi tạo kết nối ngược vào mạng của bạn. Với 50 khách, bạn có một mạng lưới chằng chịt, mong manh, và rộng quá mức cần thiết.
+
+Gốc rễ vấn đề: peering là mô hình **kết nối hai mạng** (network-to-network). Nhưng thứ bạn thực sự cần lại nhỏ và hẹp hơn nhiều — chỉ là **phơi đúng một dịch vụ** ra cho nhiều bên gọi, theo một chiều, không quan tâm CIDR của ai trùng ai, không đụng tới route table của khách. Đó chính xác là bài toán mà **AWS PrivateLink** sinh ra để giải.
+
+Bài viết này sẽ tháo tung PrivateLink ra xem bên trong: cái endpoint bạn tạo thực chất là gì, vì sao một hostname công khai như `monitoring.us-east-2.amazonaws.com` lại resolve về một IP riêng tư trong VPC của bạn, packet đi đường nào để tới được dịch vụ, và quan trọng nhất — lớp hạ tầng vô hình tên là **Hyperplane** đã âm thầm đẩy từng gói tin ra sao.
+
+<ExcalidrawDiagram
+  src="/aws-privatelink-overview.excalidraw"
+  alt="AWS PrivateLink end-to-end — Consumer VPC with endpoint ENIs and private DNS, the AWS Hyperplane fabric doing SNAT/DNAT, and the Provider VPC with an NLB-fronted endpoint service"
+/>
+
+---
+
+## 1. Vì Sao Peering Và Internet Gateway Đều Không Đủ
+
+Trước khi hiểu PrivateLink làm gì, cần thấy rõ vì sao những công cụ kết nối "kinh điển" lại không hợp với bài toán "phơi một dịch vụ".
+
+VPC Peering kết nối hai VPC lại để chúng định tuyến tới nhau bằng private IP. Nghe thì gọn, nhưng nó có ba điểm chí mạng khi số bên tham gia tăng lên:
+
+- **Bùng nổ tổ hợp.** Để n VPC nói chuyện với nhau theo kiểu lưới đầy đủ, bạn cần khoảng n²/2 đường peering. 5 VPC là 10 đường; 20 VPC là 190 đường. Mỗi đường là một lần sửa route table ở hai phía.
+- **CIDR không được trùng.** Vì routing dựa trên IP, nếu VPC của bạn và VPC của khách cùng dùng `10.0.0.0/16`, packet không biết đường nào mà đi. Trong thực tế, vô số VPC đều mặc định `10.0.0.0/16`.
+- **Phạm vi quá rộng và hai chiều.** Là over-engineering nếu nhu cầu chỉ là cung cấp 1 private API (non public-facing). Peering mở thông toàn bộ hai mạng (trong giới hạn route table và security group), chứ không phải chỉ một cổng dịch vụ. Nó cũng cho phép cả hai phía chủ động khởi tạo kết nối.
+
+<ExcalidrawDiagram
+  src="/aws-privatelink-vs-peering.excalidraw"
+  alt="Comparison — VPC Peering full mesh requiring n-squared links versus PrivateLink service hub where many consumers connect one-way to a single endpoint service"
+/>
+
+Còn nếu phơi dịch vụ qua internet (đặt sau một public load balancer) thì traffic ra internet thật, kéo theo toàn bộ bề mặt tấn công: phải lo public IP, WAF, DDoS, và khách phải tin rằng firewall của bạn cấu hình đúng.
+
+PrivateLink lật ngược cách tư duy. Thay vì "nối hai mạng rồi định tuyến giữa chúng", nó nói: **bên cung cấp xuất bản một dịch vụ, bên tiêu thụ tạo một cánh cửa riêng tới đúng dịch vụ đó.** Không ai phải biết topology mạng của ai. Đây là **service networking**, không phải **network peering** — và sự khác biệt tư duy đó là chìa khóa cho mọi thứ phía sau.
+
+> Bản thân AWS cũng chính là một provider khổng lồ: S3, CloudWatch, Secrets Manager, SQS... đều được phơi qua PrivateLink theo đúng mô hình này.
+
+---
+
+## 2. Phía Provider — Endpoint Service Và Vì Sao Bắt Buộc Là NLB
+
+Bắt đầu từ nửa phơi dịch vụ ra. Provider muốn xuất bản một dịch vụ qua PrivateLink thì làm gì?
+
+Họ đặt dịch vụ sau một NLB, rồi tạo một **endpoint service** trỏ tới NLB đó. Dịch vụ ở đây có thể là một fleet EC2, containers, hay bất cứ thứ gì nhận TCP.
+
+> Vì sao **bắt buộc phải là NLB** (hoặc Gateway Load Balancer), chứ không phải ALB? Câu trả lời chạm vào chính lõi của bài viết: PrivateLink và NLB **dùng chung một lớp hạ tầng tên là Hyperplane**.
+
+AWS cấp cho endpoint service một cái tên dạng `com.amazonaws.vpce.us-east-2.vpce-svc-0123456789abcdef` - gọi là service name.
+
+Provider sẽ gửi mail cho consumer, bảo rằng hãy sử dụng service name này để sử dụng dịch vụ của chúng tôi. Vậy là công việc của Provider đã xong.
+
+### 2.1. Cái bắt tay: vòng đời của một kết nối
+
+Một kết nối PrivateLink không bật lên tức thì, mà đi qua một cuộc bắt tay ở control plane:
+
+1. **Đăng ký**: Provider tạo endpoint service trỏ tới NLB. AWS cấp service name `com.amazonaws.vpce.us-east-2.vpce-svc-0123456789abcdef`.
+2. **Phân quyền**: Provider khai báo **allowlist principals** — chính xác những AWS account/IAM principal được phép thấy và nối vào dịch vụ. Không nằm trong danh sách thì không khám phá ra service, coi như nó vô hình.
+3. **Yêu cầu**: Consumer sẽ khám phá service name thông qua AWS, nếu tồn tại, consumer tạo **interface endpoint** trỏ tới service name. Một **connection request** ở trạng thái `pendingAcceptance` xuất hiện phía provider.
+4. **Chấp nhận.** Provider duyệt — tự động (auto-accept) hoặc thủ công. Kết nối chuyển sang `available`.
+5. **Nối dây.** Chỉ tới đây Hyperplane mới wire flow giữa endpoint ENI và NLB. Trước khi `available`, endpoint ENI đã có private IP nhưng gửi packet vào đó chưa đi tới đâu cả.
+
+Hai lớp kiểm soát — allowlist principal (ai thấy được) và acceptance (ai được duyệt) — chính là thứ làm PrivateLink an toàn hơn peering: mặc định đóng kín, chỉ mở cho đúng principal được nêu tên, lại còn qua thêm một bước duyệt.
+
+---
+
+## 3. Phía Consumer - Trái tim là Endpoint ENI
+
+Giờ sang phía consumer — bên gọi tới dịch vụ.
+
+Consumer sẽ tạo interface endpoint thông qua API `CreateVpcEndpoint` với type "PrivateLink Ready partner services" dựa trên service name nhận được từ provider.
+
+AWS dùng service name này để tra cứu:
+
+- Endpoint Service nào
+- Provider nào
+- NLB nào
+- Allow list — consumer có được phép tạo VPC Endpoint cho service name này không?
+
+Sau khi kiểm tra mọi thứ, AWS tạo một service-managed ENI trên mỗi subnet mà consumer chọn.
+
+Và AWS cấp cho consumer 1 endpoint có dạng `vpce-0a1b2c3d.monitoring.us-east-2.vpce.amazonaws.com` trỏ về private IP của ENI.
+
+Cái ENI này — gọi là **endpoint network interface** — có vài tính chất quyết định:
+
+- Nó **gắn chặt với đúng một endpoint service**. Mỗi interface endpoint được tạo cho một dịch vụ cụ thể — S3, Secrets Manager, hay một endpoint service `vpce-svc-...` của bên thứ ba — và ENI của nó chỉ phục vụ đúng dịch vụ đó. Private IP của ENI ánh xạ 1-1 tới dịch vụ: gửi packet tới IP này nghĩa là gửi tới dịch vụ kia, chứ không phải tới một cổng chung cho mọi dịch vụ. Chính nhờ ràng buộc này mà Hyperplane biết phải DNAT sang NLB nào — nó nhìn IP đích (vốn thuộc về endpoint, mà endpoint lại buộc vào một service).
+- Nó chiếm **một private IP lấy từ chính dải CIDR của subnet bạn**.
+- Nó được bảo vệ bởi một **Security Group do bạn kiểm soát**. Đây là điểm khác biệt lớn so với Gateway Endpoint (loại dành riêng cho S3/DynamoDB, vốn là một entry trong route table và không có Security Group).
+- **IP của nó cố định suốt vòng đời** của endpoint. Khác hẳn ALB (nơi node sinh ra và biến mất liên tục nên không thể có IP tĩnh), endpoint ENI đứng yên một chỗ.
+- Bạn tạo một ENI cho **mỗi Availability Zone** mà bạn muốn dùng. Mỗi ENI nằm trong một subnet thuộc AZ đó.
+
+Vì sao mỗi AZ một ENI? Để chịu lỗi. Nếu bạn chỉ đặt endpoint ở AZ-a và AZ-a gặp sự cố, mọi tài nguyên ở AZ-b cũng mất luôn đường tới dịch vụ. AWS khuyến nghị bật endpoint ở **ít nhất hai AZ**, và đặt tài nguyên của bạn ở đúng những AZ đó.
+
+Và vì mỗi endpoint chỉ buộc vào một dịch vụ, muốn truy cập riêng tư tới nhiều dịch vụ (chẳng hạn S3, Secrets Manager và SQS) thì bạn tạo **nhiều interface endpoint** — mỗi cái một bộ ENI riêng, một private IP riêng, và một khoản phí theo giờ riêng cho mỗi AZ. Không có một ENI "vạn năng" làm cửa chung cho mọi dịch vụ; đây cũng là lý do hóa đơn PrivateLink phình lên theo số dịch vụ bạn cần, như mục 9 sẽ nói.
+
+Điểm mấu chốt cần ghim lại: từ góc nhìn của ứng dụng, **toàn bộ PrivateLink quy về việc gửi packet tới một private IP trong VPC**. Không Internet Gateway, không NAT Gateway, không route đặc biệt. Mọi sự phức tạp được giấu sau một card mạng trông cực kỳ bình thường. Nhưng có một câu hỏi lớn còn bỏ ngỏ: làm sao ứng dụng biết phải gửi tới cái IP đó?
+
+---
+
+## 4. DNS — Vì Sao Hostname Công Khai Lại Trỏ Về IP Riêng Tư
+
+Đây là phần "ảo thuật" mà nhiều người dùng PrivateLink hằng ngày nhưng chưa từng nhìn vào hậu trường.
+
+Khi chưa dùng PrivateLink, bạn viết code gọi `https://monitoring.us-east-2.amazonaws.com` — một hostname công khai của CloudWatch ở region `us-east-2`, ai trên internet cũng resolve được.
+
+Và sau khi dùng PrivateLink, hostname `https://monitoring.us-east-2.amazonaws.com` lại được resolve về `10.0.1.10` - 1 private IP trong VPC của bạn. Bằng cách nào?
+
+### 4.1. Những cái tên AWS tạo cho bạn
+
+Khi tạo interface endpoint, AWS sinh ra một loạt DNS name riêng cho nó. Có hai nhóm:
+
+**Regional name** — một tên duy nhất cho cả endpoint, dạng:
+
+```
+vpce-0a1b2c3d.monitoring.us-east-2.vpce.amazonaws.com
+```
+
+Tên này khi được resolve sẽ trả về IP của một ENI **khỏe mạnh bất kỳ**, luân phiên (round-robin) giữa các AZ. Tiện cho high availability, nhưng có một cái bẫy chi phí ta sẽ nói ở mục 9.
+
+**Zonal name** — mỗi AZ một tên riêng, dạng:
+
+```
+vpce-0a1b2c3d-us-east-2a.monitoring.us-east-2.vpce.amazonaws.com
+```
+
+Tên này luôn trỏ về ENI trong đúng AZ đó. Khi nào cần "ghim" traffic vào cùng một AZ (để tránh phí cross-AZ), bạn dùng tên này.
+
+### 4.2. Private DNS — phép màu thật sự
+
+Nếu phải sửa toàn bộ code để gọi cái tên `vpce-0a1b2c3d...` thì PrivateLink đã chẳng tiện đến thế. Đây là lúc tính năng **private DNS** vào cuộc.
+
+Khi bạn bật tính năng **private DNS name**, AWS dựng cho bạn một <Tooltip content="Private Hosted Zone — một vùng DNS chỉ resolve được bên trong các VPC được gắn vào nó, do AWS quản lý và ẩn khỏi tài khoản của bạn">private hosted zone</Tooltip> ẩn, do chính AWS quản lý. Trong vùng này có một bản ghi cho **đúng cái hostname công khai của dịch vụ**, trỏ về private IP của các endpoint ENI trong VPC bạn.
+
+Cơ chế resolve diễn ra như sau:
+
+- Ứng dụng hỏi <Tooltip content="Route 53 Resolver — DNS server AWS tự cung cấp trong mỗi VPC, luôn nằm ở địa chỉ base của VPC cộng 2, ví dụ 10.0.0.2">Route 53 Resolver</Tooltip> (DNS server mặc định của VPC, luôn ở địa chỉ `.2`) về `monitoring.us-east-2.amazonaws.com`.
+- Resolver thấy có một private hosted zone phủ tên này, và **private hosted zone luôn thắng public DNS**. Nó trả về private IP của endpoint ENI.
+
+Code của bạn không đổi một dòng — request tự động đi qua endpoint.
+
+Đây cũng là lý do tài liệu AWS khuyên: cứ bật private DNS, rồi gọi dịch vụ bằng tên public Regional bình thường. Mọi SDK, mọi CLI, mọi thư viện cũ đều tự động hưởng lợi mà không cần biết PrivateLink tồn tại.
+
+```typescript
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
+
+const s3 = new S3Client({ region: 'us-east-2' })
+
+const object = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: 'report.csv' }))
+```
+
+Đoạn code trên không hề biết PrivateLink có mặt. Nếu VPC có interface endpoint cho S3 với private DNS bật, request `s3.us-east-2.amazonaws.com` tự resolve về endpoint ENI và đi qua đường riêng tư. Nếu không, nó ra internet như thường. Cùng một dòng code, hành vi thay đổi hoàn toàn dựa trên hạ tầng — đó là sức mạnh của việc can thiệp ở tầng DNS.
+
+### 4.3. Một lưu ý về DNS từ on-premises
+
+Có một chi tiết hay bị bỏ sót: Route 53 Resolver chỉ phục vụ **bên trong VPC**. Máy ở data center on-premises (nối vào qua VPN hoặc Direct Connect) không tự dùng được nó, nên cũng không thấy được private hosted zone. Muốn on-premises resolve đúng về endpoint ENI, bạn phải dựng **Route 53 Resolver inbound endpoint** và trỏ DNS của on-premises về đó. Đây là nguồn của vô số sự cố kiểu "trong VPC gọi được mà từ on-prem thì không".
+
+---
+
+## 5. AWS Hyperplane — Cỗ Máy Vô Hình
+
+Đây là phần mà hầu hết bài viết về PrivateLink dừng lại không nói tới, nhưng lại là nơi mọi câu hỏi "ủa sao nó làm được vậy?" được trả lời.
+
+**AWS Hyperplane là một hệ thống chuyển tiếp packet phân tán, chạy trên một đội EC2 đặt trong mỗi Availability Zone, và quản lý trạng thái kết nối (flow state) ở quy mô cực lớn.** Nó đã chạy production từ 2015 và được AWS giới thiệu công khai tại re:Invent 2017.
+
+Bạn không bao giờ thấy nó, không trả tiền trực tiếp cho nó, nhưng nó nằm dưới NLB, NAT Gateway, Transit Gateway, Gateway Load Balancer, EFS, App Runner — và PrivateLink.
+
+<ExcalidrawDiagram
+  src="/aws-privatelink-hyperplane.excalidraw"
+  alt="AWS Hyperplane internals — a fleet of EC2-based packet forwarders per AZ, shuffle sharding mapping each endpoint to an overlapping subset of nodes, a distributed flow-state table, and SNAT/DNAT"
+/>
+
+### 5.1. Flow state phân tán
+
+Cốt lõi của Hyperplane là cách nó lưu **flow state**. Mỗi kết nối TCP được mô tả bằng một tuple — đại khái `(IP nguồn:port, IP đích:port)` — ánh xạ tới đích thực sự mà packet cần đến.
+
+Điểm đặc biệt: trạng thái này **không nằm trên một node duy nhất**. Một endpoint (hay một NLB) được phục vụ bởi một **tập hợp con các node Hyperplane** trong AZ, và mọi node trong tập đó đều biết về mọi flow của tập thông qua 1 flow-state table được shared. Bất kỳ node nào nhận được packet cũng có thể tra cứu và chuyển tiếp đúng.
+
+Hệ quả rất sâu: **không có một cái hộp duy nhất "sở hữu" kết nối của bạn**. Một node chết, các node khác trong tập vẫn biết flow và xử lý tiếp, kết nối không đứt. Đây là lý do NLB và PrivateLink gần như không có điểm nghẽn đơn lẻ và không cần "pre-warm" như load balancer kiểu cũ.
+
+### 5.2. Shuffle sharding — cô lập hàng xóm ồn ào
+
+Hyperplane là hạ tầng **multi-tenant**: nhiều khách hàng dùng chung đội node. Vấn đề muôn thuở của multi-tenant là "hàng xóm ồn ào" — một khách bị tấn công hay tăng tải đột biến có thể làm chậm những khách khác trên cùng node.
+
+Giải pháp của Hyperplane là <Tooltip content="Shuffle sharding — kỹ thuật gán mỗi khách hàng một tập con node được chọn ngẫu nhiên, sao cho hai khách hiếm khi trùng toàn bộ tập, nhờ đó sự cố của một khách hiếm khi ảnh hưởng trọn vẹn khách khác">shuffle sharding</Tooltip>: mỗi endpoint được gán một tập con node chọn ngẫu nhiên. Hai endpoint khác nhau hầu như không bao giờ trùng đúng cùng một tập node. Nếu một endpoint "bốc cháy" và làm ngợp các node trong tập của nó, một endpoint khác chỉ trùng một phần nhỏ — nên phần lớn vẫn khỏe. Đây là cách Hyperplane giới hạn bán kính ảnh hưởng của sự cố mà không cần cấp riêng phần cứng cho từng khách.
+
+Về quy mô: mỗi tài nguyên Hyperplane khởi điểm khoảng 5 Gbit/s và scale lên theo bội số 5 Gbit/s tới hàng Terabit, với độ trễ dưới mili-giây, chịu hàng trăm triệu kết nối đồng thời và hàng triệu kết nối mới mỗi giây. Đó là vì sao bạn chưa bao giờ phải nghĩ về "capacity" của một interface endpoint.
+
+---
+
+## 6. Hành Trình Của Một Packet — Nơi Địa Chỉ Bị Viết Lại
+
+Lý thuyết đủ rồi. Hãy bám theo đúng một packet TCP từ lúc rời ứng dụng tới khi chạm target phía provider, và xem địa chỉ của nó biến đổi ở từng chặng.
+
+1. **Ứng dụng gửi đi.** App ở `10.0.1.50` gọi `monitoring.us-east-2.amazonaws.com`. Private DNS đã resolve tên này về `10.0.1.10` (endpoint ENI). Packet rời đi với nguồn `10.0.1.50`, đích `10.0.1.10:443`.
+
+2. **Tới endpoint ENI.** Packet đến card mạng endpoint trong subnet của consumer. Security Group của ENI kiểm tra và cho qua. Đây là biên giới: bước tiếp theo packet rời khỏi tầm nhìn của bạn, bước vào Hyperplane.
+
+3. **Hyperplane viết lại địa chỉ.** Lớp fabric tra flow state, DNAT đích sang một target thật phía provider, và SNAT nguồn thành IP của một node NLB. Tuple `(10.0.1.50:51000 → 10.9.0.7:443) ⇒ target 10.9.3.20:8080` được ghi vào bảng flow phân tán để gói trả về biết đường quay lại.
+
+4. **NLB chuyển tới target.** Node NLB phía provider nhận packet và đẩy tới một target trong target group.
+
+5. **Target nhìn thấy gì.** Đây là điểm gây bất ngờ nhất: ứng dụng target **không thấy IP của consumer**. Nó thấy nguồn là **private IP của một node NLB**, ví dụ `10.9.0.7`. IP gốc `10.0.1.50` đã bị SNAT xóa sạch.
+
+Hệ quả của bước 5 lý giải mọi đặc tính của PrivateLink:
+
+- **Vì sao CIDR trùng không sao:** provider thao tác hoàn toàn trong không gian địa chỉ của chính nó (`10.9.x.x`). Việc consumer cũng dùng `10.0.0.0/16` hay thậm chí trùng `10.9.0.0/16` chẳng liên quan, vì cái IP đó không bao giờ chạm tới mạng provider.
+- **Vì sao là một chiều:** provider chỉ có thể trả lời trên flow mà consumer đã mở. Không có flow nào do provider khởi tạo, nên Hyperplane không có đường nào để đẩy packet ngược vào VPC consumer.
+
+### 6.1. Lấy lại IP thật của client
+
+"Nhưng tôi cần biết khách nào đang gọi để rate-limit và ghi log thì sao?" Vì SNAT đã giấu IP gốc, bạn cần một kênh khác để mang thông tin đó qua. Đó là <Tooltip content="Proxy Protocol v2 — một header nhị phân NLB chèn vào trước dữ liệu TCP, mang IP/port gốc của client và các thông tin bổ sung như VPC endpoint ID">Proxy Protocol v2</Tooltip> (PPv2).
+
+Bật PPv2 trên target group, NLB sẽ chèn một header nhị phân ngay trước payload TCP. Header này mang IP/port gốc của client, và với AWS còn có một trường mở rộng (TLV) chứa luôn **VPC endpoint ID** của consumer — cực hữu ích để biết kết nối đến từ endpoint nào.
+
+```typescript
+import { createServer, Socket } from 'node:net'
+
+const SIGNATURE = Buffer.from('0d0a0d0a000d0a515549540a', 'hex')
+const PP2_TYPE_AWS_VPCE_ID = 0xea
+
+const parseProxyV2 = (buf: Buffer) => {
+  if (buf.length < 16 || !buf.subarray(0, 12).equals(SIGNATURE)) return null
+
+  const family = buf[13] >> 4
+  const addrLen = buf.readUInt16BE(14)
+  let offset = 16
+
+  if (family !== 1) return null
+  const sourceIp = `${buf[offset]}.${buf[offset + 1]}.${buf[offset + 2]}.${buf[offset + 3]}`
+  const sourcePort = buf.readUInt16BE(offset + 8)
+
+  let tlvOffset = offset + 12
+  let endpointId: string | null = null
+  while (tlvOffset < offset + addrLen) {
+    const type = buf[tlvOffset]
+    const len = buf.readUInt16BE(tlvOffset + 1)
+    const value = buf.subarray(tlvOffset + 3, tlvOffset + 3 + len)
+    if (type === PP2_TYPE_AWS_VPCE_ID) endpointId = value.subarray(1).toString('ascii')
+    tlvOffset += 3 + len
+  }
+
+  return { sourceIp, sourcePort, endpointId, headerLength: offset + addrLen }
+}
+
+const server = createServer((socket: Socket) => {
+  socket.once('data', (chunk) => {
+    const header = parseProxyV2(chunk)
+    if (header) {
+      console.log('real client', header.sourceIp, 'via', header.endpointId)
+    }
+  })
+})
+
+server.listen(8080)
+```
+
+Đoạn code đọc header PPv2 đầu kết nối, rút ra IP gốc của client và VPC endpoint ID. Nhờ đó target vẫn log và phân biệt được khách thật, dù NLB đã SNAT mất IP nguồn ở tầng mạng.
+
+---
+
+## 7. Một Chiều — Và Vì Sao Đó Là Tính Năng Bảo Mật
+
+Ta đã thấy ở tầng packet vì sao kết nối là một chiều. Giờ nhìn nó như một thuộc tính thiết kế, vì đây là điểm bán hàng lớn nhất của PrivateLink.
+
+Tài liệu AWS nói thẳng: dịch vụ **không thể khởi tạo request** tới tài nguyên của consumer qua endpoint. Provider chỉ trả lời được trên những kết nối do consumer chủ động mở. Hệ quả thực tế:
+
+- **Bề mặt phơi ra tối thiểu.** Consumer phơi đúng một thứ: khả năng gọi tới một dịch vụ. Họ không phơi mạng, không phơi route, không phơi tài nguyên nào khác. Ngay cả khi provider bị xâm nhập, kẻ tấn công cũng không có đường nào quay ngược vào VPC consumer qua cái endpoint đó.
+- **Đảo ngược mô hình tin cậy.** Với peering, bạn tin rằng phía bên kia sẽ không lạm dụng đường hai chiều. Với PrivateLink, kiến trúc đảm bảo bằng cơ chế (không chỉ bằng chính sách) rằng đường chỉ đi một chiều.
+
+Một giới hạn cần nhớ: PrivateLink **không hoạt động xuyên region một cách mặc định**. Endpoint và endpoint service phải cùng region. Muốn nối liên region, bạn ghép thêm VPC Peering hoặc Transit Gateway giữa các region (gần đây AWS có thêm cross-region endpoint cho một số dịch vụ, nhưng đó là ngoại lệ, không phải mặc định).
+
+---
+
+## 8. Đặc Tính Và Giới Hạn Cần Nhớ
+
+Hiểu cơ chế rồi thì những giới hạn dưới đây không còn là điều phải học thuộc — chúng suy ra trực tiếp từ thiết kế.
+
+- **Chỉ TCP và UDP.** Vì mặt tiền là NLB (tầng 4), PrivateLink không hiểu HTTP. Mọi định tuyến theo path/host phải do dịch vụ của provider tự lo phía sau.
+- **Băng thông.** Mỗi interface endpoint cho throughput cỡ 10 Gbps mỗi ENI và có thể burst tới 100 Gbps. Với gần như mọi tải, đây là dư thừa.
+- **Chi phí có hai phần.** Bạn trả tiền theo **giờ cho mỗi endpoint ở mỗi AZ**, cộng tiền **mỗi GB dữ liệu xử lý**. Nhiều endpoint nhân nhiều AZ thì phần phí theo giờ cộng dồn lại đáng kể.
+- **Phí cross-AZ — và mẹo zonal DNS.** Nhớ lại mục 5: regional DNS name round-robin giữa các AZ. Nếu app ở AZ-a vô tình resolve về endpoint ENI ở AZ-b, traffic đi cross-AZ và bị tính phí. Muốn tối ưu, cho app dùng **zonal DNS name của chính AZ nó** để giữ traffic trong cùng vùng.
+- **Trần kết nối khi tắt client IP preservation.** Đây là chỗ tinh tế phía provider. Khi NLB SNAT nguồn (mặc định trong luồng PrivateLink), mỗi target chỉ phân biệt kết nối qua dải port tạm thời của các IP node NLB, nên có trần khoảng **55.000 kết nối đồng thời** trên mỗi tổ hợp target và IP nguồn. Với dịch vụ cực nhiều kết nối, cần tính tới giới hạn này khi thiết kế số target.
+
+---
+
+## 9. So Sánh Với Các Lựa Chọn Kết Nối Khác
+
+PrivateLink không thay thế mọi thứ — nó giải đúng một loại bài toán. Bảng dưới đặt nó cạnh các công cụ hay bị nhầm lẫn:
+
+| Tiêu chí           | PrivateLink (Interface Endpoint)     | VPC Peering            | Transit Gateway              | Gateway Endpoint              |
+| ------------------ | ------------------------------------ | ---------------------- | ---------------------------- | ----------------------------- |
+| **Đơn vị kết nối** | Một dịch vụ                          | Hai mạng               | Nhiều mạng (hub)             | S3 / DynamoDB                 |
+| **Chiều khởi tạo** | Một chiều (consumer → service)       | Hai chiều              | Hai chiều                    | Một chiều tới AWS             |
+| **CIDR trùng**     | Không sao (nhờ NAT)                  | Không được             | Không được                   | Không sao                     |
+| **Cơ chế**         | ENI + Hyperplane NAT                 | Route table            | Route table tập trung        | Entry trong route table       |
+| **Bảo mật**        | Security Group + allowlist principal | Security Group + route | Security Group + route       | Endpoint/bucket policy        |
+| **Chi phí**        | Theo giờ/AZ + per GB                 | Chỉ data transfer      | Theo giờ attachment + per GB | Miễn phí                      |
+| **Hợp khi**        | Phơi 1 dịch vụ cho nhiều bên         | Nối 2 VPC tin nhau     | Nối hàng chục VPC            | Truy cập S3/DynamoDB riêng tư |
+
+Quy tắc thực dụng: cần **phơi hay tiêu thụ một dịch vụ cụ thể** (nhất là khi có nhiều bên, hoặc CIDR có thể trùng, hoặc cần một chiều) thì PrivateLink. Cần **nối nguyên các mạng lại với nhau** để chúng tự do định tuyến thì peering hoặc Transit Gateway. Chỉ cần **S3/DynamoDB riêng tư và miễn phí** thì Gateway Endpoint.
+
+---
+
+## 10. Kết Luận
+
+Quay lại bài toán mở đầu: khách hàng muốn gọi API của bạn mà không ra internet, ở quy mô hàng chục bên, không vướng CIDR, không mở đường hai chiều. PrivateLink giải nó không phải bằng cách nối mạng giỏi hơn, mà bằng cách **đổi luôn đơn vị kết nối** — từ "mạng" xuống "dịch vụ". Một endpoint ENI làm cánh cửa, private DNS làm cho code không phải đổi, và bên dưới tất cả, Hyperplane lặng lẽ NAT từng packet trên một đội node phân tán không có điểm nghẽn.
+
+Những điều cần mang theo:
+
+- **Interface endpoint chỉ là một ENI** mang private IP từ subnet của bạn, có Security Group, IP cố định, mỗi AZ một cái. Mọi sự phức tạp nằm sau cánh cửa quen thuộc đó.
+- **Private DNS là mấu chốt trải nghiệm:** nó dựng một private hosted zone ẩn để hostname public của dịch vụ trỏ về endpoint ENI, nên code và SDK cũ chạy y nguyên.
+- **PrivateLink bắt buộc NLB** vì nó dùng chung lớp Hyperplane với NLB — đó cũng là lý do nó scale và chịu lỗi tốt đến vậy.
+- **Hyperplane là cỗ máy thật sự:** flow state phân tán (mọi node biết mọi flow), shuffle sharding để cô lập sự cố, và SNAT/DNAT là việc chính của nó.
+- **SNAT giải thích mọi đặc tính:** provider chỉ thấy IP của node NLB, nên CIDR trùng vẫn chạy và kết nối là một chiều; muốn lấy lại IP client thật thì bật Proxy Protocol v2.
+- **Giới hạn suy ra từ thiết kế:** chỉ TCP/UDP, cùng region, phí theo giờ/AZ cộng per GB, và nhớ dùng zonal DNS để né phí cross-AZ.
+
+> **Ghi chú cho kỳ thi:** Nếu đề SAA hỏi "truy cập dịch vụ riêng tư từ nhiều VPC mà không qua internet, CIDR có thể trùng" thì đáp án gần như luôn là Interface Endpoint / PrivateLink; "phơi dịch vụ của mình cho VPC khác" thì nhớ cặp PrivateLink + NLB; còn "S3/DynamoDB riêng tư, miễn phí" mới là Gateway Endpoint.

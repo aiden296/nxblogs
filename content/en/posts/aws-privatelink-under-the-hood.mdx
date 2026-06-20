@@ -1,0 +1,325 @@
+---
+title: 'AWS PrivateLink Under The Hood: One ENI, One DNS Name, and the Invisible Hyperplane Engine Behind It'
+date: '2026-06-19'
+tags: ['Devops', 'AWS']
+description: 'Dissecting how AWS PrivateLink works inside — the endpoint ENI, private DNS, the NLB-fronted endpoint service, one-way NAT, and the distributed Hyperplane layer that actually moves every packet.'
+enableComment: true
+---
+
+# AWS PrivateLink Under The Hood: One ENI, One DNS Name, and the Invisible Hyperplane Engine Behind It
+
+You run a SaaS. Your biggest customer just sent over a security requirement: they want to call your internal API with **traffic that never touches the internet**, even with TLS in place.
+
+The first option everyone reaches for is <Tooltip content="VPC Peering — a peer connection between two VPCs so they route to each other over private IPs as if on the same network">VPC Peering</Tooltip>. It works with one customer. Then the second, the tenth, the fiftieth show up. Suddenly you're drowning: two VPCs with overlapping <Tooltip content="Classless Inter-Domain Routing — a way to express a range of IP addresses, e.g. 10.0.0.0/16 covers 65,536 addresses">CIDR</Tooltip> ranges can't peer; every peering means editing route tables on both sides; and worst of all, peering opens a **two-way** road — in theory the customer could initiate connections back into your network too. With 50 customers you have a tangled, fragile mesh that is far wider than it needs to be.
+
+The root of the problem: peering is a **network-to-network** model. But what you actually need is much smaller and narrower — just to **expose one service** for many parties to call, one-way, without caring whose CIDR overlaps, without touching the customer's route table. That is exactly the problem **AWS PrivateLink** was born to solve.
+
+This article takes PrivateLink apart to see the inside: what the endpoint you create really is, why a public hostname like `monitoring.us-east-2.amazonaws.com` resolves to a private IP inside your VPC, the path a packet travels to reach the service, and most importantly — the invisible infrastructure layer called **Hyperplane** that quietly moves every packet.
+
+<ExcalidrawDiagram
+  src="/aws-privatelink-overview.excalidraw"
+  alt="AWS PrivateLink end-to-end — Consumer VPC with endpoint ENIs and private DNS, the AWS Hyperplane fabric doing SNAT/DNAT, and the Provider VPC with an NLB-fronted endpoint service"
+/>
+
+---
+
+## 1. Why Peering And The Internet Gateway Both Fall Short
+
+Before you can appreciate what PrivateLink does, you need to see clearly why the "classic" connectivity tools don't fit the "expose a service" problem.
+
+VPC Peering connects two VPCs so they route to each other over private IPs. It sounds tidy, but it has three fatal weaknesses as the number of parties grows:
+
+- **Combinatorial explosion.** For n VPCs to all talk in a full mesh, you need roughly n²/2 peering links. 5 VPCs is 10 links; 20 VPCs is 190. Each link is a route-table edit on both sides.
+- **No overlapping CIDR.** Because routing is IP-based, if your VPC and the customer's both use `10.0.0.0/16`, the packet has no idea which way to go. In practice, countless VPCs default to `10.0.0.0/16`.
+- **Far too broad, and two-way.** It is over-engineering when all you need is to offer one private, non-public-facing API. Peering opens up both networks in full (within route table and security group limits), not just one service port. It also lets either side initiate connections.
+
+<ExcalidrawDiagram
+  src="/aws-privatelink-vs-peering.excalidraw"
+  alt="Comparison — VPC Peering full mesh requiring n-squared links versus PrivateLink service hub where many consumers connect one-way to a single endpoint service"
+/>
+
+And if you expose the service over the internet (behind a public load balancer), traffic really does go out to the internet, dragging along the whole attack surface: you have to deal with a public IP, WAF, DDoS, and the customer has to trust that your firewall is configured correctly.
+
+PrivateLink flips the way you think. Instead of "connect two networks and route between them," it says: **the provider publishes a service, and the consumer creates a private door straight to that service.** Nobody has to know anyone else's network topology. This is **service networking**, not **network peering** — and that conceptual difference is the key to everything that follows.
+
+> AWS itself is a giant provider: S3, CloudWatch, Secrets Manager, SQS... are all exposed through PrivateLink under this exact model.
+
+---
+
+## 2. The Provider Side — The Endpoint Service And Why It Must Be An NLB
+
+Start with the half that exposes the service. What does a provider do to publish a service over PrivateLink?
+
+They put the service behind an NLB, then create an **endpoint service** that points to that NLB. The service here can be a fleet of EC2 instances, containers, or anything that accepts TCP.
+
+> Why **must it be an NLB** (or a Gateway Load Balancer), not an ALB? The answer touches the very core of this article: PrivateLink and the NLB **share one infrastructure layer called Hyperplane**.
+
+AWS assigns the endpoint service a name like `com.amazonaws.vpce.us-east-2.vpce-svc-0123456789abcdef` — called the service name.
+
+The provider then hands that service name to the consumer — "use this to reach our service" — and with that, the provider's job is done.
+
+### 2.1. The Handshake: Lifecycle Of A Connection
+
+A PrivateLink connection doesn't light up instantly; it goes through a control-plane handshake:
+
+1. **Register**: the provider creates an endpoint service pointing to the NLB. AWS assigns the service name `com.amazonaws.vpce.us-east-2.vpce-svc-0123456789abcdef`.
+2. **Authorize**: the provider declares the **allowlist principals** — exactly which AWS accounts/IAM principals are allowed to see and connect to the service. Anyone not on the list can't even discover the service; it's invisible to them.
+3. **Request**: the consumer discovers the service name through AWS, and if it exists, creates an **interface endpoint** pointing to that service name. A **connection request** in the `pendingAcceptance` state appears on the provider side.
+4. **Accept.** The provider approves it — automatically (auto-accept) or manually. The connection moves to `available`.
+5. **Wire up.** Only now does Hyperplane wire the flow between the endpoint ENI and the NLB. Before `available`, the endpoint ENI already has a private IP, but sending packets to it goes nowhere.
+
+Two layers of control — the allowlist principal (who can see it) and acceptance (who gets approved) — are precisely what make PrivateLink safer than peering: closed by default, opened only for the named principals, and gated behind one more approval step.
+
+---
+
+## 3. The Consumer Side — The Endpoint ENI At Its Heart
+
+Now to the consumer side — the party calling the service.
+
+The consumer creates an interface endpoint through the `CreateVpcEndpoint` API, with the "PrivateLink Ready partner services" type, based on the service name received from the provider.
+
+AWS uses that service name to look up:
+
+- Which Endpoint Service
+- Which provider
+- Which NLB
+- The allow list — is this consumer permitted to create a VPC Endpoint for this service name?
+
+Once everything checks out, AWS creates a service-managed ENI in each subnet the consumer picked.
+
+And AWS gives the consumer an endpoint name like `vpce-0a1b2c3d.monitoring.us-east-2.vpce.amazonaws.com` that points to the ENI's private IP.
+
+This ENI — called the **endpoint network interface** — has a few decisive properties:
+
+- It is **bound to exactly one endpoint service**. Each interface endpoint is created for one specific service — S3, Secrets Manager, or a third-party endpoint service `vpce-svc-...` — and its ENI serves only that service. The ENI's private IP maps 1-to-1 to the service: sending a packet to this IP means sending it to that service, not to some shared gateway for every service. It's this binding that lets Hyperplane know which NLB to DNAT toward — it looks at the destination IP (which belongs to the endpoint, and the endpoint is bound to one service).
+- It takes up **a private IP drawn from your own subnet's CIDR**.
+- It is protected by a **Security Group you control**. This is a big difference from a Gateway Endpoint (the kind reserved for S3/DynamoDB, which is a route-table entry with no Security Group).
+- **Its IP is fixed for the lifetime** of the endpoint. Unlike an ALB (whose nodes are born and die constantly, so it can't have a static IP), the endpoint ENI stays put.
+- You create one ENI per **Availability Zone** you want to use. Each ENI lives in a subnet in that AZ.
+
+Why one ENI per AZ? For fault tolerance. If you only place the endpoint in AZ-a and AZ-a has an incident, every resource in AZ-b loses its path to the service too. AWS recommends enabling the endpoint in **at least two AZs**, and placing your resources in exactly those AZs.
+
+And because each endpoint is bound to a single service, to reach several services privately (say S3, Secrets Manager, and SQS) you create **multiple interface endpoints** — each with its own set of ENIs, its own private IP, and its own hourly charge per AZ. There is no "universal" ENI acting as a shared door for every service; this is also why the PrivateLink bill grows with the number of services you need, as section 9 will discuss.
+
+The key thing to lock in: from the application's point of view, **all of PrivateLink comes down to sending packets to a private IP inside the VPC**. No Internet Gateway, no NAT Gateway, no special route. All the complexity is hidden behind a network card that looks utterly ordinary. But one big question remains open: how does the application know to send to that IP?
+
+---
+
+## 4. DNS — Why A Public Hostname Resolves To A Private IP
+
+This is the "magic" that many people use through PrivateLink every day without ever looking behind the curtain.
+
+Without PrivateLink, your code calls `https://monitoring.us-east-2.amazonaws.com` — a public hostname for CloudWatch in `us-east-2` that anyone on the internet can resolve.
+
+And after adopting PrivateLink, the hostname `https://monitoring.us-east-2.amazonaws.com` resolves to `10.0.1.10` — a private IP inside your VPC. How?
+
+### 4.1. The Names AWS Creates For You
+
+When you create an interface endpoint, AWS generates a set of DNS names just for it. There are two groups:
+
+**Regional name** — a single name for the whole endpoint, of the form:
+
+```
+vpce-0a1b2c3d.monitoring.us-east-2.vpce.amazonaws.com
+```
+
+When resolved, this name returns the IP of **any healthy ENI**, round-robined across AZs. Handy for high availability, but it carries a cost trap we'll cover in section 9.
+
+**Zonal name** — one name per AZ, of the form:
+
+```
+vpce-0a1b2c3d-us-east-2a.monitoring.us-east-2.vpce.amazonaws.com
+```
+
+This name always points to the ENI in that exact AZ. Whenever you need to "pin" traffic to the same AZ (to avoid cross-AZ charges), you use this name.
+
+### 4.2. Private DNS — The Real Trick
+
+If you had to rewrite all your code to call the `vpce-0a1b2c3d...` name, PrivateLink wouldn't be nearly this convenient. This is where the **private DNS** feature comes in.
+
+When you enable the **private DNS name** feature, AWS builds you a hidden, AWS-managed <Tooltip content="Private Hosted Zone — a DNS zone that only resolves inside the VPCs attached to it, managed by AWS and hidden from your account">private hosted zone</Tooltip>. Inside it is a record for **the service's exact public hostname**, pointing to the private IPs of the endpoint ENIs in your VPC.
+
+Resolution works like this:
+
+- The application asks the <Tooltip content="Route 53 Resolver — the DNS server AWS provides in every VPC, always at the VPC base address plus two, e.g. 10.0.0.2">Route 53 Resolver</Tooltip> (the VPC's default DNS server, always at the `.2` address) for `monitoring.us-east-2.amazonaws.com`.
+- The Resolver sees a private hosted zone covering that name, and **the private hosted zone always beats public DNS**. It returns the endpoint ENI's private IP.
+
+Your code doesn't change a single line — the request automatically goes through the endpoint.
+
+This is also why AWS documentation advises: just enable private DNS, then call the service by its normal public Regional name. Every SDK, every CLI, every legacy library benefits automatically without ever knowing PrivateLink exists.
+
+```typescript
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
+
+const s3 = new S3Client({ region: 'us-east-2' })
+
+const object = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: 'report.csv' }))
+```
+
+The code above has no idea PrivateLink is present. If the VPC has an interface endpoint for S3 with private DNS enabled, the `s3.us-east-2.amazonaws.com` request resolves to the endpoint ENI and goes over the private path. If not, it goes out to the internet as usual. The same line of code, behavior completely changed by the infrastructure — that's the power of intervening at the DNS layer.
+
+### 4.3. A Note On DNS From On-Premises
+
+Here's a detail that's easy to miss: the Route 53 Resolver only serves **inside the VPC**. A machine in an on-premises data center (connected over VPN or Direct Connect) can't use it directly, so it can't see the private hosted zone either. To make on-premises resolve correctly to the endpoint ENI, you have to stand up a **Route 53 Resolver inbound endpoint** and point your on-premises DNS at it. This is the source of countless "works from inside the VPC but not from on-prem" incidents.
+
+---
+
+## 5. AWS Hyperplane — The Invisible Engine
+
+This is the part most PrivateLink write-ups stop short of, yet it's where every "wait, how does it even do that?" gets answered.
+
+**AWS Hyperplane is a distributed packet-forwarding system, running on a fleet of EC2 instances in each Availability Zone, that manages connection (flow) state at massive scale.** It has been in production since 2015 and was introduced publicly at re:Invent 2017.
+
+You never see it, you never pay for it directly, but it sits beneath the NLB, NAT Gateway, Transit Gateway, Gateway Load Balancer, EFS, App Runner — and PrivateLink.
+
+<ExcalidrawDiagram
+  src="/aws-privatelink-hyperplane.excalidraw"
+  alt="AWS Hyperplane internals — a fleet of EC2-based packet forwarders per AZ, shuffle sharding mapping each endpoint to an overlapping subset of nodes, a distributed flow-state table, and SNAT/DNAT"
+/>
+
+### 5.1. Distributed Flow State
+
+The core of Hyperplane is how it stores **flow state**. Each TCP connection is described by a tuple — roughly `(source IP:port, destination IP:port)` — mapping to the real destination the packet needs to reach.
+
+What's special: this state **does not live on a single node**. An endpoint (or an NLB) is served by a **subset of Hyperplane nodes** in the AZ, and every node in that subset knows about every flow in the subset through a shared flow-state table. Any node that receives a packet can look it up and forward it correctly.
+
+The consequence runs deep: **no single box "owns" your connection**. If a node dies, the other nodes in the subset still know the flow and carry on, and the connection doesn't drop. This is why the NLB and PrivateLink have almost no single bottleneck and need no "pre-warming" like old-style load balancers.
+
+### 5.2. Shuffle Sharding — Isolating Noisy Neighbours
+
+Hyperplane is **multi-tenant** infrastructure: many customers share the fleet of nodes. The perennial multi-tenant problem is the "noisy neighbour" — one customer under attack or a sudden traffic spike can slow down others on the same node.
+
+Hyperplane's answer is <Tooltip content="Shuffle sharding — assigning each customer a randomly chosen subset of nodes so that two customers rarely share the entire subset, so one customer's trouble rarely takes down another in full">shuffle sharding</Tooltip>: each endpoint is assigned a randomly chosen subset of nodes. Two different endpoints almost never land on the exact same subset. If one endpoint "catches fire" and overwhelms the nodes in its subset, another endpoint overlaps on only a small part — so most of it stays healthy. This is how Hyperplane limits the blast radius of an incident without dedicating hardware to each customer.
+
+On scale: each Hyperplane resource starts around 5 Gbit/s and scales in 5 Gbit/s increments up to Terabits, with sub-millisecond latency, handling hundreds of millions of concurrent connections and millions of new connections per second. That's why you've never had to think about the "capacity" of an interface endpoint.
+
+---
+
+## 6. A Packet's Journey — Where The Addresses Get Rewritten
+
+Enough theory. Let's follow exactly one TCP packet from the moment it leaves the application to when it hits the target on the provider side, and watch its addresses change at each hop.
+
+1. **The application sends.** The app at `10.0.1.50` calls `monitoring.us-east-2.amazonaws.com`. Private DNS has resolved that name to `10.0.1.10` (the endpoint ENI). The packet leaves with source `10.0.1.50`, destination `10.0.1.10:443`.
+
+2. **At the endpoint ENI.** The packet reaches the endpoint network card in the consumer's subnet. The ENI's Security Group checks it and lets it through. This is the border: in the next step the packet leaves your sight and enters Hyperplane.
+
+3. **Hyperplane rewrites the addresses.** The fabric looks up the flow state, DNATs the destination to a real target on the provider side, and SNATs the source to the IP of an NLB node. The tuple `(10.0.1.50:51000 → 10.9.0.7:443) ⇒ target 10.9.3.20:8080` is written into the distributed flow table so the return packet knows the way back.
+
+4. **The NLB forwards to a target.** The NLB node on the provider side receives the packet and pushes it to a target in the target group.
+
+5. **What the target sees.** Here's the most surprising part: the target application **does not see the consumer's IP**. It sees the source as the **private IP of an NLB node**, e.g. `10.9.0.7`. The original IP `10.0.1.50` has been wiped clean by SNAT.
+
+The consequence of step 5 explains every property of PrivateLink:
+
+- **Why overlapping CIDR is fine:** the provider operates entirely within its own address space (`10.9.x.x`). Whether the consumer also uses `10.0.0.0/16`, or even overlaps `10.9.0.0/16`, is irrelevant, because that IP never reaches the provider's network.
+- **Why it's one-way:** the provider can only reply on flows the consumer opened. There is no flow initiated by the provider, so Hyperplane has no path to push packets back into the consumer's VPC.
+
+### 6.1. Recovering The Client's Real IP
+
+"But I need to know which customer is calling, to rate-limit and log them." Since SNAT has hidden the original IP, you need another channel to carry that information across. That's <Tooltip content="Proxy Protocol v2 — a binary header the NLB prepends before the TCP data, carrying the client's original IP/port plus extras like the VPC endpoint ID">Proxy Protocol v2</Tooltip> (PPv2).
+
+Enable PPv2 on the target group, and the NLB prepends a binary header right before the TCP payload. This header carries the client's original IP/port, and on AWS it also has an extension field (TLV) containing the consumer's **VPC endpoint ID** — extremely useful for knowing which endpoint a connection came from.
+
+```typescript
+import { createServer, Socket } from 'node:net'
+
+const SIGNATURE = Buffer.from('0d0a0d0a000d0a515549540a', 'hex')
+const PP2_TYPE_AWS_VPCE_ID = 0xea
+
+const parseProxyV2 = (buf: Buffer) => {
+  if (buf.length < 16 || !buf.subarray(0, 12).equals(SIGNATURE)) return null
+
+  const family = buf[13] >> 4
+  const addrLen = buf.readUInt16BE(14)
+  let offset = 16
+
+  if (family !== 1) return null
+  const sourceIp = `${buf[offset]}.${buf[offset + 1]}.${buf[offset + 2]}.${buf[offset + 3]}`
+  const sourcePort = buf.readUInt16BE(offset + 8)
+
+  let tlvOffset = offset + 12
+  let endpointId: string | null = null
+  while (tlvOffset < offset + addrLen) {
+    const type = buf[tlvOffset]
+    const len = buf.readUInt16BE(tlvOffset + 1)
+    const value = buf.subarray(tlvOffset + 3, tlvOffset + 3 + len)
+    if (type === PP2_TYPE_AWS_VPCE_ID) endpointId = value.subarray(1).toString('ascii')
+    tlvOffset += 3 + len
+  }
+
+  return { sourceIp, sourcePort, endpointId, headerLength: offset + addrLen }
+}
+
+const server = createServer((socket: Socket) => {
+  socket.once('data', (chunk) => {
+    const header = parseProxyV2(chunk)
+    if (header) {
+      console.log('real client', header.sourceIp, 'via', header.endpointId)
+    }
+  })
+})
+
+server.listen(8080)
+```
+
+The code reads the PPv2 header at the start of the connection and extracts the client's original IP and the VPC endpoint ID. With that, the target can still log and distinguish real customers, even though the NLB SNAT'd away the source IP at the network layer.
+
+---
+
+## 7. One-Way — And Why That Is A Security Feature
+
+We've already seen at the packet level why the connection is one-way. Now look at it as a design property, because this is PrivateLink's biggest selling point.
+
+The AWS documentation says it plainly: the service **cannot initiate requests** to the consumer's resources through the endpoint. The provider can only reply on connections the consumer actively opened. The practical consequences:
+
+- **Minimal exposed surface.** The consumer exposes exactly one thing: the ability to call a service. They don't expose the network, the routes, or any other resource. Even if the provider is compromised, an attacker has no path back into the consumer's VPC through that endpoint.
+- **Inverted trust model.** With peering, you trust that the other side won't abuse the two-way road. With PrivateLink, the architecture guarantees by mechanism (not just by policy) that the road only goes one way.
+
+One limitation to remember: PrivateLink **does not work across regions by default**. The endpoint and the endpoint service must be in the same region. To connect across regions, you add VPC Peering or Transit Gateway between the regions (AWS recently added cross-region endpoints for some services, but that's the exception, not the default).
+
+---
+
+## 8. Properties And Limits To Keep In Mind
+
+Once you understand the mechanism, the limits below stop being things to memorize — they follow directly from the design.
+
+- **TCP and UDP only.** Because the front door is an NLB (Layer 4), PrivateLink doesn't understand HTTP. Any path/host routing has to be handled by the provider's service behind it.
+- **Bandwidth.** Each interface endpoint gives throughput around 10 Gbps per ENI and can burst to 100 Gbps. For nearly any workload, this is overkill.
+- **Cost has two parts.** You pay **hourly per endpoint per AZ**, plus **per GB of data processed**. Many endpoints times many AZs and the hourly part adds up significantly.
+- **Cross-AZ charges — and the zonal DNS trick.** Recall section 5: the regional DNS name round-robins across AZs. If an app in AZ-a accidentally resolves to an endpoint ENI in AZ-b, traffic goes cross-AZ and gets billed. To optimize, have the app use the **zonal DNS name of its own AZ** to keep traffic in the same zone.
+- **Connection ceiling when client IP preservation is off.** This is a subtle one on the provider side. When the NLB SNATs the source (the default in the PrivateLink path), each target distinguishes connections only by the ephemeral port range of the NLB node IPs, so there's a ceiling of about **55,000 simultaneous connections** per combination of target and source IP. For services with huge connection counts, factor this in when sizing your targets.
+
+---
+
+## 9. Comparison With Other Connectivity Options
+
+PrivateLink doesn't replace everything — it solves one class of problem. The table below puts it next to the tools it's often confused with:
+
+| Criteria | PrivateLink (Interface Endpoint) | VPC Peering | Transit Gateway | Gateway Endpoint |
+| ------------------ | ------------------------------------ | ---------------------- | ---------------------------- | ----------------------------- |
+| **Unit of connection** | A single service | Two networks | Many networks (hub) | S3 / DynamoDB |
+| **Initiation direction** | One-way (consumer → service) | Two-way | Two-way | One-way to AWS |
+| **Overlapping CIDR** | Fine (thanks to NAT) | Not allowed | Not allowed | Fine |
+| **Mechanism** | ENI + Hyperplane NAT | Route table | Centralized route table | Route-table entry |
+| **Security** | Security Group + allowlist principal | Security Group + route | Security Group + route | Endpoint/bucket policy |
+| **Cost** | Hourly per AZ + per GB | Data transfer only | Hourly per attachment + per GB | Free |
+| **Best when** | Expose one service to many | Connect two trusted VPCs | Connect dozens of VPCs | Private S3/DynamoDB access |
+
+The pragmatic rule: when you need to **expose or consume one specific service** (especially with many parties, or possibly overlapping CIDRs, or a one-way requirement), use PrivateLink. When you need to **wire whole networks together** so they route freely, use peering or Transit Gateway. When you just need **private, free S3/DynamoDB access**, use a Gateway Endpoint.
+
+---
+
+## 10. Conclusion
+
+Back to the opening problem: a customer wants to call your API without going over the internet, at the scale of dozens of parties, without CIDR clashes, without opening a two-way road. PrivateLink solves it not by connecting networks more cleverly, but by **changing the unit of connection itself** — from "network" down to "service". An endpoint ENI is the door, private DNS means your code doesn't change, and beneath it all, Hyperplane quietly NATs every packet across a distributed fleet of nodes with no single bottleneck.
+
+What to take away:
+
+- **An interface endpoint is just an ENI** carrying a private IP from your subnet, with a Security Group, a fixed IP, one per AZ. All the complexity sits behind that familiar door.
+- **Private DNS is the experience linchpin:** it builds a hidden private hosted zone so the service's public hostname points to the endpoint ENI, so legacy code and SDKs run unchanged.
+- **PrivateLink requires an NLB** because it shares the Hyperplane layer with the NLB — which is also why it scales and tolerates failure so well.
+- **Hyperplane is the real engine:** distributed flow state (every node knows every flow), shuffle sharding to isolate incidents, and SNAT/DNAT as its main job.
+- **SNAT explains every property:** the provider only sees the NLB node's IP, so overlapping CIDR still works and the connection is one-way; to recover the real client IP, enable Proxy Protocol v2.
+- **The limits follow from the design:** TCP/UDP only, same region, hourly-per-AZ plus per-GB cost, and remember to use zonal DNS to dodge cross-AZ charges.
+
+> **Exam note:** If an SAA question asks about "accessing a private service from many VPCs without going over the internet, where CIDRs may overlap," the answer is almost always an Interface Endpoint / PrivateLink; "exposing your own service to other VPCs" means the PrivateLink + NLB pair; and "private, free S3/DynamoDB" is the Gateway Endpoint.
