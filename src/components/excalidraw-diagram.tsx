@@ -93,5 +93,10 @@ export function ExcalidrawDiagram({ src, alt }: ExcalidrawDiagramProps) {
     return null
   }
 
-  return <ImageZoom src={dataUrl} alt={alt || 'Excalidraw diagram'} />
+  return (
+    <figure className="post-figure">
+      <ImageZoom src={dataUrl} alt={alt || 'Excalidraw diagram'} />
+      {alt ? <figcaption className="post-figcaption">{alt}</figcaption> : null}
+    </figure>
+  )
 }
