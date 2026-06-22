@@ -41,16 +41,25 @@ Keep this framework in mind, and let's dig into each part.
 
 ## 2. AWS Organizations — the framework for managing many accounts
 
-**AWS Organizations** is the service that lets you group many AWS accounts into a single organization for central management: consolidate billing, apply shared security policies, and split accounts into groups by department/environment. If an AWS account is like an apartment, Organizations is the building management.
+<ExcalidrawDiagram
+  src="/aws-organizations-account-structure.excalidraw"
+  alt="AWS Organization tree: one management account and many member accounts, with one member account opened to show a single root user and many IAM users."
+/>
+
+**AWS Organizations** is the service that lets you group many AWS accounts into a single organization for central management: consolidate billing, apply shared security policies, and split accounts into groups by department/environment.
+
+Think of an AWS account as a **resource container** with its own billing and a tightly guarded security boundary. When you create an AWS account, a root user is created inside it — you sign in with the account's email, it has absolute power, and no IAM policy can rein it in. On top of that, the root user can create IAM users, who sign in with a username and the account ID.
 
 ### 2.1. Management account and member accounts
 
 An organization has exactly **one management account** (formerly called the master account) and many **member accounts**:
 
-- The **management account** is the "owner" account, where you create the organization, invite/create the other accounts, and view the combined bill. It's the most powerful account — keep it "clean," use it only for administration, and do **not** run workloads in it.
+- The **management account** is the "owner" account — used to create the organization, create or invite the other accounts, and view the combined bill. It's the most powerful account — keep it "clean," use it only for administration, and do **not** run workloads in it.
 - A **member account** is a child account. An account belongs to **only one** organization at a time.
 
 You can invite an existing account into the organization, or create new accounts programmatically via API (great for provisioning accounts at scale).
+
+Put together, the whole thing forms a tree: the organization sits at the root, with one management account and many member accounts beneath it; open up a member account and you find one root user (born with the account) plus the many IAM users you create.
 
 ### 2.2. Organizational Unit (OU) — grouping into a tree
 
@@ -64,11 +73,11 @@ The power of OUs: a policy (SCP, Tag Policy) attached to an OU automatically app
 
 ### 2.3. Consolidated Billing — combine bills and get cheaper prices
 
-This is the "economic" reason to use Organizations. With **Consolidated Billing** enabled, you get:
+This is the "economic" reason to use Organizations. The **Consolidated Billing** feature gives you:
 
-- **A single bill** for all accounts — the management account pays, and member accounts use this feature for free.
+- **A single bill** for all accounts — the management account consolidates and pays the bill.
 - **Volume pricing discounts**: AWS aggregates the usage of all accounts to compute the pricing tier. For example, S3 gets cheaper per GB the more you use — pooled together, you reach the cheaper tiers faster than each account would on its own.
-- **Sharing Reserved Instances and Savings Plans**: a <Tooltip content="Reserved Instance — a 1–3 year EC2 commitment in exchange for a much lower price than on-demand">RI</Tooltip> or <Tooltip content="Savings Plans — a commitment to a fixed hourly spend over 1–3 years for a compute discount, more flexible than a Reserved Instance">Savings Plan</Tooltip> bought in one account but not fully used can be picked up by other accounts in the organization, so no commitment goes to waste.
+- **Sharing Reserved Instances and Savings Plans**: a <Tooltip content="Reserved Instance — a 1–3 year EC2 commitment in exchange for a much lower price than on-demand">Reserved Instance</Tooltip> or <Tooltip content="Savings Plans — a commitment to a fixed hourly spend over 1–3 years for a compute discount, more flexible than a Reserved Instance">Savings Plan</Tooltip> bought in one account but not fully used can be picked up by other accounts in the organization, so no commitment goes to waste. It's **on** by default for every member account, and can be turned off per account from the management account.
 
 > **Exam tip:** See the keywords "reduce cost with many accounts," "consolidated billing," "share Reserved Instances across accounts" → the answer is almost certainly **AWS Organizations + Consolidated Billing**.
 

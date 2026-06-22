@@ -41,16 +41,25 @@ Giữ khung này trong đầu, ta đi vào từng phần.
 
 ## 2. AWS Organizations — bộ khung quản lý nhiều account
 
-**AWS Organizations** là dịch vụ giúp bạn gom nhiều AWS account vào một tổ chức duy nhất để quản lý tập trung: gộp hóa đơn, áp chính sách bảo mật chung, và chia nhóm account theo phòng ban/môi trường. Nếu một AWS account giống một căn hộ, thì Organizations chính là ban quản lý tòa nhà.
+<ExcalidrawDiagram
+  src="/aws-organizations-account-structure.excalidraw"
+  alt="Cấu trúc cây của AWS Organization: một management account và nhiều member account, mở một member account thấy một root user và nhiều IAM user."
+/>
+
+**AWS Organizations** là dịch vụ giúp bạn gom nhiều AWS account vào một tổ chức duy nhất để quản lý tập trung: gộp hóa đơn, áp chính sách bảo mật chung, và chia nhóm account theo phòng ban/môi trường.
+
+Hãy xem AWS Account như một **hộp chứa tài nguyên**, có billing riêng, được bảo mật kỹ càng. Khi tạo 1 AWS Account, 1 root user sẽ được tạo trong account này, đăng nhập bằng email, có quyền tuyệt đối, không giới hạn được bằng IAM Policy. Bên cạnh đó, root user có thể tạo thêm các IAM User, đăng nhập thông qua Username và Account ID.
 
 ### 2.1. Management account và member account
 
 Một Organization có đúng **một management account** (trước đây gọi là master account) và nhiều **member account**:
 
-- **Management account** là account "chủ", nơi bạn tạo Organization, mời/khởi tạo các account khác, và xem hóa đơn tổng. Đây là account quyền lực nhất — nên giữ nó "sạch", chỉ dùng để quản trị, **không** chạy workload trong đó.
+- **Management account** là account "chủ" - được sử dụng để tạo organization, tạo hoặc mời các account khác, và xem hóa đơn tổng. Đây là account quyền lực nhất — nên giữ nó "sạch", chỉ dùng để quản trị, **không** chạy workload trong đó.
 - **Member account** là các account con. Một account chỉ thuộc về **một** Organization tại một thời điểm.
 
 Bạn có thể mời một account đã tồn tại vào tổ chức, hoặc tạo mới account bằng API một cách tự động (rất hợp cho việc cấp phát account hàng loạt).
+
+Ghép lại, toàn bộ cấu trúc xếp thành một cây: gốc là Organization, bên dưới là một management account và nhiều member account; mở một member account ra sẽ thấy một root user (sinh ra cùng account) và nhiều IAM user do bạn tạo.
 
 ### 2.2. Organizational Unit (OU) — chia nhóm theo cây
 
@@ -64,11 +73,11 @@ Sức mạnh của OU nằm ở chỗ: chính sách (SCP, Tag Policy) gắn vào
 
 ### 2.3. Consolidated Billing — gộp hóa đơn và hưởng giá rẻ
 
-Đây là lý do "kinh tế" để dùng Organizations. Khi bật **Consolidated Billing** (gộp hóa đơn), bạn nhận được:
+Đây là lý do "kinh tế" để dùng Organizations. Tính năng **Consolidated Billing** cho phép:
 
-- **Một hóa đơn duy nhất** cho toàn bộ account — management account trả tiền, member account dùng miễn phí tính năng này.
+- **Một hóa đơn duy nhất** cho toàn bộ account  — management account tổng hợp hoá đơn và trả tiền.
 - **Giảm giá theo sản lượng (volume pricing)**: AWS cộng dồn mức sử dụng của tất cả account lại để tính bậc giá. Ví dụ S3 càng dùng nhiều giá mỗi GB càng rẻ — gộp lại sẽ chạm bậc giá rẻ nhanh hơn so với tính riêng từng account.
-- **Chia sẻ Reserved Instances và Savings Plans**: phần <Tooltip content="Reserved Instance — cam kết dùng EC2 trong 1–3 năm để đổi lấy giá rẻ hơn nhiều so với on-demand">RI</Tooltip> hoặc <Tooltip content="Savings Plans — cam kết một mức chi tiêu/giờ trong 1–3 năm để được giảm giá compute, linh hoạt hơn Reserved Instance">Savings Plans</Tooltip> mua ở một account nhưng không dùng hết có thể được các account khác trong tổ chức tận dụng, tránh lãng phí cam kết.
+- **Chia sẻ Reserved Instances và Savings Plans**: phần <Tooltip content="Reserved Instance — cam kết dùng EC2 trong 1–3 năm để đổi lấy giá rẻ hơn nhiều so với on-demand">Reserved Instance</Tooltip> hoặc <Tooltip content="Savings Plans — cam kết một mức chi tiêu/giờ trong 1–3 năm để được giảm giá compute, linh hoạt hơn Reserved Instance">Savings Plans</Tooltip> mua ở một account nhưng không dùng hết có thể được các account khác trong tổ chức tận dụng, tránh lãng phí cam kết. Mặc định luôn được **bật** trên toàn bộ member account, có thể tắt cho từng account thông qua management account.
 
 > **Mẹo thi:** Thấy từ khóa "giảm chi phí khi có nhiều account", "gộp hóa đơn", "chia sẻ Reserved Instances giữa các account" → đáp án gần như chắc chắn là **AWS Organizations + Consolidated Billing**.
 
@@ -257,7 +266,7 @@ Thiếu một trong hai phía là chặn. Truy cập chéo account **không bao 
 
 ## 6. AWS IAM Identity Center — một cổng đăng nhập cho tất cả
 
-**AWS IAM Identity Center** (tên cũ là **AWS Single Sign-On / AWS SSO**) là dịch vụ cho phép người dùng đăng nhập một lần rồi truy cập mọi AWS account trong Organization lẫn các ứng dụng doanh nghiệp (qua chuẩn <Tooltip content="Security Assertion Markup Language — chuẩn cho phép một hệ thống danh tính khẳng định 'người này đã đăng nhập' để đăng nhập một lần (SSO) vào nhiều ứng dụng">SAML 2.0</Tooltip>) — tất cả từ một portal duy nhất. Đây chính là lời giải cho câu hỏi số 3 ở đầu bài: thay vì tạo 200 user × 20 account, bạn quản lý danh tính một nơi.
+**AWS IAM Identity Center** (tên cũ là **AWS SSO**) là dịch vụ cho phép người dùng đăng nhập một lần rồi truy cập mọi AWS account trong Organization lẫn các ứng dụng doanh nghiệp — tất cả từ một portal duy nhất. Đây chính là lời giải cho câu hỏi số 3 ở đầu bài: thay vì tạo 200 user × 20 account, bạn quản lý danh tính một nơi.
 
 ### 6.1. Nguồn danh tính (Identity Source)
 
