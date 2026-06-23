@@ -226,7 +226,19 @@ When you need to keep a specific instance from being killed during a scale-in (f
 
 ### 5.6. Suspend and Resume Processes
 
-You can suspend individual ASG processes — such as `Launch`, `Terminate`, `HealthCheck`, `ReplaceUnhealthy`, `AZRebalance`, or `AddToLoadBalancer` — and resume them later. This is useful when you need to investigate an incident without ASG interfering: for example, suspend `Terminate` and `ReplaceUnhealthy` to keep a failing instance intact for debugging, instead of letting ASG replace it and take the evidence with it.
+You can suspend individual ASG processes — such as `Launch`, `Terminate`, `HealthCheck`, `ReplaceUnhealthy`, `AZRebalance`, `AddToLoadBalancer`, or `ScheduledActions` — and resume them later. This is useful when you need to investigate an incident without ASG interfering: for example, suspend `Terminate` and `ReplaceUnhealthy` to keep a failing instance intact for debugging, instead of letting ASG replace it and take the evidence with it.
+
+The same mechanism works for **maintenance**: when you patch a running instance, a health check during the patch can mark it unhealthy and make ASG replace the machine right away. Suspending `ReplaceUnhealthy` — the process that terminates instances marked unhealthy and stands up replacements — stops that. Once the patch is done, set the instance's health status back to healthy (call the `SetInstanceHealth` API) before you resume `ReplaceUnhealthy`; if you resume while the machine is still unhealthy, ASG will kill it immediately.
+
+A common trap here: suspending `ScheduledActions` does **nothing** for the situation above. `ScheduledActions` only governs scheduled scaling actions (scaling on a preset schedule); the machine replacement is driven by `HealthCheck` plus `ReplaceUnhealthy`, which have nothing to do with `ScheduledActions`.
+
+### 5.7. Standby State
+
+When you need to maintain or patch a specific instance and then return it to service, the cleanest way is to move it into the **Standby state**. An instance in Standby still belongs to the ASG but is taken out of service: it is deregistered from the load balancer so it receives no traffic, and ASG runs no health checks on it — meaning there is no chance of it being marked unhealthy and replaced mid-maintenance. You work on the machine freely, then have it exit Standby to return to the `InService` state.
+
+When you move an instance into Standby, you choose whether to decrement the desired capacity accordingly. If you decrement, ASG keeps the total number of serving machines unchanged. If you don't, ASG launches a new machine to fill the desired capacity — so for maintaining a machine and returning it, you usually let ASG balance things by default.
+
+Compared with suspending `ReplaceUnhealthy`, Standby is tidier because it targets exactly one instance instead of turning off a whole process for the entire ASG. On the SAA exam, Standby is usually the "most correct" answer for a single-machine maintenance scenario.
 
 ---
 
@@ -245,6 +257,7 @@ When you read an ASG question, follow the keywords to map them to the right feat
 | Install software / drain connections before a state change | **Lifecycle hook** |
 | App boots slowly, need near-instant scale out | **Warm pool** |
 | Roll out a new AMI with no downtime | **Instance refresh** |
+| Maintain/patch one instance without ASG replacing it | **Standby state**, or suspend `ReplaceUnhealthy` |
 | Cut compute costs for the ASG | **Mixed instances** with Spot + On-Demand |
 | Survive a single AZ outage | Subnets across **multiple AZs** |
 
@@ -254,6 +267,7 @@ A few traps that cost candidates points:
 - **Launch Configuration is obsolete.** When offered the choice, default to thinking Launch Template.
 - **Scaling is really just adjusting desired capacity** within the min–max range. ASG will never exceed max or drop below min, no matter what a policy demands.
 - **A grace period that is too short kills the very instance that is booting**, creating an endless launch–terminate loop.
+- **Suspend the right process.** To stop ASG from replacing a machine under maintenance, touch `ReplaceUnhealthy` (or use the Standby state); `ScheduledActions` only concerns scheduled scaling, and suspending it won't save the machine.
 - **HA requires multiple AZs.** An ASG packed into a single AZ is still a single point of failure.
 
 ---

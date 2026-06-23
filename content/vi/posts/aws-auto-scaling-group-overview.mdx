@@ -203,7 +203,19 @@ Khi cần giữ một instance cụ thể không bị giết lúc scale in (ví 
 
 ### 5.6. Suspend và Resume Processes
 
-Bạn có thể tạm dừng từng tiến trình của ASG — như `Launch`, `Terminate`, `HealthCheck`, `ReplaceUnhealthy`, `AZRebalance`, hay `AddToLoadBalancer` — rồi bật lại sau. Điều này hữu ích khi cần điều tra sự cố mà không muốn ASG can thiệp: ví dụ tạm dừng `Terminate` và `ReplaceUnhealthy` để giữ nguyên một instance đang lỗi cho việc debug, thay vì để ASG thay nó đi mất bằng chứng.
+Bạn có thể tạm dừng từng tiến trình của ASG — như `Launch`, `Terminate`, `HealthCheck`, `ReplaceUnhealthy`, `AZRebalance`, `AddToLoadBalancer`, hay `ScheduledActions` — rồi bật lại sau. Điều này hữu ích khi cần điều tra sự cố mà không muốn ASG can thiệp: ví dụ tạm dừng `Terminate` và `ReplaceUnhealthy` để giữ nguyên một instance đang lỗi cho việc debug, thay vì để ASG thay nó đi mất bằng chứng.
+
+Cùng cơ chế đó dùng được cho **bảo trì**: khi bạn vá một instance đang chạy, health check trong lúc vá có thể báo unhealthy và khiến ASG thay máy ngay. Tạm dừng `ReplaceUnhealthy` — tiến trình lo việc terminate máy bị đánh dấu unhealthy rồi dựng máy mới thay — sẽ chặn việc đó. Vá xong, đưa health status của instance về healthy (gọi API `SetInstanceHealth`) trước khi resume `ReplaceUnhealthy`; nếu resume lúc máy vẫn còn unhealthy, ASG sẽ giết nó ngay lập tức.
+
+Một bẫy hay gặp ở đây: tạm dừng `ScheduledActions` **không** giúp gì cho tình huống trên. `ScheduledActions` chỉ điều khiển các thao tác scheduled scaling (scale theo lịch đã đặt trước); còn việc ASG thay máy là do `HealthCheck` cộng `ReplaceUnhealthy` quyết định, hoàn toàn không liên quan tới `ScheduledActions`.
+
+### 5.7. Standby State
+
+Khi cần bảo trì hay vá một instance cụ thể rồi đưa nó trở lại phục vụ, cách gọn nhất là chuyển nó sang **Standby state**. Instance ở Standby vẫn thuộc ASG nhưng được đưa ra khỏi vòng phục vụ: nó bị gỡ đăng ký khỏi load balancer nên không nhận traffic, và ASG không chạy health check trên nó — tức là không có chuyện bị đánh dấu unhealthy rồi thay thế giữa chừng. Bạn thao tác trên máy thoải mái, xong thì cho instance exit Standby để quay về trạng thái `InService`.
+
+Khi đưa một instance vào Standby, bạn chọn có giảm desired capacity đi tương ứng hay không. Nếu giảm, ASG giữ nguyên tổng số máy đang phục vụ. Nếu không giảm, ASG sẽ launch thêm một máy mới để bù cho đủ desired capacity — nên với việc bảo trì rồi trả máy lại, thường để ASG tự cân theo mặc định.
+
+So với cách suspend `ReplaceUnhealthy`, Standby gọn hơn vì nhắm thẳng vào đúng một instance thay vì tắt cả một tiến trình của toàn bộ ASG. Trong đề SAA, Standby thường là đáp án "đúng nhất" cho kịch bản bảo trì một máy.
 
 ---
 
@@ -222,6 +234,7 @@ Khi đọc một câu hỏi ASG, hãy lần theo từ khóa để ánh xạ sang
 | Cài phần mềm / drain kết nối trước khi đổi trạng thái | **Lifecycle hook** |
 | App boot lâu, cần scale out gần như tức thì | **Warm pool** |
 | Triển khai AMI mới mà không downtime | **Instance refresh** |
+| Bảo trì/vá một instance mà không muốn ASG thay nó | **Standby state**, hoặc tạm dừng `ReplaceUnhealthy` |
 | Cắt giảm chi phí compute cho ASG | **Mixed instances** với Spot + On-Demand |
 | Đảm bảo sống sót khi một AZ sập | Subnet ở **nhiều AZ** |
 
@@ -231,6 +244,7 @@ Vài cái bẫy hay khiến thí sinh mất điểm:
 - **Launch Configuration đã lỗi thời.** Khi được chọn, hãy mặc định nghĩ tới Launch Template.
 - **Scaling thực chất là chỉnh desired capacity** trong khoảng min–max. ASG sẽ không bao giờ vượt max hay tụt dưới min, dù policy có yêu cầu gì.
 - **Grace period quá ngắn giết chính instance đang boot**, tạo vòng lặp launch–terminate vô tận.
+- **Suspend đúng tiến trình.** Muốn ngăn ASG thay một máy đang bảo trì thì đụng `ReplaceUnhealthy` (hoặc dùng Standby state); `ScheduledActions` chỉ liên quan tới scale theo lịch, suspend nó không cứu được máy.
 - **Muốn HA thì cần nhiều AZ.** Một ASG gói gọn trong một AZ vẫn là một điểm chết duy nhất.
 
 ---
