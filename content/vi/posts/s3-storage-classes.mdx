@@ -226,6 +226,8 @@ Quy tắc nhanh: mặc định chọn **Glacier Flexible Retrieval** cho data hi
 
 S3 Intelligent-Tiering là class đặc biệt — nó **tự động di chuyển objects** giữa các access tier dựa trên usage pattern. Bạn không cần đoán class nào tốt nhất; S3 monitor access và tối ưu chi phí cho bạn.
 
+Điểm cần lưu ý: Intelligent-Tiering chỉ đáng dùng khi access pattern **không thể đoán hoặc đo lường trước** — bạn không biết object sẽ được truy cập thường xuyên hay hiếm khi. Vì S3 phải liên tục theo dõi từng object để chọn tier phù hợp, bạn mới phải trả thêm monitoring fee. Ngược lại, nếu pattern đã rõ ràng và dự đoán được — ví dụ object chỉ được đọc khoảng 2 lần mỗi tháng — hãy chọn thẳng Standard-IA (hoặc One Zone-IA): cùng mức giá lưu trữ rẻ tương đương mà không tốn monitoring fee.
+
 ### Cách hoạt động
 
 Khi bạn upload object vào Intelligent-Tiering, nó bắt đầu ở tier **Frequent Access**. Sau đó:

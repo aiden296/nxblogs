@@ -226,6 +226,8 @@ Quick rule: default to **Glacier Flexible Retrieval** for rarely accessed data, 
 
 S3 Intelligent-Tiering is unique — it **automatically moves objects** between access tiers based on usage patterns. You don't need to guess which class is best; S3 monitors access and optimizes cost for you.
 
+The key thing to keep in mind: Intelligent-Tiering is only worth it when the access pattern **can't be predicted or measured ahead of time** — you don't know whether an object will be read often or rarely. Because S3 has to continuously track each object to pick the right tier, you pay an extra monitoring fee. If the pattern is already clear and predictable — say an object is read about twice a month — choose Standard-IA (or One Zone-IA) directly: you get the same low storage price without the monitoring fee.
+
 ### How it works
 
 When you upload an object to Intelligent-Tiering, it starts in the **Frequent Access** tier. Then:
