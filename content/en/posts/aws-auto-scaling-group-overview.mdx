@@ -1,0 +1,272 @@
+---
+title: 'Auto Scaling Group: Self-Adjusting EC2 Capacity — Min–Desired–Max, 5 Scaling Types, and the Traps on the SAA Exam'
+date: '2026-06-24'
+tags: ['Devops', 'AWS', 'SAA', 'Exam Prep']
+description: 'An Auto Scaling Group overview for the SAA exam — the configuration framework (Launch Template, min/desired/max, multi-AZ), health checks and self-healing, the five scaling types (manual, scheduled, simple, step, target tracking, predictive), plus advanced features like lifecycle hooks, warm pools, instance refresh, and mixed instances, and the traps you will hit in the exam room.'
+enableComment: true
+---
+
+# Auto Scaling Group: Self-Adjusting EC2 Capacity — Min–Desired–Max, 5 Scaling Types, and the Traps on the SAA Exam
+
+You deploy a web app onto two <Tooltip content="Elastic Compute Cloud — virtual servers on AWS">EC2</Tooltip> instances behind a load balancer. Everything runs smoothly — until the night of a flash sale. Traffic spikes tenfold, both machines hit the CPU ceiling, requests queue up, and then time out. You scramble to spin up four more machines by hand. By 3 a.m. traffic has dropped to almost nothing, yet six EC2 instances are still running idle and you are still paying for all six. Worse, one of them dies at midnight and there is no one around to replace it.
+
+The root of the problem: you are managing **static capacity** in a world where load changes constantly. The machine count does not grow when needed, does not shrink when idle, and does not self-replace when something breaks. All three of those jobs — add a machine, remove a machine, replace a machine — have to be done by hand, at exactly the moments you least want to be touching anything.
+
+This is precisely the problem that **Auto Scaling Group** (ASG) solves. This post walks through everything a Solutions Architect needs to know about ASG for the SAA exam: the configuration framework, how ASG heals itself, the five scaling types and when to use each, the advanced features, and a decision map for the exam room.
+
+<ExcalidrawDiagram
+  src="/asg-overview.excalidraw"
+  alt="The full picture of an Auto Scaling Group — CloudWatch watches metrics, the scaling policy adjusts desired capacity, the ASG spreads EC2 instances across multiple AZs behind a load balancer, and the launch template serves as the blueprint for new instances."
+/>
+
+---
+
+## 1. What is an Auto Scaling Group?
+
+An **Auto Scaling Group** is a group of EC2 instances that AWS manages as a single unit, with three core jobs:
+
+- **Maintain**: always keep the exact number of instances you asked for. When an instance dies, ASG stands up another to replace it — this is the self-healing mechanism.
+- **Scale**: automatically add instances when load is high and remove them when load is low, based on the rules you set.
+- **High availability**: spread instances across multiple <Tooltip content="Availability Zone — one or a cluster of data centers isolated in power and network within the same region">Availability Zones</Tooltip> so that if one AZ goes down, the system stays alive.
+
+A point that often gets overlooked: ASG itself is a free service. You do not pay a cent for ASG — you only pay for the resources it creates, namely the EC2 instances and the network traffic that comes with them.
+
+ASG does not work alone. It sits at the intersection of three pieces of the EC2 ecosystem:
+- The first is the **Launch Template** — the blueprint describing what a new instance will look like.
+- The second is the **Elastic Load Balancer** — ASG automatically registers new instances behind the load balancer so they receive traffic.
+- The third is <Tooltip content="AWS's monitoring service that collects metrics like CPU, network, and request count, and fires alarms when thresholds are crossed">CloudWatch</Tooltip> — the source of the numbers ASG uses to decide when to shrink and when to grow. The hero diagram above captures all three relationships.
+
+---
+
+## 2. The Configuration Framework: Launch Template, Min/Desired/Max, Multi-AZ
+
+### 2.1. Launch Template and Launch Configuration
+
+ASG needs to know "what a new instance looks like" before it creates any machine. That information lives in one of two things:
+
+A **Launch Template** is the modern instance blueprint: it bundles the <Tooltip content="Amazon Machine Image — a disk snapshot containing the OS and preinstalled software, used as a template to create instances">AMI</Tooltip>, instance type, key pair, security group, user data, IAM role, and many other settings. Its strength is **versioning** — you store multiple versions and point ASG at a specific one, which is very handy for rolling updates.
+
+A **Launch Configuration** is the older generation: immutable (to change anything you must create a new one), no versioning, and no support for newer features. AWS has stopped developing it.
+
+| Criterion | Launch Template | Launch Configuration |
+| --- | --- | --- |
+| Versioning | Yes | No |
+| Combine multiple instance types / Spot + On-Demand | Yes | No |
+| Support for newer EC2 features | Yes | Limited |
+| Status | Recommended | Legacy, being phased out |
+
+The rule for the exam is blunt: if a question lets you choose, almost always choose the **Launch Template**.
+
+So do the instances in an ASG have to be identical? At the base-configuration level, yes: every instance is born from the same launch template, so they share the same AMI, the same application, the same security group, and the same IAM role. What does not have to be uniform is the instance type and the purchase option — with a Mixed Instances Policy (see Section 5.4), one ASG can mix multiple machine types and both Spot and On-Demand within the same group. The guiding principle is that the instances must be <Tooltip content="Any machine plays the same role and can be replaced at any time without affecting the system">interchangeable</Tooltip>, because ASG and the load balancer treat them as one functionally uniform pool. The practical consequence: do not cram different roles — say a web server and a background worker — into the same ASG; each role should have its own.
+
+### 2.2. Min, Desired, and Max Capacity
+
+Three numbers shape every behavior of an ASG:
+
+- **Minimum** is the floor — the least number of instances always kept running, even when load is zero.
+- **Desired capacity** is the number of instances ASG is trying to maintain right now. ASG continuously pulls the actual machine count back toward this number.
+- **Maximum** is the ceiling — scale out never goes past this, no matter how high the load climbs.
+
+The thing to internalize: every scaling mechanism, ultimately, just **changes the desired capacity** within the min-to-max range. ASG will then launch or terminate on its own to make the actual count match the desired one.
+
+Picture an ASG as an air conditioner. Desired capacity is the temperature you set, and the AC runs until the room reaches it. Min and max are the machine's physical limits: no matter how you turn the dial, it cannot go colder than min or hotter than max.
+
+### 2.3. Multi-AZ and AZ Rebalancing
+
+When you create an ASG, you specify a list of subnets — each subnet belongs to one AZ. ASG spreads instances evenly across those AZs. If one AZ has an incident, the instances in the remaining AZs keep serving, and ASG stands up extra machines in the healthy AZs to compensate — that is high availability at the infrastructure level.
+
+ASG also tries to keep the instance count balanced across AZs, called **AZ rebalancing**. When it detects an imbalance (for example, an AZ that just recovered from an incident), ASG may launch a new machine first and only then terminate the surplus, so that rebalancing does not drop capacity midway.
+
+A common trap: for HA you must configure subnets in **at least two AZs**. An ASG that confines all its instances to a single AZ is still a single point of failure, no matter how much it scales.
+
+---
+
+## 3. Health Checks and Self-Replacing Instances
+
+The "self-healing" part of ASG lives on health checks. But there is one detail that catches a lot of people on the exam: by default, ASG has no idea whether your application is alive or not.
+
+### 3.1. Types of Health Check
+
+| Type | What it checks | What it catches |
+| --- | --- | --- |
+| **EC2 status check** (default) | Machine infrastructure: hardware, network, whether the OS boots | Dead machine, hard-hung OS |
+| **ELB health check** | The application endpoint (e.g. `GET /health`) through the load balancer | App crash, hang, error responses — even while the OS keeps running |
+| **Custom health check** | Logic you define yourself, calling the `SetInstanceHealth` API | Any condition you want |
+
+With an EC2 status check, an instance is still considered healthy as long as the machine is on and the OS is running — even when the application process has died and every request returns a 500. For ASG to see failures at the application layer, you must enable the **ELB health check** on the ASG.
+
+This is a classic SAA question: "the application is hung but the instance keeps running, and ASG won't replace the machine — how do you fix it?" The answer is almost always to enable the ELB health check instead of relying on the EC2 status check alone.
+
+### 3.2. Health Check Grace Period
+
+The **health check grace period** (300 seconds by default) is the window during which ASG ignores health checks after an instance has just launched, giving the application time to start. If the grace period is too short relative to the app's boot time, ASG will treat the still-booting machine as unhealthy, kill it, stand up a new one, then kill that too — a death loop where ASG spins endlessly without ever stabilizing.
+
+### 3.3. Self-Replacement and Load Balancer Integration
+
+When an instance is marked unhealthy, ASG terminates it and launches a replacement from the launch template — entirely automatically. At the same time, ASG manages the registration cycle with the load balancer: a new instance is automatically registered into the <Tooltip content="Target Group — the group of targets a load balancer distributes requests to, with its own health check configuration">Target Group</Tooltip> to start receiving traffic, and removed when it is terminated.
+
+On removal, ASG respects **connection draining** (newer name: deregistration delay): the load balancer stops sending new requests to the instance about to be removed, but lets in-flight requests finish over a grace window, avoiding a mid-request cutoff that would ruin the user experience.
+
+If you want to get your hands dirty and watch ASG actually replace a machine and scale as CPU spikes, the post [How to Test Side Effect of Burst CPU on AWS Auto Scaling](/en/posts/test-burst-cpu-asg) sets up a concrete stress test.
+
+---
+
+## 4. The Five Scaling Types: the Heart of ASG
+
+Every scaling mechanism boils down to one thing: adjusting desired capacity. What differs is "what it bases that adjustment on." The diagram below shows how the four automated scaling types react differently to the same load curve.
+
+<ExcalidrawDiagram
+  src="/asg-scaling-policies.excalidraw"
+  alt="A comparison of scaling policies — target tracking hugs a target CPU level, step scaling jumps in steps when alarm thresholds are crossed, scheduled scaling jumps at a fixed clock time, and predictive scaling raises capacity before the forecasted load arrives."
+/>
+
+### 4.1. Manual Scaling
+
+The simplest: you set the desired capacity by hand. Useful for testing, or when you know exactly how many machines you need and do not want ASG deciding for you.
+
+### 4.2. Scheduled Scaling
+
+Scale on a predefined schedule. You declare cron-style actions, for example "every day at 9 a.m. set desired to 10, at 8 p.m. bring it down to 2." It fits when load has a **known time-based cycle** — business hours, payday, a scheduled event. Its strength is that capacity is ready before the load arrives, because the action is tied to the clock rather than waiting on a metric.
+
+### 4.3. Dynamic Scaling
+
+This is the group that reacts to real-time metrics, with three variants:
+
+**Target Tracking** — you pick a target metric, for example keep Average CPU around 50%, and ASG adds or removes instances on its own to hug that number. You do not need to define thresholds or alarms manually; ASG creates and manages the CloudWatch alarms behind the scenes. This is the simplest type and AWS's recommended default.
+
+**Step Scaling** — reacts to a CloudWatch alarm, but adjusts in "steps" depending on how far the threshold was breached. For example, CPU 60–70% adds 1 machine, above 70% adds 3 at once. More flexible than target tracking when you want the reaction to intensify with severity.
+
+**Simple Scaling** — the older generation: one alarm triggers exactly one action, and then you must wait out a cooldown before doing anything else. Most situations are now served by step scaling instead, because it does not "stall" while waiting on a cooldown.
+
+Here is an example of creating a target tracking policy with the AWS SDK for Node.js, keeping average CPU at 50%:
+
+```ts
+import { AutoScalingClient, PutScalingPolicyCommand } from '@aws-sdk/client-auto-scaling'
+
+const client = new AutoScalingClient({ region: 'ap-southeast-1' })
+
+await client.send(
+  new PutScalingPolicyCommand({
+    AutoScalingGroupName: 'web-asg',
+    PolicyName: 'keep-cpu-at-50',
+    PolicyType: 'TargetTrackingScaling',
+    TargetTrackingConfiguration: {
+      PredefinedMetricSpecification: {
+        PredefinedMetricType: 'ASGAverageCPUUtilization'
+      },
+      TargetValue: 50,
+      DisableScaleIn: false
+    }
+  })
+)
+```
+
+### 4.4. Predictive Scaling
+
+Predictive scaling uses machine learning to learn past load patterns (by day, by week), forecast upcoming demand, and raise capacity **before** the load actually arrives. It usually runs alongside dynamic scaling: predictive handles the predictable cyclical load, while dynamic handles the spikes that fall outside the forecast. Ideal for applications with a steadily repeating load rhythm.
+
+### 4.5. Scaling on a Custom Metric: the SQS Queue Example
+
+A situation that comes up constantly on the exam is a worker tier processing <Tooltip content="Simple Queue Service — AWS's message queue service, used to decouple producers and consumers">SQS</Tooltip>: EC2 instances pull messages off a queue and process them. Measuring CPU here is meaningless, because what you actually need to track is the queue's length.
+
+The standard approach is to scale on **backlog per instance** — the number of waiting messages divided by the current instance count. You compute this value, push it to CloudWatch as a custom metric, then set a target tracking policy that follows it (for example, keep each instance at no more than 100 backlogged messages). When the backlog rises, ASG adds workers; when the queue drains, ASG removes them. This approach is tightly bound to the decoupled architecture that the SAA exam loves to ask about. SQS queues are dissected more thoroughly in [SQS Deep Dive](/en/posts/sqs-deep-dive).
+
+### 4.6. Cooldown and Instance Warm-up
+
+After a scaling action, if ASG reacts immediately to the next metric reading, it easily falls into jittery behavior — adding then removing repeatedly (thrashing). Two mechanisms prevent this:
+
+- **Cooldown period** (300 seconds by default, for simple scaling): after an action, ASG waits out the cooldown before considering the next one, giving the metric time to reflect the true impact of the scale that just happened.
+- **Instance warmup** (used with target tracking and step scaling): the window during which a freshly launched instance is not yet counted in the group's aggregate metric, because it is still starting up and not yet carrying real load. This is the modern replacement for a hard cooldown.
+
+A summary table of the five scaling types (manual, scheduled, simple, step, target tracking, predictive):
+
+| Type | Based on | Use when |
+| --- | --- | --- |
+| **Manual** | You set desired yourself | Testing, or a fixed, known capacity |
+| **Scheduled** | The clock (cron) | Load has a known time-based cycle |
+| **Simple** | One alarm, one action + cooldown | Legacy, almost always use step instead |
+| **Step** | An alarm with multiple steps | Reaction that intensifies with breach size |
+| **Target Tracking** | Hold a metric around a target value | Default, simplest, AWS-recommended |
+| **Predictive** | ML forecast from history | Load that repeats daily/weekly, scale ahead |
+
+---
+
+## 5. Advanced Features for the Exam
+
+### 5.1. Lifecycle Hooks
+
+A **lifecycle hook** lets you insert a pause into the instance lifecycle: hold a machine in the `Pending:Wait` state right after launch, or `Terminating:Wait` right before termination, to run custom actions before the instance changes state.
+
+<ExcalidrawDiagram
+  src="/asg-lifecycle-hooks.excalidraw"
+  alt="The instance lifecycle in an ASG — a scale-out pushes the instance through Pending then Pending:Wait where the lifecycle hook runs setup, into InService; a scale-in moves the instance through Terminating:Wait to drain connections and save logs before Terminated."
+/>
+
+At the launch point, the hook is where you install software, warm a cache, or register the instance with another system before it takes traffic. At the termination point, the hook is where you drain connections gracefully, push remaining logs to storage, or deregister from an external service. Each hook has a heartbeat timeout: your action must signal `CONTINUE` to proceed or `ABANDON` to cancel; if the time runs out with no signal, ASG performs the default action.
+
+### 5.2. Warm Pools
+
+For applications that take several minutes to boot (loading large datasets, compiling, starting a heavy JVM, etc.), the scale-out time can be far too slow relative to when traffic arrives. A **warm pool** is a pool of pre-initialized instances — already booted, already set up — kept in a stopped or hibernated state to save cost. When a scale out is needed, ASG pulls a machine from the warm pool and puts it into service almost instantly instead of building one from scratch.
+
+### 5.3. Instance Refresh
+
+When you update the launch template to a new version (for example an AMI with a security patch), **Instance Refresh** rolls out a replacement of all instances in the ASG to the new version — you do not need to stand up a separate ASG and shift traffic by hand. You control the minimum percentage of healthy instances to keep during the swap (minimum healthy percentage) and can set checkpoints to pause for inspection partway through. Related to this is **Maximum Instance Lifetime**: forcing ASG to replace any instance older than a certain age, useful for compliance requirements or periodic patching.
+
+### 5.4. Mixed Instances Policy: Mixing Spot and On-Demand
+
+An ASG does not have to use a single instance type or a single purchase option. A **mixed instances policy** lets one ASG combine multiple instance types and mix <Tooltip content="On-Demand — pay per time used, no commitment, stable but the most expensive">On-Demand</Tooltip> with <Tooltip content="Spot — uses spare EC2 capacity at up to 90% off, but can be reclaimed by AWS when needed">Spot</Tooltip>. You set a base portion running On-Demand for stability and use Spot for the rest to cut costs.
+
+How ASG picks Spot is governed by the allocation strategy: **capacity-optimized** draws from the pool with the most available capacity to minimize reclamation (recommended for interruption-sensitive workloads), **price-capacity-optimized** balances price against stability, and **lowest-price** prioritizes the cheapest. This is a powerful cost-optimization tool and a frequent exam topic; the EC2 purchase options are covered in more depth in [AWS EC2 Instance Purchasing Options](/en/posts/aws-ec2-instance-purchasing-options).
+
+### 5.5. Default Termination Policy and Scale-In Protection
+
+When scaling in, ASG has to choose which instance to kill. The default policy follows a priority order: first pick within the **AZ that currently has the most instances** (to keep the AZs balanced), then within that AZ pick the instance using the **oldest** launch template or configuration, and finally prefer the instance **closest to the next billing hour** so the already-paid-for hour is not wasted.
+
+When you need to keep a specific instance from being killed during a scale-in (for example, a machine running an important long job), you turn on **scale-in protection** for just that one.
+
+### 5.6. Suspend and Resume Processes
+
+You can suspend individual ASG processes — such as `Launch`, `Terminate`, `HealthCheck`, `ReplaceUnhealthy`, `AZRebalance`, or `AddToLoadBalancer` — and resume them later. This is useful when you need to investigate an incident without ASG interfering: for example, suspend `Terminate` and `ReplaceUnhealthy` to keep a failing instance intact for debugging, instead of letting ASG replace it and take the evidence with it.
+
+---
+
+## 6. Decision Map and the Traps on the SAA Exam
+
+When you read an ASG question, follow the keywords to map them to the right feature:
+
+| Keyword in the question | Points to |
+| --- | --- |
+| App is hung but the instance keeps running, ASG won't replace it | Enable **ELB health check** (don't rely on the EC2 status check) |
+| Load has a known hourly/daily cycle | **Scheduled scaling** |
+| Hold CPU (or a metric) around a level, minimal configuration | **Target tracking** |
+| React to different severity levels | **Step scaling** |
+| Load that repeats weekly, scale ahead of it | **Predictive scaling** |
+| Workers processing an SQS queue | Target tracking on **backlog per instance** |
+| Install software / drain connections before a state change | **Lifecycle hook** |
+| App boots slowly, need near-instant scale out | **Warm pool** |
+| Roll out a new AMI with no downtime | **Instance refresh** |
+| Cut compute costs for the ASG | **Mixed instances** with Spot + On-Demand |
+| Survive a single AZ outage | Subnets across **multiple AZs** |
+
+A few traps that cost candidates points:
+
+- **EC2 status check is not the same as ELB health check.** The status check only sees the infrastructure; to catch application-layer failures you need the ELB health check.
+- **Launch Configuration is obsolete.** When offered the choice, default to thinking Launch Template.
+- **Scaling is really just adjusting desired capacity** within the min–max range. ASG will never exceed max or drop below min, no matter what a policy demands.
+- **A grace period that is too short kills the very instance that is booting**, creating an endless launch–terminate loop.
+- **HA requires multiple AZs.** An ASG packed into a single AZ is still a single point of failure.
+
+---
+
+## Conclusion
+
+Back to the flash-sale night from the opening: with an Auto Scaling Group, you no longer have to sit up watching CPU graphs or spin up machines by hand at 3 a.m. ASG adds machines when load rises, removes them when it falls, and replaces the dead one — all while you sleep.
+
+What to lock in for the exam room:
+
+- **Three core jobs**: maintain the count (self-healing), scale with load, and spread across AZs for high availability — and ASG itself is free.
+- **The configuration framework**: Launch Template (preferred over Launch Configuration), the min/desired/max trio, and subnets across multiple AZs.
+- **Health checks are the key to self-healing**: the EC2 status check only sees infrastructure, the ELB health check sees the application — and the grace period must be long enough for the app to boot.
+- **Five scaling types**: manual, scheduled, simple/step/target tracking (dynamic), and predictive — remember target tracking is the default to reach for, scheduled is for known patterns, and predictive is for cyclically repeating load.
+- **Frequently tested advanced features**: lifecycle hooks (inject a custom step), warm pools (instant scale out), instance refresh (rolling AMI swap), mixed instances (Spot + On-Demand savings), and the default termination policy.
+- **Scaling on backlog per instance** is the classic pattern for a worker tier reading an SQS queue.

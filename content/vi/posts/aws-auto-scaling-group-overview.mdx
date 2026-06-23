@@ -1,0 +1,249 @@
+---
+title: 'Auto Scaling Group: Co Giãn EC2 Tự Động — Min–Desired–Max, 5 Kiểu Scaling, Và Những Bẫy Trong Đề SAA'
+date: '2026-06-24'
+tags: ['Devops', 'AWS', 'SAA', 'Exam Prep']
+description: 'Tổng quan Auto Scaling Group cho kỳ thi SAA — bộ khung cấu hình (Launch Template, min/desired/max, multi-AZ), health check và self-healing, năm kiểu scaling (manual, scheduled, simple, step, target tracking, predictive), cùng các tính năng nâng cao như lifecycle hook, warm pool, instance refresh, mixed instances, và những bẫy hay gặp trong phòng thi.'
+enableComment: true
+---
+
+# Auto Scaling Group: Co Giãn EC2 Tự Động — Min–Desired–Max, 5 Kiểu Scaling, Và Những Bẫy Trong Đề SAA
+
+Bạn deploy một web app lên hai con <Tooltip content="Elastic Compute Cloud — máy chủ ảo trên AWS">EC2</Tooltip> đứng sau một load balancer. Mọi thứ chạy mượt — cho tới đêm flash sale. Traffic tăng gấp mười, hai con máy CPU chạm trần, request xếp hàng, rồi timeout. Bạn vội vàng bật tay thêm bốn máy nữa. Đến 3 giờ sáng traffic về gần như bằng không, nhưng sáu con EC2 vẫn chạy không tải và bạn vẫn trả tiền cho cả sáu. Tệ hơn, một con trong số đó chết lúc nửa đêm và chẳng có ai thay nó.
+
+Gốc rễ vấn đề: bạn đang quản lý **capacity tĩnh** trong một thế giới có tải thay đổi liên tục. Số máy không tự tăng khi cần, không tự giảm khi rảnh, và không tự thay khi hỏng. Cả ba việc đó — thêm máy, bớt máy, thay máy — đều phải làm tay, đúng vào những lúc bạn ít muốn động tay nhất.
+
+Đây chính là bài toán mà **Auto Scaling Group** (ASG) giải quyết. Bài viết này đi qua toàn bộ những gì một Solutions Architect cần nắm về ASG cho kỳ thi SAA: bộ khung cấu hình, cách ASG tự chữa lành, năm kiểu scaling và khi nào dùng cái nào, các tính năng nâng cao, và một bản đồ quyết định cho phòng thi.
+
+<ExcalidrawDiagram
+  src="/asg-overview.excalidraw"
+  alt="Toàn cảnh Auto Scaling Group — CloudWatch theo dõi metric, scaling policy điều chỉnh desired capacity, ASG trải EC2 trên nhiều AZ sau load balancer, và launch template làm bản thiết kế cho instance mới."
+/>
+
+---
+
+## 1. Auto Scaling Group là gì?
+
+**Auto Scaling Group** là một nhóm các EC2 instance được AWS quản lý như một đơn vị duy nhất, với ba nhiệm vụ cốt lõi:
+
+- **Duy trì (maintain)**: luôn giữ đúng số lượng instance bạn yêu cầu. Một instance chết, ASG dựng cái khác thay vào — đây là cơ chế self-healing (tự chữa lành).
+- **Co giãn (scale)**: tự thêm instance khi tải cao, tự bớt khi tải thấp, dựa trên các quy tắc bạn đặt.
+- **Sẵn sàng cao (high availability)**: trải instance qua nhiều <Tooltip content="Availability Zone — một hoặc một cụm trung tâm dữ liệu tách biệt về điện và mạng trong cùng một region">Availability Zone</Tooltip> để một AZ sập thì hệ thống vẫn sống.
+
+Một điểm hay bị bỏ qua: bản thân ASG là dịch vụ miễn phí. Bạn không trả thêm một xu nào cho ASG, chỉ trả tiền cho các tài nguyên mà nó tạo ra — chính là các EC2 instance và lưu lượng mạng đi kèm.
+
+ASG không hoạt động đơn độc. Nó nằm ở giao điểm của ba mảnh trong hệ sinh thái EC2:
+- Một là **Launch Template** — bản thiết kế mô tả instance sẽ được tạo ra trông như thế nào.
+- Hai là **Elastic Load Balancer** — ASG tự đăng ký instance mới vào sau load balancer để nhận traffic.
+- Ba là <Tooltip content="Dịch vụ giám sát của AWS, thu thập metric như CPU, network, request count và phát alarm khi vượt ngưỡng">CloudWatch</Tooltip> — nguồn số liệu để ASG quyết định khi nào nên co, khi nào nên giãn. Hero diagram phía trên gói gọn cả ba mối quan hệ này.
+
+---
+
+## 2. Bộ khung cấu hình: Launch Template, Min/Desired/Max, Multi-AZ
+
+### 2.1. Launch Template và Launch Configuration
+
+ASG cần biết "instance mới trông ra sao" trước khi tạo bất cứ máy nào. Thông tin đó nằm trong một trong hai thứ:
+
+**Launch Template** là bản thiết kế instance hiện đại: nó gói <Tooltip content="Amazon Machine Image — bản chụp đĩa chứa hệ điều hành và phần mềm cài sẵn, dùng làm khuôn để tạo instance">AMI</Tooltip>, instance type, key pair, security group, user data, IAM role và nhiều cấu hình khác. Điểm mạnh là có **versioning** — bạn lưu nhiều phiên bản và trỏ ASG vào phiên bản cụ thể, rất tiện cho việc cập nhật dần.
+
+**Launch Configuration** là thế hệ cũ: bất biến (muốn đổi gì phải tạo cái mới), không có versioning, và không hỗ trợ các tính năng đời mới. AWS đã ngừng phát triển nó.
+
+| Tiêu chí | Launch Template | Launch Configuration |
+| --- | --- | --- |
+| Versioning | Có | Không |
+| Kết hợp nhiều instance type / Spot + On-Demand | Có | Không |
+| Hỗ trợ tính năng EC2 đời mới | Có | Hạn chế |
+| Trạng thái | Khuyến nghị | Legacy, đang bị khai tử |
+
+Quy tắc cho phòng thi gọn lỏn: nếu câu hỏi để bạn chọn, gần như luôn chọn **Launch Template**.
+
+Vậy các instance trong một ASG có bắt buộc giống hệt nhau không? Ở mức cấu hình nền thì có: mọi instance đều sinh ra từ cùng một launch template, nên chung AMI, chung ứng dụng, chung security group và IAM role. Thứ không bắt buộc đồng nhất là instance type và kiểu mua — với Mixed Instances Policy (xem mục 5.4), một ASG có thể trộn nhiều loại máy và cả Spot lẫn On-Demand trong cùng một nhóm. Nguyên tắc xuyên suốt là các instance phải <Tooltip content="Interchangeable — bất kỳ máy nào cũng đóng vai trò như nhau và có thể bị thay thế bất cứ lúc nào mà không ảnh hưởng tới hệ thống">khả hoán</Tooltip>, vì ASG và load balancer coi chúng như một pool đồng nhất về chức năng. Hệ quả thực tế: đừng nhét các vai trò khác nhau — chẳng hạn web server và background worker — vào chung một ASG; mỗi vai trò nên có một ASG riêng.
+
+### 2.2. Min, Desired và Max capacity
+
+Ba con số định hình mọi hành vi của ASG:
+
+- **Minimum** là sàn — số instance tối thiểu luôn được giữ cho chạy, kể cả khi tải bằng không.
+- **Desired capacity** là số instance ASG đang cố gắng duy trì ngay lúc này. ASG liên tục kéo số máy thực tế về đúng con số này.
+- **Maximum** là trần — scale out không bao giờ vượt qua mức này, dù tải có cao đến đâu.
+
+Điều quan trọng cần thấm: mọi cơ chế scaling, suy cho cùng, chỉ là **thay đổi desired capacity** trong khoảng từ min đến max. ASG rồi sẽ tự launch hoặc terminate để số thực tế khớp với desired.
+
+Hãy hình dung ASG như một chiếc điều hòa. Desired capacity là nhiệt độ bạn đặt, ASG sẽ chạy cho tới khi phòng đạt đúng mức đó. Min và max là giới hạn vật lý của máy: dù bạn vặn thế nào, nó cũng không thể lạnh hơn min hay nóng hơn max.
+
+### 2.3. Multi-AZ và AZ rebalancing
+
+Khi tạo ASG, bạn chỉ định danh sách subnet — mỗi subnet thuộc một AZ. ASG sẽ rải instance đều ra các AZ đó. Nếu một AZ gặp sự cố, các instance ở những AZ còn lại vẫn phục vụ, và ASG dựng thêm máy ở AZ khỏe để bù — đó là high availability ở mức hạ tầng.
+
+ASG cũng cố giữ số instance cân bằng giữa các AZ, gọi là **AZ rebalancing**. Khi phát hiện lệch (ví dụ một AZ vừa hồi phục sau sự cố), ASG có thể launch máy mới trước rồi mới terminate máy thừa, để quá trình cân bằng không làm tụt capacity giữa chừng.
+
+Bẫy thường gặp: muốn HA thì phải cấu hình subnet ở **ít nhất hai AZ**. Một ASG nhốt toàn bộ instance trong một AZ thì dù có scale cũng vẫn là một điểm chết duy nhất.
+
+---
+
+## 3. Health Check và tự thay thế instance
+
+Phần "tự chữa lành" của ASG sống nhờ health check. Nhưng có một chi tiết khiến rất nhiều người sập bẫy trong đề: ASG mặc định không hề biết ứng dụng của bạn còn sống hay không.
+
+### 3.1. Các loại health check
+
+| Loại | Kiểm tra điều gì | Bắt được lỗi gì |
+| --- | --- | --- |
+| **EC2 status check** (mặc định) | Hạ tầng máy: phần cứng, mạng, OS có boot không | Máy chết, OS treo cứng |
+| **ELB health check** | Endpoint ứng dụng (ví dụ `GET /health`) qua load balancer | App crash, treo, trả lỗi — dù OS vẫn chạy |
+| **Custom health check** | Logic do bạn tự định nghĩa, gọi API `SetInstanceHealth` | Bất kỳ điều kiện nào bạn muốn |
+
+Với EC2 status check, instance vẫn được coi là khỏe miễn là máy còn bật và OS còn chạy — kể cả khi tiến trình ứng dụng đã chết và mọi request đều trả 500. Để ASG nhìn thấy lỗi ở tầng ứng dụng, bạn phải bật **ELB health check** cho ASG.
+
+Đây là một câu kinh điển trong đề SAA: "ứng dụng bị treo nhưng instance vẫn chạy, ASG không thay máy — sửa thế nào?". Đáp án gần như luôn là bật ELB health check thay vì chỉ dựa vào EC2 status check.
+
+### 3.2. Health Check Grace Period
+
+**Health check grace period** (mặc định 300 giây) là khoảng thời gian ASG bỏ qua health check sau khi một instance vừa được launch, để ứng dụng kịp khởi động. Nếu grace period quá ngắn so với thời gian boot của app, ASG sẽ coi máy đang khởi động là unhealthy, giết nó, dựng máy mới, rồi lại giết — một vòng lặp chết khiến ASG quay liên tục mà chẳng bao giờ ổn định.
+
+### 3.3. Tự thay thế và tích hợp với load balancer
+
+Khi một instance bị đánh dấu unhealthy, ASG terminate nó và launch một instance thay thế từ launch template — toàn bộ tự động. Đồng thời ASG quản lý vòng đăng ký với load balancer: instance mới được tự động đăng ký vào <Tooltip content="Target Group — nhóm đích mà load balancer phân phối request tới, kèm cấu hình health check riêng">Target Group</Tooltip> để bắt đầu nhận traffic, và được gỡ ra khi bị terminate.
+
+Lúc gỡ, ASG tôn trọng **connection draining** (tên mới là deregistration delay): load balancer ngừng gửi request mới tới instance sắp gỡ, nhưng vẫn để các request đang xử lý dở chạy cho xong trong một khoảng thời gian, tránh cắt đứt giữa chừng làm hỏng trải nghiệm người dùng.
+
+Nếu muốn nghịch tận tay xem ASG thật sự thay máy và scale ra sao khi CPU vọt lên, bài [How to Test Side Effect of Burst CPU on AWS Auto Scaling](/vi/posts/test-burst-cpu-asg) dựng một bài stress test cụ thể.
+
+---
+
+## 4. Năm kiểu Scaling: trái tim của ASG
+
+Tất cả các cơ chế scaling đều quy về một việc: chỉnh desired capacity. Khác nhau là ở chỗ "dựa vào đâu để chỉnh". Hình dưới minh họa bốn kiểu scaling tự động phản ứng khác nhau ra sao trước cùng một đường cong tải.
+
+<ExcalidrawDiagram
+  src="/asg-scaling-policies.excalidraw"
+  alt="So sánh các scaling policy — target tracking bám sát một mức CPU mục tiêu, step scaling nhảy theo bậc khi vượt ngưỡng alarm, scheduled scaling nhảy vào một mốc giờ cố định, và predictive scaling nâng capacity trước khi tải dự báo ập tới."
+/>
+
+### 4.1. Manual scaling
+
+Đơn giản nhất: bạn tự tay đặt desired capacity. Hữu ích cho test, hoặc khi bạn biết chính xác cần bao nhiêu máy và không muốn ASG tự quyết.
+
+### 4.2. Scheduled scaling
+
+Scale theo lịch định sẵn. Bạn khai báo hành động kiểu cron, ví dụ "9 giờ sáng mỗi ngày đặt desired lên 10, 8 giờ tối hạ về 2". Phù hợp khi tải có **chu kỳ thời gian biết trước** — giờ hành chính, ngày lương, sự kiện đã lên lịch. Điểm mạnh là capacity sẵn sàng trước khi tải tới, vì hành động gắn với đồng hồ chứ không chờ metric.
+
+### 4.3. Dynamic scaling
+
+Đây là nhóm phản ứng theo metric thời gian thực, gồm ba biến thể:
+
+**Target Tracking** — bạn chọn một metric mục tiêu, ví dụ giữ Average CPU quanh 50%, và ASG tự thêm bớt instance để bám sát con số đó. Bạn không cần định nghĩa ngưỡng hay alarm thủ công; ASG tự dựng và quản lý CloudWatch alarm phía sau. Đây là kiểu đơn giản nhất và là lựa chọn AWS khuyến nghị mặc định.
+
+**Step Scaling** — phản ứng theo CloudWatch alarm, nhưng điều chỉnh theo "bậc" tùy mức độ vượt ngưỡng. Ví dụ CPU 60–70% thì thêm 1 máy, trên 70% thì thêm 3 máy cùng lúc. Linh hoạt hơn target tracking khi bạn muốn phản ứng mạnh dần theo độ nghiêm trọng.
+
+**Simple Scaling** — thế hệ cũ: một alarm kích hoạt đúng một hành động, rồi phải chờ hết cooldown mới được làm tiếp. Phần lớn tình huống nay đã được step scaling thay thế vì nó không bị "khựng" trong lúc chờ cooldown.
+
+### 4.4. Predictive scaling
+
+Predictive scaling dùng machine learning để học pattern tải trong quá khứ (theo ngày, theo tuần), dự báo nhu cầu sắp tới, và nâng capacity **trước** khi tải thật sự ập đến. Nó thường chạy kèm dynamic scaling: predictive lo phần tải có chu kỳ đoán được, dynamic xử lý những đợt tăng đột biến ngoài dự báo. Lý tưởng cho ứng dụng có nhịp tải lặp lại đều đặn.
+
+### 4.5. Scaling theo custom metric: ví dụ hàng đợi SQS
+
+Một tình huống cực kỳ hay gặp trong đề là worker tier xử lý <Tooltip content="Simple Queue Service — dịch vụ hàng đợi message của AWS, dùng để tách rời producer và consumer">SQS</Tooltip>: các EC2 instance kéo message từ hàng đợi ra xử lý. Đo CPU ở đây vô nghĩa, vì cái thực sự cần theo dõi là độ dài hàng đợi.
+
+Cách làm chuẩn là scale theo **backlog per instance** — số message đang chờ chia cho số instance hiện có. Bạn tính giá trị này, đẩy lên CloudWatch như một custom metric, rồi đặt một target tracking policy bám theo nó (ví dụ giữ mỗi instance không quá 100 message tồn đọng). Khi backlog dâng, ASG thêm worker; khi hàng đợi vơi, ASG bớt đi. Cách tiếp cận này gắn chặt với kiến trúc decoupled mà đề SAA rất thích hỏi. Hàng đợi SQS được mổ kỹ hơn trong bài [SQS Deep Dive](/vi/posts/sqs-deep-dive).
+
+### 4.6. Cooldown và instance warm-up
+
+Sau một hành động scaling, nếu ASG phản ứng ngay với metric kế tiếp, nó dễ rơi vào cảnh giật cục — thêm rồi bớt liên tục (thrashing). Hai cơ chế ngăn điều đó:
+
+- **Cooldown period** (mặc định 300 giây, áp dụng cho simple scaling): sau một hành động, ASG chờ hết cooldown rồi mới cân nhắc hành động tiếp theo, cho metric thời gian phản ánh đúng tác động của lần scale vừa rồi.
+- **Instance warmup** (dùng cho target tracking và step scaling): khoảng thời gian một instance vừa launch chưa được tính vào metric tổng hợp của nhóm, vì nó còn đang khởi động và chưa gánh tải thật. Đây là cách hiện đại thay cho cooldown cứng.
+
+Bảng tổng kết năm kiểu scaling (manual, scheduled, simple, step, target tracking, predictive):
+
+| Kiểu | Dựa vào | Dùng khi |
+| --- | --- | --- |
+| **Manual** | Bạn tự đặt desired | Test, hoặc capacity cố định đã biết |
+| **Scheduled** | Đồng hồ (cron) | Tải có chu kỳ thời gian biết trước |
+| **Simple** | Một alarm, một hành động + cooldown | Legacy, hầu như nên dùng step thay thế |
+| **Step** | Alarm với nhiều bậc | Phản ứng mạnh dần theo mức vượt ngưỡng |
+| **Target Tracking** | Giữ một metric quanh giá trị mục tiêu | Mặc định, đơn giản nhất, AWS khuyến nghị |
+| **Predictive** | Dự báo ML từ lịch sử | Tải lặp lại theo ngày/tuần, scale đón đầu |
+
+---
+
+## 5. Các tính năng nâng cao cho phòng thi
+
+### 5.1. Lifecycle Hooks
+
+**Lifecycle hook** cho phép bạn chèn một bước tạm dừng vào vòng đời instance: giữ máy ở trạng thái `Pending:Wait` ngay sau khi launch, hoặc `Terminating:Wait` ngay trước khi terminate, để chạy hành động tùy biến trước khi instance chuyển trạng thái.
+
+<ExcalidrawDiagram
+  src="/asg-lifecycle-hooks.excalidraw"
+  alt="Vòng đời instance trong ASG — scale-out đẩy instance qua Pending rồi Pending:Wait nơi lifecycle hook chạy cài đặt, sang InService; scale-in đưa instance qua Terminating:Wait để drain kết nối và lưu log trước khi Terminated."
+/>
+
+Ở điểm launch, hook là chỗ để cài phần mềm, nạp sẵn cache, hay đăng ký instance vào hệ thống khác trước khi nó nhận traffic. Ở điểm terminate, hook là chỗ để drain kết nối êm, đẩy log còn lại lên nơi lưu trữ, hoặc tháo đăng ký khỏi dịch vụ ngoài. Mỗi hook có một heartbeat timeout: hành động của bạn phải báo `CONTINUE` để cho qua, hoặc `ABANDON` để hủy; hết thời gian mà không báo gì thì ASG thực thi hành động mặc định.
+
+### 5.2. Warm Pools
+
+Với ứng dụng mất nhiều phút để boot (nạp dữ liệu lớn, biên dịch, khởi động JVM nặng...), thời gian scale-out có thể quá chậm so với lúc traffic đến. **Warm pool** là một bể instance đã được khởi tạo sẵn — đã boot, đã cài đặt — và để ở trạng thái dừng hoặc ngủ đông để tiết kiệm chi phí. Khi cần scale out, ASG kéo máy từ warm pool ra và đưa vào phục vụ gần như tức thì thay vì dựng máy từ đầu.
+
+### 5.3. Instance Refresh
+
+Khi bạn cập nhật launch template lên phiên bản mới (ví dụ AMI vá lỗi bảo mật), **Instance Refresh** thay thế cuốn chiếu toàn bộ instance trong ASG theo phiên bản mới — bạn không cần dựng một ASG khác rồi chuyển traffic thủ công. Bạn kiểm soát được tỉ lệ tối thiểu instance khỏe phải giữ trong lúc thay (minimum healthy percentage) và có thể đặt checkpoint để dừng kiểm tra giữa chừng. Liên quan tới ý này là **Maximum Instance Lifetime**: buộc ASG tự thay mọi instance già hơn một tuổi nhất định, hữu ích cho yêu cầu tuân thủ hay vá định kỳ.
+
+### 5.4. Mixed Instances Policy: trộn Spot và On-Demand
+
+Một ASG không nhất thiết phải dùng một instance type duy nhất hay một kiểu mua duy nhất. **Mixed instances policy** cho phép một ASG kết hợp nhiều instance type và trộn <Tooltip content="On-Demand — trả theo thời gian dùng, không cam kết, ổn định nhưng đắt nhất">On-Demand</Tooltip> với <Tooltip content="Spot — dùng dung lượng EC2 dư với giá rẻ tới 90%, nhưng có thể bị AWS thu hồi khi cần">Spot</Tooltip>. Bạn đặt một phần nền chạy On-Demand cho ổn định, phần còn lại dùng Spot để cắt giảm chi phí.
+
+Cách ASG chọn Spot được điều khiển bởi allocation strategy: **capacity-optimized** lấy từ pool dung lượng dồi dào nhất để hạn chế bị thu hồi (khuyến nghị cho workload nhạy với gián đoạn), **price-capacity-optimized** cân bằng giữa giá và độ ổn định, còn **lowest-price** ưu tiên rẻ nhất. Đây là một công cụ tối ưu chi phí mạnh và hay xuất hiện trong đề; các kiểu mua EC2 được nói kỹ hơn trong bài [AWS EC2 Instance Purchasing Options](/vi/posts/aws-ec2-instance-purchasing-options).
+
+### 5.5. Default Termination Policy và Scale-In Protection
+
+Khi scale in, ASG phải chọn instance nào để giết. Chính sách mặc định đi theo thứ tự ưu tiên: trước hết chọn trong **AZ đang có nhiều instance nhất** (để giữ cân bằng giữa các AZ), rồi trong AZ đó chọn instance dùng launch template hay configuration **cũ nhất**, và cuối cùng ưu tiên instance **gần điểm tính phí giờ kế tiếp nhất** để không lãng phí phần giờ đã trả.
+
+Khi cần giữ một instance cụ thể không bị giết lúc scale in (ví dụ máy đang chạy một job dài quan trọng), bạn bật **scale-in protection** cho riêng nó.
+
+### 5.6. Suspend và Resume Processes
+
+Bạn có thể tạm dừng từng tiến trình của ASG — như `Launch`, `Terminate`, `HealthCheck`, `ReplaceUnhealthy`, `AZRebalance`, hay `AddToLoadBalancer` — rồi bật lại sau. Điều này hữu ích khi cần điều tra sự cố mà không muốn ASG can thiệp: ví dụ tạm dừng `Terminate` và `ReplaceUnhealthy` để giữ nguyên một instance đang lỗi cho việc debug, thay vì để ASG thay nó đi mất bằng chứng.
+
+---
+
+## 6. Bản đồ quyết định và những bẫy trong đề SAA
+
+Khi đọc một câu hỏi ASG, hãy lần theo từ khóa để ánh xạ sang đúng tính năng:
+
+| Từ khóa trong đề | Hướng tới |
+| --- | --- |
+| App treo nhưng instance vẫn chạy, ASG không thay máy | Bật **ELB health check** (đừng dựa vào EC2 status check) |
+| Tải có chu kỳ giờ/ngày biết trước | **Scheduled scaling** |
+| Giữ CPU (hay một metric) quanh một mức, cấu hình tối thiểu | **Target tracking** |
+| Phản ứng theo nhiều mức nghiêm trọng khác nhau | **Step scaling** |
+| Tải lặp lại theo tuần, muốn scale đón đầu | **Predictive scaling** |
+| Worker xử lý hàng đợi SQS | Target tracking theo **backlog per instance** |
+| Cài phần mềm / drain kết nối trước khi đổi trạng thái | **Lifecycle hook** |
+| App boot lâu, cần scale out gần như tức thì | **Warm pool** |
+| Triển khai AMI mới mà không downtime | **Instance refresh** |
+| Cắt giảm chi phí compute cho ASG | **Mixed instances** với Spot + On-Demand |
+| Đảm bảo sống sót khi một AZ sập | Subnet ở **nhiều AZ** |
+
+Vài cái bẫy hay khiến thí sinh mất điểm:
+
+- **EC2 status check không bằng ELB health check.** Status check chỉ thấy hạ tầng; muốn bắt lỗi tầng ứng dụng phải dùng ELB health check.
+- **Launch Configuration đã lỗi thời.** Khi được chọn, hãy mặc định nghĩ tới Launch Template.
+- **Scaling thực chất là chỉnh desired capacity** trong khoảng min–max. ASG sẽ không bao giờ vượt max hay tụt dưới min, dù policy có yêu cầu gì.
+- **Grace period quá ngắn giết chính instance đang boot**, tạo vòng lặp launch–terminate vô tận.
+- **Muốn HA thì cần nhiều AZ.** Một ASG gói gọn trong một AZ vẫn là một điểm chết duy nhất.
+
+---
+
+## Lời kết
+
+Quay lại đêm flash sale ở đầu bài: với Auto Scaling Group, bạn không còn phải thức canh đồ thị CPU hay bật máy thủ công lúc 3 giờ sáng nữa. ASG tự thêm máy khi tải lên, tự bớt khi tải xuống, tự thay con máy chết — và làm tất cả trong khi bạn ngủ.
+
+Những điều cần ghim cho phòng thi:
+
+- **Ba nhiệm vụ cốt lõi**: duy trì số lượng (self-healing), co giãn theo tải, và trải nhiều AZ cho high availability — bản thân ASG miễn phí.
+- **Bộ khung cấu hình**: Launch Template (ưu tiên hơn Launch Configuration), bộ ba min/desired/max, và subnet ở nhiều AZ.
+- **Health check là chìa khóa self-healing**: EC2 status check chỉ thấy hạ tầng, ELB health check mới thấy ứng dụng — và grace period phải đủ dài cho app boot.
+- **Năm kiểu scaling**: manual, scheduled, simple/step/target tracking (dynamic), và predictive — nhớ target tracking là mặc định nên chọn, scheduled cho pattern biết trước, predictive cho tải lặp theo chu kỳ.
+- **Tính năng nâng cao hay được hỏi**: lifecycle hook (chèn bước tùy biến), warm pool (scale-out tức thì), instance refresh (đổi AMI cuốn chiếu), mixed instances (Spot + On-Demand tiết kiệm), và default termination policy.
+- **Scaling theo backlog per instance** là mẫu kinh điển cho worker tier đọc hàng đợi SQS.
