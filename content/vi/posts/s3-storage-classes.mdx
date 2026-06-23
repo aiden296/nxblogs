@@ -214,6 +214,14 @@ Hai tùy chọn retrieval:
 
 ---
 
+### Flexible Retrieval hay Deep Archive?
+
+Hai class này dễ gây nhầm lẫn vì cả hai đều rẻ và đều phục vụ archival. Khác biệt thực sự nằm ở thời gian retrieval mà yêu cầu cho phép và độ dài thời gian lưu trữ. Deep Archive có storage rẻ hơn nhưng bị giới hạn retrieval 12-48 giờ và min storage duration 180 ngày. Flexible Retrieval đắt hơn một chút về storage nhưng lấy data nhanh hơn — vài phút đến vài giờ — và chỉ cam kết tối thiểu 90 ngày.
+
+Quy tắc nhanh: mặc định chọn **Glacier Flexible Retrieval** cho data hiếm khi truy cập, trừ khi đề nêu rõ thời hạn lưu trữ nhiều năm (thường 7-10+ năm) và chấp nhận chờ 12-48 giờ — khi đó **Glacier Deep Archive** mới là lựa chọn cost-effective nhất. Tín hiệu quyết định thường là yêu cầu retrieval trong đề: "trong vòng 12 giờ" khớp đúng mức Standard của Deep Archive nên Deep Archive là đủ, còn nếu cần lấy lại trong vài phút đến vài giờ thì Deep Archive bị loại. Trường hợp đề chỉ đưa ra một option Glacier dạng archive, hãy chọn chính option đó.
+
+---
+
 ## 3. Intelligent-Tiering
 
 S3 Intelligent-Tiering là class đặc biệt — nó **tự động di chuyển objects** giữa các access tier dựa trên usage pattern. Bạn không cần đoán class nào tốt nhất; S3 monitor access và tối ưu chi phí cho bạn.

@@ -214,6 +214,14 @@ Two retrieval options:
 
 ---
 
+### Flexible Retrieval or Deep Archive?
+
+These two are easy to confuse because both are cheap and both target archival data. The real difference is how long a retrieval you can tolerate and how long the data lives. Deep Archive has cheaper storage but is capped at 12-48 hour retrieval and a 180-day minimum storage duration. Flexible Retrieval costs a little more to store but gets data back faster — minutes to a few hours — and commits you to only 90 days.
+
+Quick rule: default to **Glacier Flexible Retrieval** for rarely accessed data, unless the question explicitly calls out multi-year retention (typically 7-10+ years) and tolerates a 12-48 hour wait — only then is **Glacier Deep Archive** the most cost-effective choice. The deciding clue is usually the stated retrieval requirement: "within 12 hours" matches Deep Archive's Standard tier exactly, so Deep Archive is enough, but if the data must come back in minutes to a few hours, Deep Archive is ruled out. And if only one Glacier archive option is offered, pick that one.
+
+---
+
 ## 3. Intelligent-Tiering
 
 S3 Intelligent-Tiering is unique — it **automatically moves objects** between access tiers based on usage patterns. You don't need to guess which class is best; S3 monitors access and optimizes cost for you.
