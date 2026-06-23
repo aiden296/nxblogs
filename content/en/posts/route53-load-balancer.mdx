@@ -330,6 +330,98 @@ This is the model that most large-scale production systems use — and the Route
 
 ---
 
+## 7. Route 53 Resolver — Hybrid DNS Between AWS and On-Premises
+
+By now you might think Route 53 is all about distributing traffic. But it plays another role, less talked about yet very common on the SAA exam: resolving DNS in a **hybrid** environment — when part of your system lives on AWS and the rest lives in your own data center.
+
+Every VPC ships with a **Route 53 Resolver** — an internal DNS resolver that always sits at the <Tooltip content="The default resolver IP in every VPC, equal to the VPC's base network address plus 2. For a 10.0.0.0/16 VPC the resolver is at 10.0.0.2. It's also reachable via the link-local address 169.254.169.253">VPC+2 address</Tooltip>. It resolves domain names for every resource inside the VPC: from records in a <Tooltip content="A Route 53 hosted zone that only resolves from inside the VPCs you associate with it, used for internal domain names not exposed to the Internet">Private Hosted Zone</Tooltip> (e.g. `aws.private`) to the internal DNS names of EC2 instances.
+
+Your data center also has its own DNS system, serving internal names like `onpremise.private`. The two sides are linked over VPN or <Tooltip content="A dedicated private link connecting your data center straight into AWS, bypassing the public Internet">Direct Connect</Tooltip>.
+
+### 7.1 The Problem: Two DNS "Worlds" That Don't Talk to Each Other
+
+Once VPN or Direct Connect is up, the network is connected — EC2 can ping an on-premises server by IP, and vice versa. But **DNS** can't. The reason: each side has its own DNS system (its own authoritative servers), and by default neither knows about the other's domain zone.
+
+- EC2 in the VPC asks `web.onpremise.private?`: the Route 53 Resolver has no such record and doesn't know who to ask, so it returns an error.
+- The on-premises DNS server asks `app.aws.private?`: it can't see the Private Hosted Zone (which only resolves from inside the VPC), so it also returns an error.
+
+The result: two systems sitting side by side, the network connected, yet they still have to call each other by raw IP instead of by name. **Route 53 Resolver Endpoints** exist to build this DNS bridge. There are two endpoint types, each opening one direction, and you pick the one matching the direction you need.
+
+> **Note:** Both endpoint types require an existing hybrid connection (VPN or Direct Connect). An endpoint only forwards DNS queries — the underlying network connectivity is still handled by VPN or Direct Connect.
+
+### 7.2 Inbound Endpoint — Letting On-Premises Query AWS
+
+An Inbound Endpoint lets your on-premises DNS server forward queries **into** AWS, so on-premises can resolve AWS's private names (records in a Private Hosted Zone, the internal DNS names of EC2 instances).
+
+<ExcalidrawDiagram src="/route53-resolver-inbound.excalidraw" alt="Inbound endpoint lets on-premises DNS resolve private records inside AWS" />
+
+The path of an `app.aws.private?` query originating on-premises:
+
+1. The on-premises DNS server is configured to **forward** all queries for the `aws.private` zone to the Inbound Endpoint's IP addresses.
+2. The query travels over VPN/Direct Connect to the Inbound Endpoint, which sits inside your VPC.
+3. The Inbound Endpoint hands the query to the Route 53 Resolver.
+4. The Resolver looks it up in the Private Hosted Zone, finds the record, and returns the IP back to on-premises.
+
+An Inbound Endpoint is really a set of <Tooltip content="Elastic Network Interface — a virtual network card attached to a subnet in your VPC, each with its own IP address. A resolver endpoint is really a set of these ENIs">ENIs</Tooltip> in your subnets, each with a fixed IP for on-premises DNS to point at:
+
+| Property | Example value |
+| --- | --- |
+| Endpoint type | Inbound |
+| VPC | `vpc-aws-private` (the VPC holding the Private Hosted Zone) |
+| IP addresses | `10.0.1.10` (AZ a), `10.0.2.10` (AZ b) |
+| Security group | Allow port 53 (TCP and UDP) from the on-premises IP ranges |
+
+On the on-premises DNS server, you create a forwarding rule: for the `aws.private` domain, ask `10.0.1.10` and `10.0.2.10`.
+
+### 7.3 Outbound Endpoint + Resolver Rules — Letting AWS Query On-Premises
+
+An Outbound Endpoint is the reverse direction: it lets the Route 53 Resolver forward queries **out** to your on-premises DNS server, so resources inside AWS can resolve on-premises private names.
+
+<ExcalidrawDiagram src="/route53-resolver-outbound.excalidraw" alt="Outbound endpoint lets AWS resources resolve on-premises private records" />
+
+The key difference from inbound: the outbound direction needs a <Tooltip content="A Route 53 Resolver forwarding rule: it matches on a domain name (e.g. onpremise.private) and forwards that DNS query to a list of DNS server IPs you specify">Resolver rule</Tooltip> to know which domain goes where. Without a rule, the Resolver still processes the query the default way (public DNS) and won't find `onpremise.private`.
+
+The path of a `web.onpremise.private?` query originating from EC2:
+
+1. EC2 asks the Route 53 Resolver (at the VPC+2 address) as usual.
+2. The Resolver sees the name matches a forwarding rule (`onpremise.private`), so it hands the query to the Outbound Endpoint.
+3. The Outbound Endpoint sends the query over VPN/Direct Connect to the on-premises DNS server.
+4. The on-premises DNS resolves it and returns the IP back to EC2.
+
+Configuring a forwarding rule for the on-premises zone:
+
+| Property | Example value |
+| --- | --- |
+| Rule type | Forward |
+| Domain name | `onpremise.private` |
+| Target IPs | `192.168.0.10`, `192.168.0.11` (on-premises DNS) |
+| Outbound endpoint | `rslvr-out-abc123` |
+| Associated VPCs | `vpc-aws-private` |
+
+> **Telling the directions apart:** follow which way the DNS query goes.
+>
+> - A query going into AWS (on-premises asking for an AWS name): **Inbound**
+> - A query going out of AWS (AWS asking for an on-premises name): **Outbound**
+
+### 7.4 High Availability & Cross-Account Sharing (AWS RAM)
+
+Because an endpoint is built from ENIs in your subnets, its availability depends on how many <Tooltip content="Availability Zone — an isolated set of data centers within a region with independent power and networking. Spreading resources across AZs lets them survive the failure of one AZ">Availability Zones</Tooltip> you spread it across. AWS requires each endpoint to have at least two IP addresses in **two different AZs**. If one AZ fails, the ENI in the other keeps resolving DNS — don't put both IPs in a single AZ.
+
+In a multi-account organization, you don't need a separate endpoint and rules for each account. Forwarding rules can be shared via <Tooltip content="AWS Resource Access Manager — a service for sharing resources across AWS accounts in the same organization; here, sharing Resolver rules">AWS RAM</Tooltip>: a central networking account owns the Outbound Endpoint and the rules, then shares the rules out to the application accounts. Each account just associates a rule with its own VPC to use it — the familiar hub-and-spoke model, applied to DNS.
+
+### 7.5 On the SAA Exam
+
+The exam rarely asks raw theory; instead it describes a hybrid scenario and makes you pick the right endpoint type. The trick: identify the **direction** of the DNS query.
+
+> **Cheat sheet:**
+> - On-premises needs to resolve AWS private names: use the **Inbound Endpoint**
+> - AWS needs to resolve on-premises private names: use the **Outbound Endpoint** with a forwarding rule
+> - Both directions are needed: deploy **both** endpoints
+
+A classic scenario: "A company links its data center to AWS over Direct Connect. EC2 needs to resolve on-premises hostnames, and at the same time on-premises servers need to resolve hostnames in a Private Hosted Zone. The lowest-operations solution?" The answer is to deploy **both inbound and outbound endpoints** with a forwarding rule — no need to stand up and maintain your own DNS server on EC2.
+
+---
+
 ## Final words
 
 Route 53 isn't a replacement for ALB or NLB — it's a **supplementary layer** that many teams overlook. At $0.50/month per hosted zone, you get:

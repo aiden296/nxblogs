@@ -330,6 +330,98 @@ Với kiến trúc này:
 
 ---
 
+## 7. Route 53 Resolver — Hybrid DNS Giữa AWS Và On-Premises
+
+Đến đây bạn có thể nghĩ Route 53 chỉ xoay quanh chuyện phân phối traffic. Nhưng nó còn một vai trò khác, ít được nhắc tới mà lại xuất hiện rất nhiều trong đề thi SAA: phân giải DNS trong môi trường **hybrid** — khi một phần hệ thống nằm trên AWS, phần còn lại nằm ở trung tâm dữ liệu (data center) của chính bạn.
+
+Mỗi VPC khi được tạo ra đã có sẵn một **Route 53 Resolver** — một DNS resolver nội bộ luôn nằm ở `.2`. Nó chịu trách nhiệm phân giải tên miền cho mọi tài nguyên bên trong VPC: từ bản ghi trong <Tooltip content="Một hosted zone của Route 53 chỉ phân giải được từ bên trong các VPC mà bạn liên kết với nó, dùng cho tên miền nội bộ không công khai ra Internet">Private Hosted Zone</Tooltip> (ví dụ `aws.private`) cho đến tên DNS nội bộ của EC2.
+
+Phía trung tâm dữ liệu của bạn cũng có hệ thống DNS riêng, phục vụ các tên nội bộ như `onpremise.private`. Hai bên được nối với nhau qua VPN hoặc <Tooltip content="Direct Connect — đường truyền riêng (dedicated) nối thẳng trung tâm dữ liệu của bạn vào AWS, không đi qua Internet công cộng">Direct Connect</Tooltip>.
+
+### 7.1 Vấn Đề: Hai "Thế Giới" DNS Không Nói Chuyện Với Nhau
+
+Sau khi nối VPN hoặc Direct Connect, mạng đã thông — EC2 ping được server on-premises theo IP, và ngược lại. Nhưng **DNS** thì chưa. Lý do: mỗi bên có một hệ thống DNS riêng (authoritative riêng), và theo mặc định không bên nào biết về vùng tên miền của bên kia.
+
+- EC2 trong VPC hỏi `web.onpremise.private?`: Route 53 Resolver không có bản ghi này, cũng không biết phải hỏi ai, nên trả về lỗi.
+- DNS server on-premises hỏi `app.aws.private?`: nó không thể nhìn thấy Private Hosted Zone (vốn chỉ phân giải được từ bên trong VPC), nên cũng trả về lỗi.
+
+Kết quả: hai hệ thống nằm cạnh nhau, mạng đã thông, nhưng vẫn phải gọi nhau bằng địa chỉ IP thô thay vì tên miền. **Route 53 Resolver Endpoint** sinh ra để bắc cây cầu DNS này. Có hai loại endpoint, mỗi loại mở một chiều, và bạn dùng loại nào tùy theo chiều mình cần.
+
+> **Lưu ý:** Cả hai loại endpoint đều yêu cầu sẵn có kết nối hybrid (VPN hoặc Direct Connect). Endpoint chỉ chuyển tiếp câu hỏi DNS — phần kết nối mạng bên dưới vẫn do VPN hoặc Direct Connect đảm nhiệm.
+
+### 7.2 Inbound Endpoint — Để On-Premises Hỏi Được AWS
+
+Inbound Endpoint cho phép DNS server on-premises chuyển tiếp câu hỏi **vào trong** AWS, nhờ đó on-premises phân giải được các tên riêng tư của AWS (bản ghi trong Private Hosted Zone, tên DNS nội bộ của EC2).
+
+<ExcalidrawDiagram src="/route53-resolver-inbound.excalidraw" alt="Inbound endpoint cho phép DNS on-premises phân giải bản ghi riêng tư trong AWS" />
+
+Luồng đi của một câu hỏi `app.aws.private?` xuất phát từ on-premises:
+
+1. DNS server on-premises được cấu hình **forward** mọi câu hỏi cho vùng `aws.private` đến địa chỉ IP của Inbound Endpoint.
+2. Câu hỏi đi qua VPN/Direct Connect, đến Inbound Endpoint nằm trong VPC của bạn.
+3. Inbound Endpoint chuyển câu hỏi cho Route 53 Resolver.
+4. Resolver tra trong Private Hosted Zone, tìm thấy bản ghi và trả địa chỉ IP ngược về on-premises.
+
+Inbound Endpoint thực chất là một tập <Tooltip content="Elastic Network Interface — card mạng ảo gắn vào subnet trong VPC, mỗi cái có một địa chỉ IP riêng. Resolver endpoint chính là các ENI này">ENI</Tooltip> nằm trong subnet của bạn, mỗi ENI có một IP cố định để DNS on-premises trỏ tới:
+
+| Thuộc tính | Giá trị ví dụ |
+| --- | --- |
+| Endpoint type | Inbound |
+| VPC | `vpc-aws-private` (VPC chứa Private Hosted Zone) |
+| IP addresses | `10.0.1.10` (AZ a), `10.0.2.10` (AZ b) |
+| Security group | Cho phép cổng 53 (TCP và UDP) từ dải IP on-premises |
+
+Trên DNS server on-premises, bạn tạo một quy tắc chuyển tiếp: với tên miền `aws.private` thì hỏi `10.0.1.10` và `10.0.2.10`.
+
+### 7.3 Outbound Endpoint + Resolver Rules — Để AWS Hỏi Được On-Premises
+
+Outbound Endpoint là chiều ngược lại: nó cho phép Route 53 Resolver chuyển tiếp câu hỏi **ra ngoài**, đến DNS server on-premises, nhờ đó tài nguyên trong AWS phân giải được các tên riêng tư của on-premises.
+
+<ExcalidrawDiagram src="/route53-resolver-outbound.excalidraw" alt="Outbound endpoint cho phép tài nguyên AWS phân giải bản ghi riêng tư của on-premises" />
+
+Điểm khác biệt then chốt so với inbound: chiều outbound cần một <Tooltip content="Quy tắc chuyển tiếp của Route 53 Resolver: khớp theo tên miền (ví dụ onpremise.private) rồi gửi câu hỏi DNS đó đến danh sách IP của DNS server mà bạn chỉ định">Resolver rule</Tooltip> để biết tên miền nào thì chuyển đi đâu. Nếu không có rule, Resolver vẫn xử lý câu hỏi theo cách mặc định (DNS công khai) và sẽ không tìm thấy `onpremise.private`.
+
+Luồng đi của một câu hỏi `web.onpremise.private?` xuất phát từ EC2:
+
+1. EC2 hỏi Route 53 Resolver (ở địa chỉ VPC+2) như bình thường.
+2. Resolver thấy tên miền khớp một forwarding rule (`onpremise.private`), nên chuyển câu hỏi cho Outbound Endpoint.
+3. Outbound Endpoint gửi câu hỏi qua VPN/Direct Connect đến DNS server on-premises.
+4. DNS on-premises phân giải và trả địa chỉ IP ngược về EC2.
+
+Cấu hình một forwarding rule cho vùng on-premises:
+
+| Thuộc tính | Giá trị ví dụ |
+| --- | --- |
+| Rule type | Forward |
+| Domain name | `onpremise.private` |
+| Target IPs | `192.168.0.10`, `192.168.0.11` (DNS on-premises) |
+| Outbound endpoint | `rslvr-out-abc123` |
+| Associated VPCs | `vpc-aws-private` |
+
+> **Mẹo phân biệt chiều:** nhìn theo hướng câu hỏi DNS.
+>
+> - Câu hỏi đi vào AWS (on-premises hỏi tên của AWS): **Inbound**
+> - Câu hỏi đi ra khỏi AWS (AWS hỏi tên của on-premises): **Outbound**
+
+### 7.4 High Availability & Chia Sẻ Cross-Account (AWS RAM)
+
+Vì endpoint được tạo từ các ENI nằm trong subnet, tính sẵn sàng của nó phụ thuộc vào số <Tooltip content="Availability Zone — một vùng sẵn sàng, là tập trung tâm dữ liệu độc lập về nguồn điện và mạng bên trong một region. Đặt tài nguyên ở nhiều AZ giúp chịu được sự cố của một AZ">Availability Zone</Tooltip> mà bạn trải ra. AWS yêu cầu mỗi endpoint phải có ít nhất hai địa chỉ IP nằm ở **hai AZ khác nhau**. Nếu một AZ gặp sự cố, ENI ở AZ còn lại vẫn tiếp tục phân giải DNS — đừng dồn cả hai IP vào một AZ.
+
+Trong tổ chức nhiều tài khoản, bạn không cần dựng endpoint và rule riêng cho từng tài khoản. Các forwarding rule có thể được chia sẻ qua <Tooltip content="AWS Resource Access Manager — dịch vụ cho phép chia sẻ tài nguyên giữa các tài khoản AWS trong cùng một tổ chức, ở đây là chia sẻ các Resolver rule">AWS RAM</Tooltip>: một tài khoản mạng trung tâm (networking account) sở hữu Outbound Endpoint và các rule, rồi chia sẻ rule cho các tài khoản ứng dụng. Mỗi tài khoản chỉ cần liên kết rule với VPC của mình là dùng được — mô hình hub-and-spoke quen thuộc cho DNS.
+
+### 7.5 Trên Đề Thi SAA
+
+Đề thi hiếm khi hỏi lý thuyết suông; thay vào đó nó mô tả một kịch bản hybrid và bắt bạn chọn đúng loại endpoint. Mẹo: xác định **chiều** của câu hỏi DNS.
+
+> **Cheat sheet:**
+> - On-premises cần phân giải tên riêng tư của AWS: dùng **Inbound Endpoint**
+> - AWS cần phân giải tên riêng tư của on-premises: dùng **Outbound Endpoint** kèm forwarding rule
+> - Cần cả hai chiều: dựng **cả hai** endpoint
+
+Một kịch bản kinh điển: "Công ty nối data center vào AWS qua Direct Connect. EC2 cần phân giải hostname on-premises, đồng thời server on-premises cần phân giải hostname trong Private Hosted Zone. Giải pháp ít vận hành nhất?" Đáp án là dựng **cả inbound lẫn outbound endpoint** kèm forwarding rule — không cần tự dựng và bảo trì DNS server trên EC2.
+
+---
+
 ## Lời kết
 
 Route 53 không phải là thay thế cho ALB hay NLB — nó là **tầng bổ sung** mà nhiều team đang bỏ qua. Với $0.50/tháng cho mỗi hosted zone, bạn có trong tay:

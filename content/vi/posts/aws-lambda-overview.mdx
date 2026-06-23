@@ -1,0 +1,253 @@
+---
+title: 'AWS Lambda: Tính Năng, Giới Hạn Và Khi Nào Dùng Cho Kỳ Thi SAA'
+date: '2026-06-23'
+tags: ['Devops', 'AWS', 'SAA', 'Exam Prep']
+description: 'Tổng quan AWS Lambda cho kỳ thi SAA — mô hình serverless và lợi ích, các giới hạn hay bị hỏi, concurrency (reserved và provisioned) và throttling, SnapStart cho cold start, Lambda@Edge so với CloudFront Functions, và Lambda trong VPC.'
+enableComment: true
+---
+
+# AWS Lambda: Tính Năng, Giới Hạn Và Khi Nào Dùng Cho Kỳ Thi SAA
+
+Bạn cần sinh ảnh thumbnail mỗi khi người dùng tải ảnh lên. Đây là việc chạy theo từng đợt: có lúc vài nghìn ảnh trong một phút, có lúc cả tiếng không có gì. Với cách cũ, bạn dựng một con <Tooltip content="Elastic Compute Cloud — máy chủ ảo trên AWS">EC2</Tooltip> chạy suốt ngày đêm để chờ việc: trả tiền cả những giờ máy ngồi không, tự lo vá hệ điều hành, và khi một đợt tải ảnh ập tới thì phải tự lo chuyện tăng thêm máy cho kịp.
+
+Câu hỏi tự nhiên nảy ra: tại sao phải nuôi một máy chủ 24/7 cho một công việc chỉ chạy lắt nhắt? Sẽ tốt hơn nhiều nếu chỉ cần gói đoạn code xử lý ảnh lại, giao cho AWS, và nói: "mỗi khi có ảnh mới, hãy chạy đoạn này; lúc không có ảnh thì tôi không trả đồng nào". Đó chính xác là thứ **AWS Lambda** mang lại.
+
+Bài viết này là tấm bản đồ về Lambda cho kỳ thi <Tooltip content="AWS Certified Solutions Architect – Associate — chứng chỉ kiến trúc sư giải pháp AWS mức Associate">SAA</Tooltip>. Chúng ta sẽ đi qua sáu mảng: Lambda là gì và cho bạn những gì, các giới hạn hay bị hỏi, cách quản lý concurrency và throttling, SnapStart để xử lý cold start, cặp Lambda@Edge và CloudFront Functions chạy ở biên, và cuối cùng là Lambda khi đặt trong VPC.
+
+> **Lưu ý:** Đây là bài tổng quan để xây mental model và nhận diện nhanh đáp án khi đi thi. SAA hầu như không hỏi cú pháp viết hàm, mà hỏi về **đặc tính**: giới hạn nào cứng, dùng cơ chế nào cho bài toán nào, và ranh giới giữa các lựa chọn gần giống nhau (ví dụ Lambda@Edge với CloudFront Functions). Bài tập trung đúng vào những điểm đó.
+
+---
+
+## 1. AWS Lambda là gì?
+
+### 1.1. Mô hình serverless và Function as a Service
+
+**AWS Lambda** là dịch vụ tính toán <Tooltip content="Serverless — mô hình mà bạn không quản lý máy chủ; nhà cung cấp lo việc cấp phát, scale và vận hành hạ tầng bên dưới">serverless</Tooltip> cho phép bạn chạy code mà không cần dựng hay quản lý bất kỳ máy chủ nào. Bạn không tạo EC2, không cài hệ điều hành, không vá lỗi, không lo scale: bạn chỉ tải lên một **hàm** (function) — một đoạn code làm một việc — rồi khai báo sự kiện nào sẽ kích hoạt nó. Vì đơn vị triển khai là một hàm, mô hình này còn được gọi là <Tooltip content="Function as a Service — chạy từng hàm riêng lẻ theo sự kiện, thay vì chạy nguyên một ứng dụng thường trực">Function as a Service (FaaS)</Tooltip>.
+
+"Serverless" không có nghĩa là không có máy chủ. Bên dưới vẫn là máy chủ thật, nhưng AWS giấu hoàn toàn chúng khỏi bạn: việc cấp phát, vận hành và mở rộng do AWS lo. Điều này khác hẳn EC2, nơi bạn sở hữu và chịu trách nhiệm cho từng instance.
+
+Lambda hoạt động theo cơ chế **hướng sự kiện** (event-driven): code chỉ chạy khi có một sự kiện kích hoạt, chạy xong thì dừng. Không có sự kiện thì không có gì chạy, và bạn không bị tính tiền.
+
+### 1.2. Những lợi ích cốt lõi
+
+Bốn giá trị làm nên sức hút của Lambda, cũng là bốn thứ hay xuất hiện trong đề:
+
+- **Không quản lý máy chủ**: bạn chỉ lo code; phần hạ tầng, hệ điều hành, runtime do AWS lo.
+- **Tự động scale**: khi nhiều sự kiện ập tới cùng lúc, Lambda tự tạo thêm các bản chạy song song để phục vụ; khi hết việc, nó tự co về không. Bạn không cấu hình <Tooltip content="Auto Scaling Group — nhóm EC2 tự tăng/giảm số lượng instance theo tải; với Lambda bạn không cần dựng cái này">Auto Scaling Group</Tooltip> như với EC2.
+- **Trả tiền theo mức dùng thật**: tính theo số lần gọi và thời gian chạy thực tế. Lúc nhàn rỗi, chi phí bằng không — đây là điểm đối lập lớn nhất với EC2 vốn tính tiền cả khi máy ngồi không.
+- **Tính sẵn sàng cao có sẵn**: Lambda chạy trải trên nhiều <Tooltip content="Availability Zone — một hoặc nhiều trung tâm dữ liệu độc lập trong một Region, cách ly lỗi với nhau">Availability Zone</Tooltip> trong Region mà bạn không phải làm gì.
+
+### 1.3. Ngôn ngữ, runtime và container image
+
+Lambda chạy code của bạn bên trong một <Tooltip content="Runtime — môi trường thực thi chứa sẵn ngôn ngữ và thư viện để chạy code, ví dụ Node.js hay Python">runtime</Tooltip> được quản lý sẵn. AWS cung cấp runtime cho các ngôn ngữ phổ biến: Node.js, Python, Java, .NET (C#), Go, và Ruby.
+
+Khi cần một ngôn ngữ hoặc phiên bản không nằm trong danh sách, bạn có hai lối thoát:
+
+- **Custom runtime**: tự cung cấp runtime riêng (ví dụ cho Rust, hoặc một phiên bản ngôn ngữ cũ) thông qua Runtime API của Lambda.
+- **Container image**: đóng gói hàm thành một image theo chuẩn container, kích thước tối đa tới **10 GB**. Đây là lựa chọn cho các hàm có nhiều thư viện nặng, ví dụ phụ thuộc về máy học.
+
+Một điểm dễ nhầm cho phòng thi: container image trên Lambda **vẫn là Lambda** (chạy theo sự kiện, vẫn các giới hạn của Lambda), không phải là chuyển sang chạy container kiểu <Tooltip content="Elastic Container Service — dịch vụ chạy và điều phối container của AWS">ECS</Tooltip> hay <Tooltip content="Dịch vụ chạy container không cần quản lý máy chủ, dùng cùng ECS hoặc EKS">Fargate</Tooltip>.
+
+### 1.4. Lambda được kích hoạt bởi cái gì?
+
+Sức mạnh thực sự của Lambda nằm ở chỗ nó cắm được vào gần như mọi dịch vụ AWS khác và chạy khi dịch vụ đó phát sinh sự kiện. Một vài nguồn sự kiện hay gặp nhất trong đề:
+
+- API Gateway: dựng REST/HTTP API serverless, mỗi request gọi một hàm.
+- S3: chạy hàm khi có object được tạo hoặc xóa (ví dụ sinh thumbnail khi có ảnh mới).
+- SQS, SNS: xử lý tin nhắn từ hàng đợi hoặc nhận thông báo.
+- DynamoDB Streams, Kinesis: phản ứng với từng thay đổi dữ liệu hay từng bản ghi trong luồng.
+- EventBridge: chạy hàm theo lịch (thay cho cron) hoặc theo sự kiện hệ thống.
+- ALB: trỏ thẳng tới Lambda như một backend HTTP, không cần EC2 (chi tiết trong bài [Elastic Load Balancer](/vi/posts/aws-elastic-load-balancer-overview)).
+
+Để gọi được dịch vụ khác, mỗi hàm Lambda gắn một <Tooltip content="IAM Role — vai trò chứa các quyền tạm thời mà Lambda dùng để gọi dịch vụ AWS khác; gọi là execution role">IAM execution role</Tooltip> chứa đúng các quyền nó cần — ví dụ quyền ghi vào một bảng DynamoDB.
+
+### 1.5. Mô hình giá
+
+Lambda tính tiền trên hai trục, và quan trọng nhất: **không có sự kiện thì không tốn tiền**.
+
+- **Theo số lần gọi**: tính trên tổng số lần hàm được kích hoạt.
+- **Theo thời gian chạy**: tính theo <Tooltip content="GB-second — đơn vị tính bằng lượng bộ nhớ cấp cho hàm (tính theo GB) nhân với thời gian chạy (tính theo giây)">GB-giây</Tooltip>, tức bộ nhớ bạn cấp cho hàm nhân với thời gian nó chạy. Cấp nhiều bộ nhớ hơn thì mỗi giây đắt hơn, nhưng hàm cũng được nhiều CPU hơn nên thường chạy nhanh hơn.
+
+AWS còn cho một gói miễn phí rộng rãi hằng tháng (1 triệu lần gọi và 400.000 GB-giây), nên phần lớn ứng dụng nhỏ gần như không mất phí Lambda. Với phòng thi, hãy ghim ý niệm "pay per use": Lambda là lựa chọn kinh tế cho workload chạy lắt nhắt hoặc không đều, còn workload chạy liên tục với tải ổn định cao thì EC2 hoặc Fargate có thể rẻ hơn.
+
+---
+
+## 2. Giới hạn của Lambda
+
+Đây là phần SAA hỏi nhiều nhất, vì nhiều câu hỏi thực chất là "workload này có vượt giới hạn của Lambda không, nếu có thì chọn dịch vụ khác". Hãy ghim các con số sau.
+
+| Giới hạn                  | Giá trị                         | Ghi chú cho phòng thi                                                |
+| ------------------------- | ------------------------------- | -------------------------------------------------------------------- |
+| **Bộ nhớ (RAM)**          | 128 MB tới 10 GB                | CPU tăng theo bộ nhớ — muốn nhiều CPU hơn thì cấp thêm RAM           |
+| **Thời gian chạy tối đa** | 15 phút                         | Giới hạn cứng, không xin tăng được                                   |
+| **Lưu trữ tạm `/tmp`**    | 512 MB tới 10 GB                | Miễn phí tới 512 MB; là ổ đĩa tạm, mất sau khi môi trường bị thu hồi |
+| **Biến môi trường**       | tối đa 4 KB                     | Tổng kích thước các biến môi trường                                  |
+| **Gói triển khai (zip)**  | 50 MB nén / 250 MB sau giải nén | Áp dụng khi upload trực tiếp, gồm cả layer                           |
+| **Container image**       | 10 GB                           | Lối thoát khi gói code quá lớn cho giới hạn 250 MB                   |
+| **Payload đồng bộ**       | 6 MB                            | Kích thước tối đa của request/response khi gọi đồng bộ               |
+| **Payload bất đồng bộ**   | 256 KB                          | Khi gọi qua sự kiện (ví dụ từ SNS, S3)                               |
+
+Vài điểm hay thành bẫy:
+
+- **15 phút là trần cứng.** Nếu một câu hỏi mô tả tác vụ chạy lâu hơn 15 phút (xử lý dữ liệu lớn kéo dài hàng giờ, ví dụ vậy), Lambda là đáp án sai — hãy nghĩ tới EC2, Fargate, hay <Tooltip content="AWS Batch — dịch vụ chạy các công việc xử lý theo lô (batch) trên hạ tầng do AWS quản lý">AWS Batch</Tooltip>.
+- **CPU không cấu hình riêng.** Bạn không chọn số CPU trực tiếp; CPU được cấp tỉ lệ thuận với bộ nhớ. Hàm nặng tính toán nhưng chạy chậm thường được khắc phục bằng cách tăng bộ nhớ để kéo theo CPU.
+- **`/tmp` là ổ tạm, không phải nơi lưu lâu dài.** Cần lưu trữ bền hoặc chia sẻ giữa nhiều hàm thì dùng S3 hoặc <Tooltip content="Elastic File System — hệ thống file mạng dùng chung, gắn được vào nhiều Lambda hoặc EC2">EFS</Tooltip>.
+- **Payload 6 MB.** Cần truyền dữ liệu lớn hơn thì để dữ liệu trên S3 và chỉ truyền tham chiếu (đường dẫn) tới object.
+
+---
+
+## 3. Concurrency và Throttling
+
+### 3.1. Cold start và warm start
+
+Để hiểu concurrency, trước hết cần hiểu một bản chạy của Lambda hoạt động ra sao. Mỗi khi cần phục vụ một sự kiện, Lambda dựng một **môi trường thực thi** (execution environment): tải code, khởi tạo runtime, chạy phần code khởi tạo ngoài hàm chính (mở kết nối database, nạp thư viện). Quá trình dựng từ đầu này gọi là **cold start** (khởi động nguội), và nó tốn thêm thời gian.
+
+Sau khi chạy xong, Lambda không hủy môi trường ngay mà giữ lại một lúc. Nếu có sự kiện mới tới trong khi môi trường còn sống, nó được tái sử dụng — gọi là **warm start** (khởi động ấm) — và bỏ qua bước khởi tạo, nên nhanh hơn hẳn. Cold start là cái giá phải trả khi có một bản chạy hoàn toàn mới được tạo, đặc biệt rõ với các runtime nặng như Java.
+
+### 3.2. Concurrency là gì và giới hạn mặc định
+
+**Concurrency** là số bản chạy của hàm đang xử lý sự kiện **cùng một lúc**. Nếu 100 sự kiện ập tới đồng thời và mỗi sự kiện mất một giây, bạn cần 100 bản chạy song song — tức concurrency bằng 100.
+
+Mỗi Region có một hạn mức concurrency mặc định dùng chung cho **tất cả các hàm**: **1.000** bản chạy đồng thời. Đây là giới hạn mềm, có thể mở ticket xin tăng. Khi tổng số bản chạy đồng thời chạm trần, các lời gọi vượt ngưỡng sẽ bị **throttle** (xem 3.5).
+
+### 3.3. Reserved concurrency
+
+**Reserved concurrency** (concurrency dành riêng) là khi bạn giữ riêng một phần hạn mức cho một hàm cụ thể. Nó có hai mặt cùng lúc:
+
+- **Đảm bảo**: hàm đó luôn có sẵn từng ấy bản chạy, không bị các hàm khác "ăn" mất phần của mình.
+- **Giới hạn trần**: chính con số đó cũng là mức tối đa hàm được phép đạt — nó không vượt qua được phần dành riêng của mình.
+
+Reserved concurrency hữu ích cho hai tình huống thi hay hỏi. Thứ nhất, bảo vệ một hàm quan trọng khỏi bị bỏ đói khi một hàm khác trong Region tiêu hết hạn mức chung. Thứ hai, **chặn trần** một hàm để nó không làm quá tải tài nguyên phía sau — ví dụ một database có số kết nối giới hạn, bạn không muốn Lambda mở hàng nghìn kết nối cùng lúc.
+
+### 3.4. Provisioned concurrency
+
+**Provisioned concurrency** (concurrency cấp sẵn) giải bài toán cold start. Bạn yêu cầu Lambda **khởi tạo trước** một số lượng môi trường thực thi và giữ chúng luôn ở trạng thái ấm, sẵn sàng phản hồi tức thì. Khi sự kiện tới, không còn phải dựng môi trường từ đầu nên không dính độ trễ cold start.
+
+Đây là lựa chọn cho các ứng dụng nhạy với độ trễ và có thể dự đoán được lưu lượng — ví dụ một API phục vụ người dùng cần phản hồi ổn định, hoặc chuẩn bị trước cho một đợt traffic đã biết lịch. Khác với reserved concurrency (chỉ phân bổ hạn mức, không tốn thêm tiền), provisioned concurrency **tính phí** cho phần năng lực bạn giữ ấm, vì AWS phải duy trì môi trường chạy sẵn cho bạn.
+
+> **Phân biệt nhanh:** reserved concurrency lo chuyện **bao nhiêu** bản chạy được phép (đảm bảo và chặn trần); provisioned concurrency lo chuyện **độ trễ** (giữ ấm sẵn để né cold start). Đề hỏi "loại bỏ cold start cho workload nhạy độ trễ" thì đáp án là provisioned concurrency.
+
+### 3.5. Throttling
+
+Khi số bản chạy đồng thời vượt giới hạn (dù là hạn mức chung của Region hay reserved concurrency của hàm), Lambda **throttle** — từ chối bớt lời gọi và trả về lỗi <Tooltip content="Mã lỗi HTTP 429 nghĩa là gửi quá nhiều request; với Lambda đi kèm lỗi TooManyRequestsException">429 TooManyRequestsException</Tooltip>. Điều gì xảy ra sau đó tùy cách hàm được gọi:
+
+- Gọi **đồng bộ** (ví dụ qua API Gateway): lỗi trả thẳng về cho caller, caller tự quyết định thử lại.
+- Gọi **bất đồng bộ** (ví dụ từ S3, SNS): Lambda **tự thử lại** trong một khoảng thời gian, nên những đợt tăng tải ngắn thường được hấp thụ mà không mất sự kiện.
+
+Khi gặp throttling thường xuyên, cách xử lý là xin tăng hạn mức concurrency của Region, hoặc đặt reserved concurrency hợp lý cho các hàm.
+
+---
+
+## 4. SnapStart
+
+Như đã thấy ở phần cold start, các runtime nặng như Java có thể mất khá nhiều thời gian khởi tạo — đôi khi vài giây — đủ để làm hỏng trải nghiệm với một API cần phản hồi nhanh. Một cách giải là provisioned concurrency, nhưng nó tốn tiền giữ ấm. **Lambda SnapStart** là cách giải khác, và miễn phí với Java.
+
+Ý tưởng của SnapStart: thay vì khởi tạo lại môi trường từ đầu cho mỗi cold start, Lambda chạy phần khởi tạo **một lần**, chụp lại một **ảnh chụp** (snapshot) của môi trường đã khởi tạo xong, rồi cache lại. Những lần gọi sau khôi phục từ ảnh chụp đã sẵn sàng đó thay vì dựng lại, nên cold start nhanh hơn đáng kể.
+
+Vài điểm cần ghim:
+
+- **Runtime hỗ trợ**: Java 11 trở lên, Python 3.12 trở lên, và .NET 8 trở lên. Các runtime khác (Node.js, Ruby), custom runtime, và container image **không** hỗ trợ.
+- **Không dùng chung với provisioned concurrency.** Đây là điểm bẫy: SnapStart và provisioned concurrency loại trừ lẫn nhau — chỉ chọn một. SnapStart cũng không đi cùng EFS hay `/tmp` lớn hơn 512 MB.
+- **Chi phí**: với Java, SnapStart miễn phí. Với Python và .NET có tính thêm phí cho việc cache và khôi phục ảnh chụp.
+
+Với phòng thi, từ khóa nhận diện SnapStart là "giảm cold start cho hàm Java mà không phải trả phí giữ ấm như provisioned concurrency".
+
+---
+
+## 5. Lambda@Edge và CloudFront Functions
+
+### 5.1. Vì sao cần chạy code ở biên?
+
+<Tooltip content="Amazon CloudFront — mạng phân phối nội dung (CDN) của AWS, cache nội dung ở các điểm gần người dùng">CloudFront</Tooltip> là <Tooltip content="Content Delivery Network — mạng các máy chủ đặt rải khắp thế giới để phục vụ nội dung từ điểm gần người dùng nhất">CDN</Tooltip> của AWS: nó cache nội dung tại các điểm gần người dùng để giảm độ trễ. Nhiều khi bạn muốn **chạy một đoạn logic ngay tại
+biên** đó, trước khi request đi tới gốc — ví dụ viết lại URL, kiểm tra token xác thực, thêm bớt HTTP header, hay phục vụ nội dung khác nhau theo thiết bị. Chạy ở biên giúp logic này thực thi sát người dùng, không phải vòng về tận Region.
+
+AWS có hai công cụ cho việc này, và SAA rất hay hỏi phân biệt chúng: **CloudFront Functions** và **Lambda@Edge**.
+
+### 5.2. CloudFront Functions
+
+**CloudFront Functions** là các hàm JavaScript siêu nhẹ, chạy ngay tại các <Tooltip content="Edge location — điểm hiện diện của CloudFront đặt khắp thế giới, nơi cache nội dung gần người dùng nhất">edge location</Tooltip> (số lượng rất lớn, hàng trăm điểm), với thời gian thực thi dưới một mili-giây. Chúng được thiết kế cho khối lượng cực lớn (hàng triệu request mỗi giây) và những tác vụ thật ngắn gọn:
+
+- Thao tác và viết lại HTTP header.
+- Viết lại hoặc chuyển hướng URL.
+- Chuẩn hóa <Tooltip content="Cache key — tổ hợp các thuộc tính (URL, header...) mà CloudFront dùng làm khóa để tra và lưu cache">cache key</Tooltip>.
+- Kiểm tra token hay xác thực đơn giản.
+
+Đổi lại sự nhanh và rẻ đó là nhiều hạn chế: chỉ chạy được JavaScript, bộ nhớ rất nhỏ, **không gọi mạng được**, và chỉ kích hoạt tại hai thời điểm — viewer request (trước khi CloudFront tra cache) và viewer response (trước khi trả về cho người dùng).
+
+### 5.3. Lambda@Edge
+
+**Lambda@Edge** là việc chạy hàm Lambda (Node.js hoặc Python) tại các <Tooltip content="Regional Edge Cache — tầng cache lớn hơn của CloudFront, nằm giữa edge location và gốc; ít điểm hơn edge location">Regional Edge Cache</Tooltip>. Nó nặng hơn và mạnh hơn CloudFront Functions: thời gian chạy dài hơn, bộ nhớ nhiều hơn, **gọi mạng được** (truy vấn dịch vụ khác, gọi API). Quan trọng cho phòng thi, Lambda@Edge kích hoạt tại **bốn** thời điểm trong vòng đời CloudFront:
+
+- Viewer request và viewer response (như CloudFront Functions).
+- Thêm origin request (trước khi request đi tới gốc) và origin response (sau khi gốc trả về).
+
+Nhờ chạm được vào pha origin và gọi mạng được, Lambda@Edge hợp với logic phức tạp hơn: xác thực và phân quyền nâng cao, định tuyến tới gốc khác nhau theo điều kiện, hay biến đổi nội dung response cần truy vấn dữ liệu bên ngoài.
+
+### 5.4. So sánh và chọn loại nào
+
+| Tiêu chí                | CloudFront Functions                           | Lambda@Edge                                             |
+| ----------------------- | ---------------------------------------------- | ------------------------------------------------------- |
+| **Ngôn ngữ**            | Chỉ JavaScript                                 | Node.js, Python                                         |
+| **Nơi chạy**            | Edge location (hàng trăm điểm)                 | Regional Edge Cache (ít điểm hơn)                       |
+| **Thời điểm kích hoạt** | Viewer request/response (2 pha)                | Viewer + origin request/response (4 pha)                |
+| **Thời gian chạy**      | Dưới 1 mili-giây                               | Tới vài giây (dài hơn cho pha origin)                   |
+| **Gọi mạng**            | Không                                          | Có                                                      |
+| **Quy mô**              | Hàng triệu request/giây                        | Thấp hơn nhiều                                          |
+| **Hợp với**             | Header, redirect, cache key, xác thực đơn giản | Logic phức tạp, gọi dịch vụ ngoài, can thiệp pha origin |
+
+Cách chọn nhanh trong phòng thi: cần thao tác **cực nhẹ, cực nhanh, quy mô khổng lồ** trên viewer request/response thì chọn **CloudFront Functions**; cần **gọi mạng**, can thiệp **pha origin**, hay logic nặng hơn thì chọn **Lambda@Edge**.
+
+---
+
+## 6. Lambda trong VPC
+
+### 6.1. Mặc định, Lambda nằm ngoài VPC của bạn
+
+Theo mặc định, hàm Lambda chạy trong một <Tooltip content="Virtual Private Cloud — mạng riêng ảo của bạn trên AWS, nơi đặt các tài nguyên như EC2, RDS">VPC</Tooltip> do AWS quản lý, tách biệt khỏi VPC của bạn. Hệ quả quan trọng: ở chế độ mặc định này, hàm **có thể ra internet** (gọi API công khai) nhưng **không truy cập được các tài nguyên riêng tư trong VPC của bạn** — ví dụ một database <Tooltip content="Relational Database Service — dịch vụ database quan hệ được quản lý của AWS">RDS</Tooltip> hay một cụm <Tooltip content="ElastiCache — dịch vụ cache trong bộ nhớ (Redis/Memcached) được quản lý của AWS">ElastiCache</Tooltip> nằm trong subnet riêng tư.
+
+### 6.2. Gắn Lambda vào VPC
+
+Khi hàm cần chạm tới tài nguyên riêng tư đó, bạn cấu hình cho nó chạy **bên trong VPC của bạn**: chỉ định các subnet và <Tooltip content="Security Group — tường lửa có trạng thái ở mức tài nguyên, kiểm soát lưu lượng vào ra">Security Group</Tooltip>. Lúc này Lambda tạo các <Tooltip content="Elastic Network Interface — card mạng ảo trong VPC; là cầu nối để Lambda nói chuyện với tài nguyên trong VPC">ENI</Tooltip> trong VPC để làm cầu nối tới tài nguyên.
+
+Ngày nay AWS dùng **Hyperplane ENI** — các ENI dùng chung được tạo sẵn ở mức cấu hình hàm chứ không phải mỗi lần gọi sinh một cái. Nhờ vậy chuyện gắn Lambda vào VPC không còn gây cold start nặng như thời kỳ đầu. Với phòng thi, chỉ cần nhớ: Lambda nói chuyện với tài nguyên trong VPC thông qua ENI.
+
+### 6.3. Vào VPC thì mất đường ra internet
+
+Đây là cái bẫy kinh điển nhất của Lambda trong đề SAA. Khi gắn hàm vào VPC, nó **mất quyền truy cập internet mặc định**. Đặt hàm vào một <Tooltip content="Public subnet — subnet có đường ra internet trực tiếp qua Internet Gateway">public subnet</Tooltip> cũng **không** giúp ích, vì hàm Lambda không có IP công khai.
+
+Để một hàm trong VPC vừa chạm được tài nguyên riêng tư, vừa ra được internet (hoặc gọi các API công khai của AWS), kiến trúc đúng là: đặt hàm trong **private subnet**, và cho subnet đó một đường đi tới <Tooltip content="NAT Gateway — dịch vụ cho phép tài nguyên trong subnet riêng tư khởi tạo kết nối ra internet, nhưng internet không vào ngược được">NAT Gateway</Tooltip> đặt ở public subnet. NAT Gateway lo phần ra internet. (Bài [VPC Networking](/vi/posts/aws-vpc-networking-overview) đi sâu hơn về subnet và NAT.)
+
+### 6.4. Gọi S3 và DynamoDB mà không cần NAT
+
+Nếu hàm trong VPC chỉ cần gọi **S3** hoặc **DynamoDB**, bạn không nhất thiết phải dựng NAT Gateway (vốn tốn phí). Hai dịch vụ này hỗ trợ <Tooltip content="Gateway VPC Endpoint — cổng cho phép truy cập riêng tư tới S3 và DynamoDB từ trong VPC mà không qua internet, không tốn phí xử lý">Gateway VPC Endpoint</Tooltip>: thêm một route trong route table để lưu lượng tới S3/DynamoDB đi qua endpoint này, ở lại hoàn toàn trong mạng AWS, không qua internet và không tốn phí NAT. Đề hỏi "Lambda trong VPC cần truy cập S3 với chi phí thấp nhất" thì đáp án là Gateway Endpoint, không phải NAT Gateway.
+
+---
+
+## Lời kết
+
+Quay lại chuyện sinh thumbnail đầu bài: bạn không cần nuôi một máy chủ 24/7 cho công việc lắt nhắt. Bạn gói đoạn code lại, nối nó vào sự kiện "có ảnh mới trên S3", và để AWS lo phần còn lại — scale theo tải, trả tiền theo mức dùng, sẵn sàng cao có sẵn. Đó là tinh thần của Lambda. Phần còn lại của bài là những đặc tính bạn cần biết để dùng nó đúng chỗ và trả lời đúng trong phòng thi.
+
+Bảng dưới gom các **từ khóa** hay xuất hiện trong đề và hướng trả lời:
+
+| Từ khóa trong đề                                                            | Hướng trả lời                                      |
+| --------------------------------------------------------------------------- | -------------------------------------------------- |
+| Chạy lắt nhắt, hướng sự kiện, không muốn quản lý máy chủ, trả theo mức dùng | **Lambda**                                         |
+| Tác vụ chạy lâu hơn 15 phút                                                 | Không phải Lambda — chọn EC2 / Fargate / AWS Batch |
+| Đảm bảo và chặn trần số bản chạy của một hàm                                | **Reserved concurrency**                           |
+| Loại bỏ cold start cho workload nhạy độ trễ (chấp nhận trả phí giữ ấm)      | **Provisioned concurrency**                        |
+| Giảm cold start cho hàm Java, không phải trả phí giữ ấm                     | **SnapStart**                                      |
+| Thao tác header/URL siêu nhẹ, siêu nhanh, quy mô khổng lồ ở biên            | **CloudFront Functions**                           |
+| Logic ở biên cần gọi mạng hoặc can thiệp pha origin                         | **Lambda@Edge**                                    |
+| Lambda trong VPC cần ra internet                                            | Private subnet + **NAT Gateway**                   |
+| Lambda trong VPC cần gọi S3/DynamoDB rẻ nhất                                | **Gateway VPC Endpoint** (không cần NAT)           |
+
+Những điều cần ghim cho phòng thi:
+
+- **Lambda là serverless, hướng sự kiện, trả theo mức dùng**: hợp workload lắt nhắt/không đều; lúc nhàn rỗi chi phí bằng không.
+- **Giới hạn cứng cần nhớ**: bộ nhớ tối đa 10 GB (CPU tăng theo bộ nhớ), thời gian chạy tối đa 15 phút, payload đồng bộ 6 MB, gói triển khai 50 MB / 250 MB (hoặc container image 10 GB).
+- **Reserved khác Provisioned**: reserved lo "bao nhiêu bản chạy" (đảm bảo và chặn trần); provisioned lo "độ trễ" (giữ ấm để né cold start, có tính phí).
+- **SnapStart**: giảm cold start (Java, Python, .NET), không dùng chung với provisioned concurrency.
+- **CloudFront Functions khác Lambda@Edge**: nhẹ/nhanh/JS/viewer-only so với nặng hơn/gọi mạng được/Node.js hay Python/chạm được pha origin.
+- **Lambda trong VPC mất internet mặc định**: cần ra ngoài thì dùng private subnet + NAT Gateway; chỉ gọi S3/DynamoDB thì dùng Gateway Endpoint cho rẻ.
+
+Bạn đang dùng Lambda cho phần nào trong hệ thống của mình, và đã từng vấp giới hạn nào của nó chưa? Hãy chia sẻ bên dưới.
