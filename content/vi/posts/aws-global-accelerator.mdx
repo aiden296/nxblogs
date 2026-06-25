@@ -124,6 +124,14 @@ Các thiết bị IoT thường duy trì kết nối TCP lâu dài. Global Accel
 
 Bạn đang chạy v1 trên ALB-A và muốn chuyển sang v2 trên ALB-B. Thay vì đổi DNS (phải đợi propagation), bạn thêm ALB-B vào Global Accelerator với weight 10%, quan sát, rồi dần tăng lên 100%. Nếu có vấn đề, chuyển weight về 0% ngay lập tức.
 
+Cách tiếp cận quen thuộc hơn cho blue-green là **Route 53 weighted routing** — một chính sách định tuyến của Route 53 cho phép gán trọng số cho từng bản ghi DNS để phân phối traffic theo tỷ lệ (ví dụ bản ghi trỏ về ALB-A nhận 90%, bản ghi trỏ về ALB-B nhận 10%). Ý tưởng giống hệt: điều chỉnh trọng số để dịch chuyển traffic dần dần. Khác biệt nằm ở tầng nó hoạt động — Route 53 chuyển traffic ở tầng DNS, nên gánh đúng điểm yếu của DNS là caching.
+
+Khi một client phân giải tên miền, kết quả được cache lại ngay trên thiết bị và ở các resolver trung gian (resolver của ISP, của mạng công ty) cho đến khi TTL hết hạn. Nhiều thiết bị — đặc biệt là mobile — còn giữ cache lâu hơn cả TTL bạn đặt. Hệ quả khi bạn đổi trọng số: không phải client nào cũng nhận tỷ lệ mới ngay. Một phần traffic vẫn đi theo bản ghi cũ cho đến khi cache của nó hết hạn, nên tỷ lệ thật mà v2 nhận được khó đoán và lệch so với con số bạn cấu hình. Khi cần rollback gấp (đưa v2 về 0%), những client đang cache vẫn tiếp tục gửi request đến v2 trong một khoảng thời gian.
+
+Global Accelerator điều chỉnh weight ngay tại tầng network, phía sau 2 Anycast IP cố định, nên hoàn toàn không phụ thuộc DNS cache. Thay đổi có hiệu lực trong vài giây, tỷ lệ traffic được kiểm soát chính xác, và rollback là tức thì. Vì vậy với những đợt blue-green cần dịch chuyển nhanh và có kiểm soát — nhất là khi phần lớn người dùng ở mobile, nơi DNS dễ bị cache lâu — Global Accelerator an toàn hơn Route 53 weighted routing.
+
+<ExcalidrawDiagram src="/blue-green-route53-vs-global-accelerator.excalidraw" alt="So sánh blue-green deployment bằng Route 53 weighted routing và Global Accelerator" />
+
 ---
 
 ## 4. Đừng nhầm lẫn CloudFront với Global Accelerator

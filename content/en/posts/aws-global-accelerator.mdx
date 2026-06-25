@@ -124,6 +124,14 @@ IoT devices often maintain long-lived TCP connections. Global Accelerator doesn'
 
 You're running v1 on ALB-A and want to switch to v2 on ALB-B. Instead of changing DNS (which requires propagation time), you add ALB-B to Global Accelerator with 10% weight, observe, then gradually increase to 100%. If there's an issue, switch weight back to 0% immediately.
 
+The more familiar approach for blue-green is **Route 53 weighted routing** — a Route 53 routing policy that assigns a weight to each DNS record to distribute traffic by proportion (for example, the record pointing to ALB-A gets 90% and the record pointing to ALB-B gets 10%). The idea is identical: adjust the weights to shift traffic gradually. The difference is the layer it operates at — Route 53 shifts traffic at the DNS layer, so it inherits the core weakness of DNS, which is caching.
+
+When a client resolves a domain name, the result is cached on the device itself and at intermediate resolvers (the ISP's resolver, a corporate network's resolver) until the TTL expires. Many devices — mobile ones in particular — hold the cache even longer than the TTL you set. The consequence when you change the weights: not every client picks up the new proportion right away. Some traffic keeps following the old record until its cache expires, so the actual proportion v2 receives is hard to predict and drifts from the number you configured. When you need an urgent rollback (taking v2 back to 0%), clients with a cached record keep sending requests to v2 for a while.
+
+Global Accelerator adjusts the weights at the network layer, behind its 2 fixed Anycast IPs, so it does not depend on DNS caching at all. Changes take effect within seconds, the traffic proportion is controlled precisely, and rollback is instant. So for blue-green rollouts that need fast, controlled traffic shifting — especially when most users are on mobile, where DNS is prone to long caching — Global Accelerator is safer than Route 53 weighted routing.
+
+<ExcalidrawDiagram src="/blue-green-route53-vs-global-accelerator.excalidraw" alt="Blue-green deployment compared with Route 53 weighted routing and Global Accelerator" />
+
 ---
 
 ## 4. Don't confuse CloudFront with Global Accelerator
