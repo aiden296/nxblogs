@@ -14,7 +14,7 @@ In a distributed system, Cache and Database are two independent entities residin
 
 Imagine you are writing in **two notebooks placed at opposite ends of the city**. When you finish writing a line in notebook A (Database), there is no "magic" that instantly makes that line appear in notebook B (Cache). Every operation must travel through an unreliable medium: **the Network**.
 
-In theory, we could use <Tooltip content="such as 2PC, 3PC protocols">Distributed Transactions</Tooltip> to ensure Atomicity. However, "tying" both Cache and Database into a single transaction would cause significant latency. Therefore, a more practical goal is to achieve <Tooltip content="Data may be inconsistent for a few milliseconds, but Cache and Database will eventually synchronize">Eventual Consistency</Tooltip>.
+In theory, we could use Distributed Transactions to ensure Atomicity. However, "tying" both Cache and Database into a single transaction would cause significant latency. Therefore, a more practical goal is to achieve Eventual Consistency.
 
 ---
 
@@ -25,7 +25,7 @@ When data in the DB changes, we have two options:
 1. **Update Cache:** `cache.set(key, new_value)` — overwrite with the new value.
 2. **Delete (Invalidate) Cache:** `cache.del(key)` — delete the key, forcing the next read to fetch from DB.
 
-> **Recommendation:** Choose **Delete Cache**. This is the standard <Tooltip content="The application reads/writes Database directly and only invalidates Cache on changes; the next read repopulates Cache on Miss">Cache-Aside</Tooltip> pattern.
+> **Recommendation:** Choose **Delete Cache**. This is the standard Cache-Aside pattern.
 
 ### Why You Shouldn't "Update Cache" (The Double Write Problem)
 
@@ -89,7 +89,7 @@ This occurs when a Read Request is "delayed" at the wrong moment:
 
 ### 3.2. Master-Slave Replication Lag
 
-In a <Tooltip content="Leader-Follower">Master-Slave</Tooltip> architecture:
+In a Master-Slave architecture:
 
 - All write operations (`INSERT`, `UPDATE`, `DELETE`) go to the **Master Database**
 - Master writes change logs (MySQL: `binlog`, PostgreSQL: `WAL`)
@@ -109,7 +109,7 @@ In a <Tooltip content="Leader-Follower">Master-Slave</Tooltip> architecture:
 
 ### 3.3. Partial Failure
 
-When the App Server communicates with Database and Cache, we face the <Tooltip content="writing to 2 places">Dual Write</Tooltip> problem:
+When the App Server communicates with Database and Cache, we face the Dual Write problem:
 
 1. App sends `UPDATE` to Database -> **Success**.
 2. App prepares to send `DELETE` to Cache.
@@ -135,7 +135,7 @@ Duration `T` must be greater than the Replication Lag time + the read thread exe
 
 **Drawbacks:** It is very difficult to choose the exact value for `T`:
 
-- `T` too small -> won't catch the <Tooltip content="A situation where multiple threads access/update shared data and the result depends on unpredictable execution order">Race Condition</Tooltip>
+- `T` too small -> won't catch the Race Condition
 - `T` too large (e.g., 10 minutes) -> keeps stale data alive longer
 
 > **Practical tip:** Choose `T` in the range: `P99 Replication Lag + P99 Read Time < T < TTL`

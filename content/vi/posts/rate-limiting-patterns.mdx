@@ -212,15 +212,15 @@ async function tokenBucket(userId: string, capacity: number, refillPerSec: numbe
 }
 ```
 
-> **Lưu ý:** code trên **có race condition** — đọc và ghi không atomic. Production phải bọc bằng <Tooltip content="Đoạn mã Lua chạy atomic bên trong Redis qua lệnh EVAL, cho phép nhiều thao tác đọc-ghi xảy ra như một bước duy nhất.">Lua script</Tooltip> (xem mục 4).
+> **Lưu ý:** code trên **có race condition** — đọc và ghi không atomic. Production phải bọc bằng Lua script (xem mục 4).
 
-**Ưu điểm.** **Cho phép burst** lên tới capacity. Phù hợp với traffic không đều: web/mobile thường yên lặng rồi bùng phát theo phiên user. <Tooltip content="Thuật toán rate limit giữ một 'xô' token được nạp đều đặn theo thời gian; mỗi request tiêu một token, hết token thì bị từ chối.">Token bucket</Tooltip> "thưởng" cho client tiết kiệm bằng cách cho phép họ tiêu nhiều khi cần.
+**Ưu điểm.** **Cho phép burst** lên tới capacity. Phù hợp với traffic không đều: web/mobile thường yên lặng rồi bùng phát theo phiên user. Token bucket "thưởng" cho client tiết kiệm bằng cách cho phép họ tiêu nhiều khi cần.
 
 **Biến thể quan trọng:**
 
 - **Weighted token bucket.** Request đắt tốn nhiều token hơn. AWS API: `DescribeInstances` tốn 1 token, `RunInstances` tốn 5 token. Stripe API có khái niệm tương tự cho các call expensive.
 - **Hierarchical bucket.** Bucket per-user lồng trong bucket per-org, lồng trong bucket per-region. Request tiêu token ở mọi tầng.
-- **<Tooltip content="Generic Cell Rate Algorithm">GCRA</Tooltip>.** Một biến thể toán học gọn của token bucket, chỉ cần lưu **1 số** (`theoretical arrival time`) thay vì 2 (tokens + last_refill). Redis module `redis-cell` implement chính xác cái này.
+- **GCRA.** Một biến thể toán học gọn của token bucket, chỉ cần lưu **1 số** (`theoretical arrival time`) thay vì 2 (tokens + last_refill). Redis module `redis-cell` implement chính xác cái này.
 
 **Khi nào dùng.** API public có traffic burst (đa số API user-facing), API có request cost không đồng đều, system cần phép "tích luỹ quota khi không dùng". Đây là pattern phổ biến nhất ở production.
 
@@ -230,7 +230,7 @@ Code không dài, nhưng phải atomic (Lua script), refill math phải chính x
 
 ### 2.5. Leaky Bucket (queue-based)
 
-**Cách hoạt động.** Request đến **xếp hàng FIFO** vào bucket. Một consumer rút request ra với tốc độ cố định `r`/giây và xử lý. Hàng đợi đầy → reject. Khác với token bucket: <Tooltip content="Thuật toán rate limit dùng hàng đợi FIFO: request được rút ra với tốc độ cố định, làm mượt output bất kể input có spike hay không.">leaky bucket</Tooltip> không cho burst đi qua — output luôn mượt ở đúng tốc độ `r`.
+**Cách hoạt động.** Request đến **xếp hàng FIFO** vào bucket. Một consumer rút request ra với tốc độ cố định `r`/giây và xử lý. Hàng đợi đầy → reject. Khác với token bucket: leaky bucket không cho burst đi qua — output luôn mượt ở đúng tốc độ `r`.
 
 <ExcalidrawDiagram src="/rate-limiting-leaky-bucket.excalidraw" alt="Leaky bucket xếp request vào hàng đợi FIFO, rút ra với tốc độ cố định để làm mượt output" />
 

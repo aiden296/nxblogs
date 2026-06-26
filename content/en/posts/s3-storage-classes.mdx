@@ -10,7 +10,7 @@ enableComment: true
 
 > Storing everything in S3 Standard is like renting a premium warehouse for boxes you only open once a year — it works, but you're paying way more than you need to.
 
-Amazon S3 offers **7 storage classes**, each designed for different access patterns and cost requirements. All classes share the same <Tooltip content="99.999999999% — the probability your data won't be lost in a given year">11 9's of durability</Tooltip> — your data is equally safe regardless of which class you choose. The difference lies in **availability**, <Tooltip content="the process of fetching data out of storage to use it">retrieval</Tooltip> speed, and **cost**.
+Amazon S3 offers **7 storage classes**, each designed for different access patterns and cost requirements. All classes share the same 11 9's of durability — your data is equally safe regardless of which class you choose. The difference lies in **availability**, retrieval speed, and **cost**.
 
 I find it easiest to think of them in **3 groups**:
 
@@ -85,7 +85,7 @@ Same durability and performance as Standard, but at a **lower storage cost** —
 
 ### S3 One Zone-IA
 
-Similar to Standard-IA but stored in only 1 <Tooltip content="Availability Zone — an isolated physical data center within an AWS region">AZ</Tooltip> instead of >= 3. This makes it the cheapest option in the Standard group — but with a risk: if that AZ goes down, your data is **temporarily unavailable**, and if the AZ is destroyed, your data is **permanently lost**.
+Similar to Standard-IA but stored in only 1 AZ instead of >= 3. This makes it the cheapest option in the Standard group — but with a risk: if that AZ goes down, your data is **temporarily unavailable**, and if the AZ is destroyed, your data is **permanently lost**.
 
 **Characteristics:**
 - **Availability**: 99.5% (designed), 99% SLA

@@ -15,7 +15,7 @@ Cuối tháng, hóa đơn AWS về. Con số lớn hơn dự kiến 40%. Bạn m
 3. "Làm sao để lần sau biết trước khi sắp vượt ngân sách, thay vì đợi đến cuối tháng mới ngã ngửa?"
 4. "Và quan trọng nhất: làm sao trả ít tiền hơn cho cùng một khối lượng công việc?"
 
-Điều thú vị là: chi phí trên cloud không phải một con số cố định bạn nhận cuối tháng — nó là một biến số bạn phải chủ động quản lý. Mô hình <Tooltip content="Trả tiền theo lượng thực dùng, không cam kết trước — dùng nhiều trả nhiều, dùng ít trả ít, tắt là hết tính tiền">pay-as-you-go</Tooltip> rất tuyệt cho sự linh hoạt, nhưng cũng có nghĩa là một sai sót cấu hình có thể âm thầm đốt tiền cho tới khi hóa đơn về.
+Điều thú vị là: chi phí trên cloud không phải một con số cố định bạn nhận cuối tháng — nó là một biến số bạn phải chủ động quản lý. Mô hình pay-as-you-go rất tuyệt cho sự linh hoạt, nhưng cũng có nghĩa là một sai sót cấu hình có thể âm thầm đốt tiền cho tới khi hóa đơn về.
 
 Để giải bài toán đó, AWS không có **một** công cụ duy nhất — mà có cả một bộ dịch vụ, mỗi cái giải quyết một giai đoạn khác nhau trong vòng đời quản lý chi phí. Và đây chính là cái bẫy yêu thích của đề thi SAA: đưa ra một tình huống ("muốn nhận cảnh báo khi chi phí vượt X", "muốn báo cáo chi tiết nhất đẩy vào data warehouse", "muốn phát hiện chi tiêu bất thường tự động") rồi hỏi bạn nên dùng dịch vụ nào — trong khi vài phương án còn lại đều "nghe có vẻ đúng".
 
@@ -51,7 +51,7 @@ Giữ cái khung này trong đầu, giờ ta đi qua từng giai đoạn.
 
 Các khả năng cốt lõi:
 
-- **Lọc và nhóm (filter & group by):** xem chi phí theo service, theo region, theo linked account, theo <Tooltip content="Loại khoản tính tiền, ví dụ Usage, Tax, Credit, Refund, RI Fee — giúp tách phần dùng thật ra khỏi thuế và khuyến mãi">charge type</Tooltip>, hoặc theo cost allocation tag. Ví dụ: "chi phí EC2 trong region us-east-1 của account production, nhóm theo tag `Environment`".
+- **Lọc và nhóm (filter & group by):** xem chi phí theo service, theo region, theo linked account, theo charge type, hoặc theo cost allocation tag. Ví dụ: "chi phí EC2 trong region us-east-1 của account production, nhóm theo tag `Environment`".
 - **Độ chi tiết (granularity):** theo tháng, ngày, hoặc giờ/resource-level (mức giờ và mức từng resource cần bật riêng, có phụ phí và giới hạn cửa sổ 14 ngày).
 - **Dự báo (forecast):** dựa trên lịch sử để dự đoán chi phí sắp tới (tối đa 12 tháng).
 - **Báo cáo tối ưu sẵn có:** Cost Explorer còn kèm sẵn các báo cáo về độ tận dụng (utilization) và độ bao phủ (coverage) của Reserved Instances và Savings Plans, cùng gợi ý mua thêm và gợi ý rightsizing (điều chỉnh kích thước EC2 cho vừa nhu cầu).
@@ -73,8 +73,8 @@ Mặc dù sử dụng cùng tập dữ liệu, nhưng Cost Explorer dùng để 
 Đặc điểm:
 
 - Mỗi dòng (line item) mô tả một khoản dùng ở mức rất nhỏ — tới từng giờ, từng resource, kèm đầy đủ thông tin tag, pricing, credit, RI/Savings Plans.
-- CUR được xuất ra một bucket Amazon S3 do bạn chỉ định, ở định dạng CSV hoặc <Tooltip content="Định dạng lưu trữ dạng cột, nén tốt và query nhanh hơn CSV nhiều khi dùng với các công cụ phân tích như Athena hay Redshift">Parquet</Tooltip>, và được cập nhật tới vài lần mỗi ngày.
-- Từ S3, bạn nối CUR vào hệ sinh thái phân tích: query bằng <Tooltip content="Dịch vụ chạy truy vấn SQL trực tiếp trên dữ liệu nằm trong S3, không cần dựng server — trả tiền theo lượng dữ liệu quét">Amazon Athena</Tooltip>, nạp vào Amazon Redshift (data warehouse), hoặc dựng dashboard bằng Amazon QuickSight.
+- CUR được xuất ra một bucket Amazon S3 do bạn chỉ định, ở định dạng CSV hoặc Parquet, và được cập nhật tới vài lần mỗi ngày.
+- Từ S3, bạn nối CUR vào hệ sinh thái phân tích: query bằng Amazon Athena, nạp vào Amazon Redshift (data warehouse), hoặc dựng dashboard bằng Amazon QuickSight.
 - **CUR 2.0** là phiên bản dữ liệu mới hơn (đi qua AWS Data Exports), với schema nhất quán và dễ dùng hơn cho phân tích.
 
 Khi nào dùng CUR thay vì Cost Explorer? Khi bạn cần phân tích sâu, tùy biến cao, hoặc tự động hóa — ví dụ một bộ phận tài chính muốn dựng báo cáo chargeback riêng, hoặc bạn muốn join chi phí với dữ liệu nội bộ. Quy tắc ghi nhớ: hỏi "báo cáo chi phí chi tiết nhất, đẩy vào S3, query được bằng Athena" → đáp án gần như luôn là **CUR**.
@@ -100,9 +100,9 @@ Có bốn loại budget:
 - **RI utilization/coverage budget** — theo dõi độ tận dụng và bao phủ của Reserved Instances.
 - **Savings Plans utilization/coverage budget** — tương tự cho Savings Plans.
 
-Khi chạm ngưỡng, Budgets gửi cảnh báo qua email hoặc qua một <Tooltip content="Simple Notification Service — dịch vụ gửi thông báo theo mô hình pub/sub, có thể fan-out tới email, SMS, Lambda, hàng đợi SQS...">Amazon SNS</Tooltip> topic (từ đó fan-out tới Slack, Lambda, v.v.).
+Khi chạm ngưỡng, Budgets gửi cảnh báo qua email hoặc qua một Amazon SNS topic (từ đó fan-out tới Slack, Lambda, v.v.).
 
-Điểm mạnh đặc trưng là **Budget Actions**: thay vì chỉ báo, Budgets có thể tự động phản ứng khi vượt ngưỡng — ví dụ gắn một IAM policy / <Tooltip content="Service Control Policy — chính sách ở cấp AWS Organizations để giới hạn quyền tối đa của các account thành viên">SCP</Tooltip> hạn chế (chặn tạo resource mới), hoặc dừng (stop) các EC2/RDS instance đang chạy. Đây là cơ chế để bạn thực sự chặn chi tiêu vượt mức, không chỉ biết về nó.
+Điểm mạnh đặc trưng là **Budget Actions**: thay vì chỉ báo, Budgets có thể tự động phản ứng khi vượt ngưỡng — ví dụ gắn một IAM policy / SCP hạn chế (chặn tạo resource mới), hoặc dừng (stop) các EC2/RDS instance đang chạy. Đây là cơ chế để bạn thực sự chặn chi tiêu vượt mức, không chỉ biết về nó.
 
 Dữ liệu Budgets cập nhật tới vài lần mỗi ngày (không real-time).
 
@@ -174,7 +174,7 @@ Consolidated Billing miễn phí. Đây là một trong những lý do kiến tr
 
 ### 4.4. AWS Billing Conductor — billing tùy biến cho reseller/MSP
 
-**AWS Billing Conductor** dành cho tình huống đặc thù: bạn là <Tooltip content="Managed Service Provider — đơn vị vận hành hạ tầng AWS thay cho khách hàng và xuất hóa đơn lại cho họ">MSP</Tooltip>, reseller, hoặc một tập đoàn cần tính/chia chi phí lại theo mức giá tùy biến cho từng đơn vị kinh doanh. Bạn tạo các billing group và áp pricing rule riêng (markup, discount...) để tạo ra dữ liệu billing dạng pro-forma (mô phỏng) phản ánh đúng cách bạn muốn chargeback cho khách hàng/phòng ban, thay vì giá AWS gốc. Đây là dịch vụ chuyên biệt; với SAA chỉ cần nhận diện "cần custom rate / chargeback cho khách của reseller" → Billing Conductor.
+**AWS Billing Conductor** dành cho tình huống đặc thù: bạn là MSP, reseller, hoặc một tập đoàn cần tính/chia chi phí lại theo mức giá tùy biến cho từng đơn vị kinh doanh. Bạn tạo các billing group và áp pricing rule riêng (markup, discount...) để tạo ra dữ liệu billing dạng pro-forma (mô phỏng) phản ánh đúng cách bạn muốn chargeback cho khách hàng/phòng ban, thay vì giá AWS gốc. Đây là dịch vụ chuyên biệt; với SAA chỉ cần nhận diện "cần custom rate / chargeback cho khách của reseller" → Billing Conductor.
 
 ---
 

@@ -22,7 +22,7 @@ This post goes from the basic concept to a real-world architecture: what presign
 
 ### 1.1. The Core Problem
 
-When you create an S3 bucket, it's completely **private** by default — only <Tooltip content="IAM users, IAM roles — entities granted permissions by AWS">IAM principals</Tooltip> can access it. A user's browser or mobile app doesn't have AWS credentials, so it can't call S3 APIs directly.
+When you create an S3 bucket, it's completely **private** by default — only IAM principals can access it. A user's browser or mobile app doesn't have AWS credentials, so it can't call S3 APIs directly.
 
 How do you let clients upload or download files directly from S3 without going through the backend?
 
@@ -34,7 +34,7 @@ Simply put: a presigned URL is a **time-limited entry ticket**. The backend sign
 
 ### 1.3. The Signing Process
 
-The backend uses <Tooltip content="AWS Signature Version 4 — AWS's request signing protocol, using HMAC-SHA256 to compute a signature from the secret key and request metadata">SigV4</Tooltip> to sign the URL. At a conceptual level:
+The backend uses SigV4 to sign the URL. At a conceptual level:
 
 1. The backend assembles the request info: HTTP method (GET/POST), bucket name, object key, expiration time
 2. Uses the IAM role's **secret access key** to compute a signature
@@ -461,7 +461,7 @@ Comparison with other approaches:
 
 ### 7.3. Architecture: CloudFront + OAC + S3
 
-<Tooltip content="Origin Access Control — CloudFront's modern mechanism replacing the older OAI, ensuring only CloudFront can read from S3 so users cannot bypass CloudFront to access S3 directly">Origin Access Control</Tooltip> (OAC) is CloudFront's modern mechanism (replacing the older OAI), ensuring **only CloudFront can read from S3** — users cannot bypass CloudFront to access S3 directly.
+Origin Access Control (OAC) is CloudFront's modern mechanism (replacing the older OAI), ensuring **only CloudFront can read from S3** — users cannot bypass CloudFront to access S3 directly.
 
 Setup includes:
 1. Create a **CloudFront Key Pair** (RSA 2048-bit) — upload the public key to CloudFront, store the private key in Secrets Manager

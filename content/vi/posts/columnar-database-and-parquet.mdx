@@ -33,9 +33,9 @@ Là một backend engineer, bạn có thể đi cả sự nghiệp mà hiếm kh
 
 Trước khi nói về cách lưu trữ, phải hiểu hai kiểu công việc (workload) mà một database có thể phải phục vụ. Chúng khác nhau đến mức gần như không thể tối ưu cho cả hai cùng lúc.
 
-<Tooltip content="Online Transaction Processing — xử lý giao dịch trực tuyến">OLTP</Tooltip> là kiểu workload của những ứng dụng vận hành hằng ngày: tạo một đơn hàng, cập nhật thông tin user, trừ tồn kho. Đặc trưng của nó là **nhiều giao dịch nhỏ, mỗi giao dịch đụng tới ít dòng nhưng cần gần như toàn bộ các cột của dòng đó** — ví dụ "lấy hết thông tin của user có `id = 42`" hay "ghi một đơn hàng mới". PostgreSQL, MySQL, SQL Server đều là database OLTP.
+OLTP là kiểu workload của những ứng dụng vận hành hằng ngày: tạo một đơn hàng, cập nhật thông tin user, trừ tồn kho. Đặc trưng của nó là **nhiều giao dịch nhỏ, mỗi giao dịch đụng tới ít dòng nhưng cần gần như toàn bộ các cột của dòng đó** — ví dụ "lấy hết thông tin của user có `id = 42`" hay "ghi một đơn hàng mới". PostgreSQL, MySQL, SQL Server đều là database OLTP.
 
-<Tooltip content="Online Analytical Processing — xử lý phân tích trực tuyến">OLAP</Tooltip> thì ngược lại hoàn toàn: nó là kiểu workload phân tích, tổng hợp. Đặc trưng là **ít câu query, nhưng mỗi câu quét rất nhiều dòng và chỉ đụng tới vài cột** — ví dụ "tính tổng doanh thu theo quốc gia trên toàn bộ 200 triệu đơn hàng". Số cột được đọc thì nhỏ, nhưng số dòng phải duyệt thì khổng lồ.
+OLAP thì ngược lại hoàn toàn: nó là kiểu workload phân tích, tổng hợp. Đặc trưng là **ít câu query, nhưng mỗi câu quét rất nhiều dòng và chỉ đụng tới vài cột** — ví dụ "tính tổng doanh thu theo quốc gia trên toàn bộ 200 triệu đơn hàng". Số cột được đọc thì nhỏ, nhưng số dòng phải duyệt thì khổng lồ.
 
 Bảng dưới đây tóm tắt sự đối lập:
 
@@ -54,7 +54,7 @@ Mấu chốt nằm ở dòng "pattern truy cập". OLTP đọc **ít dòng × nh
 
 ## 2. Row store vs Column store — cùng một bảng, hai cách xếp byte trên đĩa
 
-Để hiểu vì sao cách sắp xếp lại quan trọng, cần nhớ một sự thật vật lý: đĩa (kể cả SSD) đọc dữ liệu theo **block** — một <Tooltip content="Đơn vị đọc/ghi nhỏ nhất mà đĩa thao tác một lần, thường 4KB đến vài chục KB. Đọc 1 byte trong block vẫn phải nạp cả block">block</Tooltip> là một khối byte liền mạch được nạp lên cùng lúc. Nói cách khác: **những gì nằm cạnh nhau trên đĩa sẽ được đọc cùng nhau**. Vậy nên câu hỏi "cái gì nằm cạnh cái gì" quyết định hiệu năng.
+Để hiểu vì sao cách sắp xếp lại quan trọng, cần nhớ một sự thật vật lý: đĩa (kể cả SSD) đọc dữ liệu theo **block** — một block là một khối byte liền mạch được nạp lên cùng lúc. Nói cách khác: **những gì nằm cạnh nhau trên đĩa sẽ được đọc cùng nhau**. Vậy nên câu hỏi "cái gì nằm cạnh cái gì" quyết định hiệu năng.
 
 Lấy một bảng `orders` tí hon, 3 dòng, 4 cột:
 
@@ -100,7 +100,7 @@ Trước cả khi nén tổng quát, columnar dùng các **encoding nhẹ** — 
 />
 
 - **Dictionary encoding** — thay mỗi giá trị bằng một số nguyên nhỏ trỏ vào "từ điển" các giá trị phân biệt. Cột `country` chỉ có ~200 giá trị khác nhau, nên thay vì lưu chuỗi "US" cả triệu lần, ta lưu số `0` cả triệu lần. Tuyệt vời cho cột ít giá trị phân biệt (low-cardinality).
-- <Tooltip content="Run-Length Encoding — mã hóa độ dài chuỗi lặp">RLE</Tooltip> — thay một chuỗi giá trị giống nhau liền nhau bằng cặp (giá trị, số lần lặp). `A A A A` thành `(A, 4)`. Tuyệt vời khi dữ liệu đã sắp xếp hoặc có nhiều đoạn lặp dài.
+- RLE — thay một chuỗi giá trị giống nhau liền nhau bằng cặp (giá trị, số lần lặp). `A A A A` thành `(A, 4)`. Tuyệt vời khi dữ liệu đã sắp xếp hoặc có nhiều đoạn lặp dài.
 - **Delta encoding** — chỉ lưu hiệu số giữa các giá trị liên tiếp thay vì giá trị tuyệt đối. `1000, 1002, 1005, 1009` thành base `1000` cộng deltas `0, 2, 3, 4`. Tuyệt vời cho id tăng dần hay timestamp.
 - **Bit-packing** — nếu một cột (sau dictionary encoding) chỉ chứa giá trị trong khoảng `0..3`, mỗi giá trị chỉ cần 2 bit thay vì 32 hay 64 bit. Đóng gói sát bit, không phí.
 
@@ -110,7 +110,7 @@ Hệ quả thực tế: column store thường nén chặt **5–10 lần**, tro
 
 **Vectorized execution** là kỹ thuật xử lý dữ liệu theo từng khối cột (batch) thay vì từng dòng một, cho phép CPU áp cùng một phép tính lên nhiều giá trị cùng lúc.
 
-Một cột trong columnar là một mảng liền mạch các giá trị cùng kiểu — ví dụ một mảng `double` của cột `amount`. CPU hiện đại xử lý mảng kiểu này cực nhanh nhờ <Tooltip content="Single Instruction, Multiple Data — một lệnh CPU thao tác trên nhiều giá trị cùng lúc">SIMD</Tooltip>: một lệnh cộng có thể cộng 8 số `double` trong một nhịp. Dữ liệu nằm liền nhau cũng thân thiện với <Tooltip content="Bộ nhớ đệm tốc độ cao nằm ngay trong CPU; dữ liệu nằm liền nhau giúp tăng tỉ lệ cache hit">CPU cache</Tooltip>, giảm số lần phải ra RAM.
+Một cột trong columnar là một mảng liền mạch các giá trị cùng kiểu — ví dụ một mảng `double` của cột `amount`. CPU hiện đại xử lý mảng kiểu này cực nhanh nhờ SIMD: một lệnh cộng có thể cộng 8 số `double` trong một nhịp. Dữ liệu nằm liền nhau cũng thân thiện với CPU cache, giảm số lần phải ra RAM.
 
 Trong row store thì ngược lại: giá trị `amount` của mỗi dòng nằm xen kẽ giữa `country`, `email`, `name`... CPU phải nhảy cóc qua bộ nhớ, liên tục cache miss, và không thể vector hóa gọn gàng. Cùng một phép `SUM`, columnar chạy nhanh hơn nhiều lần chỉ nhờ cách dữ liệu nằm trong bộ nhớ.
 

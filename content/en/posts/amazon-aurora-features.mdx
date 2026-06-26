@@ -25,7 +25,7 @@ Aurora doesn't store data in one place. When you create an Aurora instance, it a
 - Only **4/6 copies** need to successfully write → write is considered successful
 - Only **3/6 copies** need to be readable → read operates normally
 
-This is a <Tooltip content="A consensus mechanism that requires a minimum number of replicas to agree before an operation is considered successful.">quorum</Tooltip> model — meaning even if an entire AZ is lost (2 copies), Aurora continues to function normally for both reads and writes.
+This is a quorum model — meaning even if an entire AZ is lost (2 copies), Aurora continues to function normally for both reads and writes.
 
 Note that data synchronization between data nodes in the storage layer is synchronous, meaning sync latency is included in user request time. However, the latency is negligible due to factors like data nodes being in the same region, using backbone networks, and optimized sync techniques.
 
@@ -117,7 +117,7 @@ With standard Aurora (Provisioned), you have to choose an instance size upfront.
 
 How it works:
 
-- Compute is measured in <Tooltip content="Aurora Capacity Units — the unit of compute capacity used by Aurora Serverless.">ACU</Tooltip>, each ACU ≈ 2GB RAM
+- Compute is measured in ACU, each ACU ≈ 2GB RAM
 - You only need to set **min ACU** and **max ACU**, Aurora adjusts automatically
 - **Pay-per-second** — you only pay for compute actually used
 - Can **scale to zero** when there are no connections (v1)
@@ -146,7 +146,7 @@ Aurora provides multiple ways to protect your data, and some features are **excl
 
 - Aurora **continuously backs up automatically** to S3 — with no impact on performance
 - Retention period: **1-35 days**
-- <Tooltip content="Point-in-Time Recovery — the ability to restore a database to a specific moment in the past.">PITR</Tooltip>: restore the database to **any second** within the retention period. Aurora creates a new cluster from the backup.
+- PITR: restore the database to **any second** within the retention period. Aurora creates a new cluster from the backup.
 - Notably, this feature cannot be disabled on Aurora.
 
 ### Manual Snapshots
@@ -251,7 +251,7 @@ This is the solution **recommended by AWS** for multi-region:
 - **1 Primary Region** (read/write) — the main region handling all writes
 - **Up to 5 secondary regions** (read-only), replication lag **under 1 second**
 - Each secondary region can have up to **16 Read Replicas** (the primary region maxes out at 15 Read Replicas since 1 slot is taken by the master instance)
-- When promoting a secondary region (disaster recovery), <Tooltip content="Recovery Time Objective — the target maximum time to restore a system after an outage.">RTO</Tooltip> under 1 minute
+- When promoting a secondary region (disaster recovery), RTO under 1 minute
 
 ```
                     ┌──────────────────────┐

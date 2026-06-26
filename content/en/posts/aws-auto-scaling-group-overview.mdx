@@ -8,7 +8,7 @@ enableComment: true
 
 # Auto Scaling Group: Self-Adjusting EC2 Capacity — Min–Desired–Max, 5 Scaling Types, and the Traps on the SAA Exam
 
-You deploy a web app onto two <Tooltip content="Elastic Compute Cloud — virtual servers on AWS">EC2</Tooltip> instances behind a load balancer. Everything runs smoothly — until the night of a flash sale. Traffic spikes tenfold, both machines hit the CPU ceiling, requests queue up, and then time out. You scramble to spin up four more machines by hand. By 3 a.m. traffic has dropped to almost nothing, yet six EC2 instances are still running idle and you are still paying for all six. Worse, one of them dies at midnight and there is no one around to replace it.
+You deploy a web app onto two EC2 instances behind a load balancer. Everything runs smoothly — until the night of a flash sale. Traffic spikes tenfold, both machines hit the CPU ceiling, requests queue up, and then time out. You scramble to spin up four more machines by hand. By 3 a.m. traffic has dropped to almost nothing, yet six EC2 instances are still running idle and you are still paying for all six. Worse, one of them dies at midnight and there is no one around to replace it.
 
 The root of the problem: you are managing **static capacity** in a world where load changes constantly. The machine count does not grow when needed, does not shrink when idle, and does not self-replace when something breaks. All three of those jobs — add a machine, remove a machine, replace a machine — have to be done by hand, at exactly the moments you least want to be touching anything.
 
@@ -27,14 +27,14 @@ An **Auto Scaling Group** is a group of EC2 instances that AWS manages as a sing
 
 - **Maintain**: always keep the exact number of instances you asked for. When an instance dies, ASG stands up another to replace it — this is the self-healing mechanism.
 - **Scale**: automatically add instances when load is high and remove them when load is low, based on the rules you set.
-- **High availability**: spread instances across multiple <Tooltip content="Availability Zone — one or a cluster of data centers isolated in power and network within the same region">Availability Zones</Tooltip> so that if one AZ goes down, the system stays alive.
+- **High availability**: spread instances across multiple Availability Zones so that if one AZ goes down, the system stays alive.
 
 A point that often gets overlooked: ASG itself is a free service. You do not pay a cent for ASG — you only pay for the resources it creates, namely the EC2 instances and the network traffic that comes with them.
 
 ASG does not work alone. It sits at the intersection of three pieces of the EC2 ecosystem:
 - The first is the **Launch Template** — the blueprint describing what a new instance will look like.
 - The second is the **Elastic Load Balancer** — ASG automatically registers new instances behind the load balancer so they receive traffic.
-- The third is <Tooltip content="AWS's monitoring service that collects metrics like CPU, network, and request count, and fires alarms when thresholds are crossed">CloudWatch</Tooltip> — the source of the numbers ASG uses to decide when to shrink and when to grow. The hero diagram above captures all three relationships.
+- The third is CloudWatch — the source of the numbers ASG uses to decide when to shrink and when to grow. The hero diagram above captures all three relationships.
 
 ---
 
@@ -44,7 +44,7 @@ ASG does not work alone. It sits at the intersection of three pieces of the EC2 
 
 ASG needs to know "what a new instance looks like" before it creates any machine. That information lives in one of two things:
 
-A **Launch Template** is the modern instance blueprint: it bundles the <Tooltip content="Amazon Machine Image — a disk snapshot containing the OS and preinstalled software, used as a template to create instances">AMI</Tooltip>, instance type, key pair, security group, user data, IAM role, and many other settings. Its strength is **versioning** — you store multiple versions and point ASG at a specific one, which is very handy for rolling updates.
+A **Launch Template** is the modern instance blueprint: it bundles the AMI, instance type, key pair, security group, user data, IAM role, and many other settings. Its strength is **versioning** — you store multiple versions and point ASG at a specific one, which is very handy for rolling updates.
 
 A **Launch Configuration** is the older generation: immutable (to change anything you must create a new one), no versioning, and no support for newer features. AWS has stopped developing it.
 
@@ -57,7 +57,7 @@ A **Launch Configuration** is the older generation: immutable (to change anythin
 
 The rule for the exam is blunt: if a question lets you choose, almost always choose the **Launch Template**.
 
-So do the instances in an ASG have to be identical? At the base-configuration level, yes: every instance is born from the same launch template, so they share the same AMI, the same application, the same security group, and the same IAM role. What does not have to be uniform is the instance type and the purchase option — with a Mixed Instances Policy (see Section 5.4), one ASG can mix multiple machine types and both Spot and On-Demand within the same group. The guiding principle is that the instances must be <Tooltip content="Any machine plays the same role and can be replaced at any time without affecting the system">interchangeable</Tooltip>, because ASG and the load balancer treat them as one functionally uniform pool. The practical consequence: do not cram different roles — say a web server and a background worker — into the same ASG; each role should have its own.
+So do the instances in an ASG have to be identical? At the base-configuration level, yes: every instance is born from the same launch template, so they share the same AMI, the same application, the same security group, and the same IAM role. What does not have to be uniform is the instance type and the purchase option — with a Mixed Instances Policy (see Section 5.4), one ASG can mix multiple machine types and both Spot and On-Demand within the same group. The guiding principle is that the instances must be interchangeable, because ASG and the load balancer treat them as one functionally uniform pool. The practical consequence: do not cram different roles — say a web server and a background worker — into the same ASG; each role should have its own.
 
 ### 2.2. Min, Desired, and Max Capacity
 
@@ -103,7 +103,7 @@ The **health check grace period** (300 seconds by default) is the window during 
 
 ### 3.3. Self-Replacement and Load Balancer Integration
 
-When an instance is marked unhealthy, ASG terminates it and launches a replacement from the launch template — entirely automatically. At the same time, ASG manages the registration cycle with the load balancer: a new instance is automatically registered into the <Tooltip content="Target Group — the group of targets a load balancer distributes requests to, with its own health check configuration">Target Group</Tooltip> to start receiving traffic, and removed when it is terminated.
+When an instance is marked unhealthy, ASG terminates it and launches a replacement from the launch template — entirely automatically. At the same time, ASG manages the registration cycle with the load balancer: a new instance is automatically registered into the Target Group to start receiving traffic, and removed when it is terminated.
 
 On removal, ASG respects **connection draining** (newer name: deregistration delay): the load balancer stops sending new requests to the instance about to be removed, but lets in-flight requests finish over a grace window, avoiding a mid-request cutoff that would ruin the user experience.
 
@@ -167,7 +167,7 @@ Predictive scaling uses machine learning to learn past load patterns (by day, by
 
 ### 4.5. Scaling on a Custom Metric: the SQS Queue Example
 
-A situation that comes up constantly on the exam is a worker tier processing <Tooltip content="Simple Queue Service — AWS's message queue service, used to decouple producers and consumers">SQS</Tooltip>: EC2 instances pull messages off a queue and process them. Measuring CPU here is meaningless, because what you actually need to track is the queue's length.
+A situation that comes up constantly on the exam is a worker tier processing SQS: EC2 instances pull messages off a queue and process them. Measuring CPU here is meaningless, because what you actually need to track is the queue's length.
 
 The standard approach is to scale on **backlog per instance** — the number of waiting messages divided by the current instance count. You compute this value, push it to CloudWatch as a custom metric, then set a target tracking policy that follows it (for example, keep each instance at no more than 100 backlogged messages). When the backlog rises, ASG adds workers; when the queue drains, ASG removes them. This approach is tightly bound to the decoupled architecture that the SAA exam loves to ask about. SQS queues are dissected more thoroughly in [SQS Deep Dive](/en/posts/sqs-deep-dive).
 
@@ -214,7 +214,7 @@ When you update the launch template to a new version (for example an AMI with a 
 
 ### 5.4. Mixed Instances Policy: Mixing Spot and On-Demand
 
-An ASG does not have to use a single instance type or a single purchase option. A **mixed instances policy** lets one ASG combine multiple instance types and mix <Tooltip content="On-Demand — pay per time used, no commitment, stable but the most expensive">On-Demand</Tooltip> with <Tooltip content="Spot — uses spare EC2 capacity at up to 90% off, but can be reclaimed by AWS when needed">Spot</Tooltip>. You set a base portion running On-Demand for stability and use Spot for the rest to cut costs.
+An ASG does not have to use a single instance type or a single purchase option. A **mixed instances policy** lets one ASG combine multiple instance types and mix On-Demand with Spot. You set a base portion running On-Demand for stability and use Spot for the rest to cut costs.
 
 How ASG picks Spot is governed by the allocation strategy: **capacity-optimized** draws from the pool with the most available capacity to minimize reclamation (recommended for interruption-sensitive workloads), **price-capacity-optimized** balances price against stability, and **lowest-price** prioritizes the cheapest. This is a powerful cost-optimization tool and a frequent exam topic; the EC2 purchase options are covered in more depth in [AWS EC2 Instance Purchasing Options](/en/posts/aws-ec2-instance-purchasing-options).
 

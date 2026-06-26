@@ -18,17 +18,17 @@ Bạn chỉ có khoảng 90 giây mỗi câu, nên việc nhận diện phải g
 
 ## 1. Amazon RDS — Cơ sở dữ liệu quan hệ được quản lý
 
-Cơ sở dữ liệu quan hệ (relational database) tổ chức dữ liệu thành các bảng có schema cố định, các bảng liên kết với nhau qua khóa ngoại, truy vấn bằng SQL và đảm bảo tính <Tooltip content="Atomicity, Consistency, Isolation, Durability — bộ tính chất đảm bảo giao dịch chạy trọn vẹn hoặc không chạy gì cả, dữ liệu luôn nhất quán">ACID</Tooltip>. RDS là dịch vụ AWS quản lý sẵn các engine quan hệ phổ biến, bạn không phải tự cài đặt và vận hành.
+Cơ sở dữ liệu quan hệ (relational database) tổ chức dữ liệu thành các bảng có schema cố định, các bảng liên kết với nhau qua khóa ngoại, truy vấn bằng SQL và đảm bảo tính ACID. RDS là dịch vụ AWS quản lý sẵn các engine quan hệ phổ biến, bạn không phải tự cài đặt và vận hành.
 
 - Quản lý 6 engine: PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, IBM DB2.
 - Chạy trên instance + EBS bạn tự chọn cấu hình, EBS **tự auto-scale** khi gần đầy.
-- <Tooltip content="Multi Availability Zone — bản sao đồng bộ ở một AZ khác, tự động failover khi primary chết, dùng cho tính sẵn sàng cao">Multi-AZ</Tooltip> cho High Available, và Read Replica cho mở rộng khả năng đọc (bản sao bất đồng bộ).
+- Multi-AZ cho High Available, và Read Replica cho mở rộng khả năng đọc (bản sao bất đồng bộ).
 - Bảo mật: IAM, Security Group, KMS, SSL/TLS; hỗ trợ IAM authentication và tích hợp Secrets Manager.
-- Sao lưu tự động + <Tooltip content="Point-in-time Restore — khôi phục dữ liệu về một thời điểm bất kỳ trong quá khứ, ở đây tối đa 35 ngày">PITR</Tooltip> tới 35 ngày, hoặc tạo snapshot thủ công cho lưu trữ dài hạn.
+- Sao lưu tự động + PITR tới 35 ngày, hoặc tạo snapshot thủ công cho lưu trữ dài hạn.
 - Bảo trì có lịch (có downtime)
 - RDS Custom cho phép truy cập OS bên dưới (Oracle & SQL Server).
 
-**Use case:** Lưu dữ liệu quan hệ, chạy SQL query, transaction — workload <Tooltip content="Online Transaction Processing — xử lý nhiều giao dịch nhỏ, đọc/ghi liên tục theo thời gian thực, ví dụ đặt hàng, thanh toán">OLTP</Tooltip> điển hình.
+**Use case:** Lưu dữ liệu quan hệ, chạy SQL query, transaction — workload OLTP điển hình.
 
 **Keyword nhận diện:** `relational`, `SQL`, `transaction`, `ACID`, `join`, hoặc tên một engine cụ thể (MySQL / PostgreSQL / Oracle / SQL Server).
 
@@ -41,7 +41,7 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 - Tương thích PostgreSQL/MySQL; hiệu năng cao hơn RDS thường (AWS công bố ~5x MySQL, ~3x PostgreSQL).
 - Storage tự nhân thành **6 bản trên 3 AZ**, tự lành (self-healing), tự auto-scale (tới 128 TB) — không cần provision dung lượng trước.
 - Cluster có **writer endpoint** và **reader endpoint** (tự cân tải qua tối đa **15 read replica**).
-- <Tooltip content="Aurora Serverless — chế độ tự tăng/giảm compute theo tải, không cần ước lượng capacity trước, phù hợp tải thất thường">Aurora Serverless</Tooltip> cho workload thất thường, không cần ước lượng capacity.
+- Aurora Serverless cho workload thất thường, không cần ước lượng capacity.
 - **Aurora Global Database**: nhân bản sang region khác với độ trễ **< 1 giây** — phục vụ người dùng toàn cầu và giải quyết bài toán disaster recovery. Tối đa 16 read replicas trong 1 region, ngoại trừ primary region (đã mất 1 slot cho master instance).
 - Database Cloning (tạo cluster mới gần như tức thì), Backtrack (tua ngược thời gian).
 
@@ -53,7 +53,7 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 
 ## 3. Amazon ElastiCache — Cache trong bộ nhớ
 
-<Tooltip content="In-memory data store — lưu dữ liệu trong RAM thay vì ổ đĩa, nên truy xuất cực nhanh nhưng đắt và kém bền vững hơn">Kho dữ liệu in-memory</Tooltip> lưu dữ liệu trong RAM thay vì ổ đĩa, nên đọc/ghi cực nhanh (sub-millisecond) nhưng dung lượng đắt và không bền vững như đĩa. ElastiCache là dịch vụ quản lý cho Redis và Memcached.
+Kho dữ liệu in-memory lưu dữ liệu trong RAM thay vì ổ đĩa, nên đọc/ghi cực nhanh (sub-millisecond) nhưng dung lượng đắt và không bền vững như đĩa. ElastiCache là dịch vụ quản lý cho Redis và Memcached.
 
 - Managed Redis / Memcached, độ trễ **sub-millisecond**.
 - Redis hỗ trợ clustering, Multi-AZ, read replica (sharding).
@@ -69,7 +69,7 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 
 ## 4. Amazon DynamoDB — NoSQL key-value serverless
 
-<Tooltip content="NoSQL — nhóm database không theo mô hình bảng quan hệ, thường hy sinh join/transaction phức tạp để đổi lấy khả năng mở rộng ngang và hiệu năng cao">NoSQL</Tooltip> dạng key-value lưu dữ liệu thành cặp khóa–giá trị, không có schema cố định, đánh đổi join phức tạp để lấy khả năng mở rộng ngang gần như vô hạn. DynamoDB là NoSQL độc quyền của AWS, hoàn toàn **serverless**.
+NoSQL dạng key-value lưu dữ liệu thành cặp khóa–giá trị, không có schema cố định, đánh đổi join phức tạp để lấy khả năng mở rộng ngang gần như vô hạn. DynamoDB là NoSQL độc quyền của AWS, hoàn toàn **serverless**.
 
 - Serverless
 - Độ trễ **single-digit millisecond** ở mọi quy mô dữ liệu.
@@ -77,7 +77,7 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 - Multi-AZ mặc định
 - Hỗ trợ transaction
 - Tách biệt đọc và ghi.
-- <Tooltip content="DynamoDB Accelerator — lớp cache trong bộ nhớ đặt trước DynamoDB, đẩy độ trễ đọc xuống mức micro-giây">DAX</Tooltip> — cache trong bộ nhớ, đẩy độ trễ đọc xuống **micro-giây**.
+- DAX — cache trong bộ nhớ, đẩy độ trễ đọc xuống **micro-giây**.
 - DynamoDB Streams (kích hoạt Lambda / Kinesis), natural CDC.
 - Global Tables (active-active đa region).
 - **TTL** tự xóa item hết hạn
@@ -92,7 +92,7 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 
 ## 5. Amazon S3 — Lưu trữ đối tượng (object storage)
 
-<Tooltip content="Object storage — lưu mỗi file như một đối tượng gồm dữ liệu + metadata, định danh bằng key và truy cập qua API/HTTP, khác với block storage hay file storage">Object storage</Tooltip> lưu mỗi file như một "đối tượng" (dữ liệu + metadata) định danh bằng key, truy cập qua API/HTTP. S3 mở rộng gần như vô hạn.
+Object storage lưu mỗi file như một "đối tượng" (dữ liệu + metadata) định danh bằng key, truy cập qua API/HTTP. S3 mở rộng gần như vô hạn.
 
 - Kho key/value cho object (khái niệm folder chỉ là visualize)
 - Độ bền cao **11 số 9** (99.999999999%)
@@ -114,7 +114,7 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 
 ## 6. Amazon DocumentDB — Cơ sở dữ liệu document (tương thích MongoDB)
 
-<Tooltip content="Document database — lưu dữ liệu thành các document dạng JSON linh hoạt, có thể lồng nhau và không cần schema cố định, hợp với dữ liệu bán cấu trúc">Document database</Tooltip> lưu dữ liệu thành các document dạng JSON linh hoạt (lồng nhau, không schema cố định) — hợp với dữ liệu bán cấu trúc. DocumentDB là dịch vụ quản lý **tương thích MongoDB**, với kiến trúc storage kiểu Aurora.
+Document database lưu dữ liệu thành các document dạng JSON linh hoạt (lồng nhau, không schema cố định) — hợp với dữ liệu bán cấu trúc. DocumentDB là dịch vụ quản lý **tương thích MongoDB**, với kiến trúc storage kiểu Aurora.
 
 - Tương thích MongoDB (chạy app/driver MongoDB hiện có).
 - Storage tự nhân 6 bản trên 3 AZ, auto-scale theo bước 10 GB tới 64 TB.
@@ -129,9 +129,9 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 
 ## 7. Amazon Neptune — Cơ sở dữ liệu đồ thị (graph)
 
-<Tooltip content="Graph database — lưu dữ liệu thành các node (thực thể) và edge (quan hệ), tối ưu cho việc duyệt qua dữ liệu liên kết chằng chịt, nơi bản thân quan hệ là thứ cần truy vấn nhanh">Graph database</Tooltip> lưu dữ liệu thành các **node** (thực thể) và **edge** (quan hệ), tối ưu cho việc duyệt dữ liệu liên kết chằng chịt — nơi bản thân "quan hệ" mới là thứ cần truy vấn nhanh. Neptune là graph DB được AWS quản lý.
+Graph database lưu dữ liệu thành các **node** (thực thể) và **edge** (quan hệ), tối ưu cho việc duyệt dữ liệu liên kết chằng chịt — nơi bản thân "quan hệ" mới là thứ cần truy vấn nhanh. Neptune là graph DB được AWS quản lý.
 
-- Hỗ trợ Property Graph (truy vấn bằng <Tooltip content="Gremlin / openCypher — các ngôn ngữ truy vấn đồ thị dùng để duyệt node và edge theo quan hệ">Gremlin / openCypher</Tooltip>) và RDF (truy vấn bằng SPARQL).
+- Hỗ trợ Property Graph (truy vấn bằng Gremlin / openCypher) và RDF (truy vấn bằng SPARQL).
 - Storage 6 bản trên 3 AZ, tối đa 15 read replica; HA cao.
 - Lưu tới **hàng tỷ quan hệ (relationships)**, truy vấn đồ thị với độ trễ **mili-giây**.
 - Fully managed.
@@ -144,9 +144,9 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 
 ## 8. Amazon Keyspaces — Wide-column (tương thích Cassandra)
 
-<Tooltip content="Wide-column store — tổ chức dữ liệu thành bảng có hàng và các cột động (column family), thiết kế cho throughput ghi cực lớn và mở rộng ngang">Wide-column store</Tooltip> tổ chức dữ liệu thành bảng có hàng và các cột động (column family), thiết kế cho throughput ghi cực lớn và mở rộng ngang. Keyspaces là dịch vụ quản lý **tương thích Apache Cassandra**.
+Wide-column store tổ chức dữ liệu thành bảng có hàng và các cột động (column family), thiết kế cho throughput ghi cực lớn và mở rộng ngang. Keyspaces là dịch vụ quản lý **tương thích Apache Cassandra**.
 
-- Tương thích Apache Cassandra, truy vấn bằng <Tooltip content="Cassandra Query Language — ngôn ngữ truy vấn của Cassandra, cú pháp giống SQL nhưng dành cho mô hình wide-column">CQL</Tooltip>.
+- Tương thích Apache Cassandra, truy vấn bằng CQL.
 - Serverless, auto-scaling; nhân bản 3 AZ; on-demand hoặc provisioned.
 - Độ trễ **single-digit millisecond** ở mọi quy mô, hàng nghìn request/giây.
 - PITR; fully managed (không phải tự vận hành cụm Cassandra).
@@ -159,7 +159,7 @@ Aurora cũng là database quan hệ và **tương thích API** với PostgreSQL/
 
 ## 9. Amazon Timestream — Cơ sở dữ liệu chuỗi thời gian (time-series)
 
-<Tooltip content="Time-series database — tối ưu cho dữ liệu gắn mốc thời gian (giá trị đo theo thời gian), ghi nối đuôi cực nhanh và truy vấn theo khoảng thời gian hiệu quả">Time-series database</Tooltip> tối ưu cho dữ liệu gắn mốc thời gian (giá trị đo theo thời gian) — ghi nối đuôi (append) cực nhanh, truy vấn theo khoảng thời gian và gộp mẫu (downsampling) hiệu quả. Timestream là time-series DB serverless của AWS.
+Time-series database tối ưu cho dữ liệu gắn mốc thời gian (giá trị đo theo thời gian) — ghi nối đuôi (append) cực nhanh, truy vấn theo khoảng thời gian và gộp mẫu (downsampling) hiệu quả. Timestream là time-series DB serverless của AWS.
 
 - Serverless, auto-scaling; nạp được hàng nghìn tỷ sự kiện mỗi ngày.
 - Nhanh hơn ~**1000x** và chi phí chỉ ~**1/10** so với relational database.

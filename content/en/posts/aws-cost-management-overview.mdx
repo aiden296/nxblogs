@@ -15,7 +15,7 @@ End of the month, the AWS bill arrives. The number is 40% higher than expected. 
 3. "How do I get a heads-up next time before I blow past the budget, instead of finding out at month-end?"
 4. "And most importantly: how do I pay less for the same amount of work?"
 
-Here's the interesting part: cost in the cloud is not a fixed number you receive at month-end — it's a variable you have to actively manage. The <Tooltip content="Pay for what you actually use, with no upfront commitment — use more pay more, use less pay less, turn it off and billing stops">pay-as-you-go</Tooltip> model is great for flexibility, but it also means a single misconfiguration can quietly burn money until the bill lands.
+Here's the interesting part: cost in the cloud is not a fixed number you receive at month-end — it's a variable you have to actively manage. The pay-as-you-go model is great for flexibility, but it also means a single misconfiguration can quietly burn money until the bill lands.
 
 To solve this, AWS doesn't give you **one** tool — it gives you a whole suite of services, each tackling a different stage of the cost management lifecycle. And this is the SAA exam's favorite trap: it presents a scenario ("get an alert when cost exceeds X", "the most detailed report pushed into a data warehouse", "automatically detect abnormal spend") and asks which service to use — while several of the other options all "sound right" too.
 
@@ -51,7 +51,7 @@ This is the group that answers "where did the money go". All three tools below l
 
 Core capabilities:
 
-- **Filter & group by:** view cost by service, by region, by linked account, by <Tooltip content="The type of charge — e.g. Usage, Tax, Credit, Refund, RI Fee — which helps separate real usage from tax and promotions">charge type</Tooltip>, or by cost allocation tag. For example: "EC2 cost in us-east-1 for the production account, grouped by the `Environment` tag".
+- **Filter & group by:** view cost by service, by region, by linked account, by charge type, or by cost allocation tag. For example: "EC2 cost in us-east-1 for the production account, grouped by the `Environment` tag".
 - **Granularity:** by month, day, or hourly/resource-level (hourly and per-resource granularity must be enabled separately, carries an extra fee, and is limited to a 14-day window).
 - **Forecast:** uses history to predict upcoming cost (up to 12 months ahead).
 - **Built-in optimization reports:** Cost Explorer also ships with reports on the utilization and coverage of Reserved Instances and Savings Plans, along with purchase recommendations and rightsizing suggestions (adjusting EC2 sizes to fit actual demand).
@@ -73,8 +73,8 @@ Although they draw on the same underlying data, Cost Explorer is for turning tha
 Characteristics:
 
 - Each row (line item) describes usage at a very fine grain — down to the hour, down to the resource — with full tag, pricing, credit, and RI/Savings Plans information.
-- CUR is delivered to an Amazon S3 bucket you specify, in CSV or <Tooltip content="A columnar storage format that compresses well and queries much faster than CSV when used with analytics tools like Athena or Redshift">Parquet</Tooltip> format, and is updated up to several times a day.
-- From S3, you wire CUR into the analytics ecosystem: query it with <Tooltip content="A service that runs SQL queries directly against data sitting in S3 — no servers to manage, you pay per amount of data scanned">Amazon Athena</Tooltip>, load it into Amazon Redshift (a data warehouse), or build dashboards with Amazon QuickSight.
+- CUR is delivered to an Amazon S3 bucket you specify, in CSV or Parquet format, and is updated up to several times a day.
+- From S3, you wire CUR into the analytics ecosystem: query it with Amazon Athena, load it into Amazon Redshift (a data warehouse), or build dashboards with Amazon QuickSight.
 - **CUR 2.0** is the newer dataset (delivered via AWS Data Exports), with a more consistent schema that's easier to work with for analysis.
 
 When do you use CUR instead of Cost Explorer? When you need deep, highly customized, or automated analysis — for example, a finance team that wants to build its own chargeback reports, or you want to join cost with internal data. The mnemonic: if the question says "the most detailed cost report, pushed into S3, queryable with Athena" → the answer is almost always **CUR**.
@@ -100,9 +100,9 @@ There are four budget types:
 - **RI utilization/coverage budget** — tracks the utilization and coverage of Reserved Instances.
 - **Savings Plans utilization/coverage budget** — the same, for Savings Plans.
 
-When a threshold is hit, Budgets sends an alert via email or via an <Tooltip content="Simple Notification Service — a pub/sub notification service that can fan out to email, SMS, Lambda, SQS queues, and more">Amazon SNS</Tooltip> topic (and from there fan out to Slack, Lambda, etc.).
+When a threshold is hit, Budgets sends an alert via email or via an Amazon SNS topic (and from there fan out to Slack, Lambda, etc.).
 
-Its signature strength is **Budget Actions**: instead of just notifying, Budgets can react automatically when a threshold is crossed — for example attaching a restrictive IAM policy / <Tooltip content="Service Control Policy — an AWS Organizations-level policy that caps the maximum permissions of member accounts">SCP</Tooltip> (blocking new resource creation), or stopping running EC2/RDS instances. This is the mechanism to actually stop overspending, not just learn about it.
+Its signature strength is **Budget Actions**: instead of just notifying, Budgets can react automatically when a threshold is crossed — for example attaching a restrictive IAM policy / SCP (blocking new resource creation), or stopping running EC2/RDS instances. This is the mechanism to actually stop overspending, not just learn about it.
 
 Budgets data is refreshed up to several times a day (not real-time).
 
@@ -174,7 +174,7 @@ Consolidated Billing is free. This is one reason multi-account architectures alm
 
 ### 4.4. AWS Billing Conductor — custom billing for resellers/MSPs
 
-**AWS Billing Conductor** is for a specialized situation: you're an <Tooltip content="Managed Service Provider — a company that operates AWS infrastructure on behalf of customers and rebills them for it">MSP</Tooltip>, a reseller, or an enterprise that needs to recompute/redistribute cost at custom rates for each business unit. You create billing groups and apply your own pricing rules (markup, discount, and so on) to produce pro-forma billing data that reflects exactly how you want to charge back to customers/departments, instead of the raw AWS rate. It's a niche service; for SAA you just need to recognize "needs custom rates / chargeback for a reseller's customers" → Billing Conductor.
+**AWS Billing Conductor** is for a specialized situation: you're an MSP, a reseller, or an enterprise that needs to recompute/redistribute cost at custom rates for each business unit. You create billing groups and apply your own pricing rules (markup, discount, and so on) to produce pro-forma billing data that reflects exactly how you want to charge back to customers/departments, instead of the raw AWS rate. It's a niche service; for SAA you just need to recognize "needs custom rates / chargeback for a reseller's customers" → Billing Conductor.
 
 ---
 

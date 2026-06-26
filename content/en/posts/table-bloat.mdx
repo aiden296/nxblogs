@@ -53,11 +53,11 @@ The rule: Databases operate on Pages. To get 1 item (Tuple), you have to lift th
 This is the most interesting part. When we execute SQL commands, Postgres behaves differently from what you might intuitively expect:
 
 * **INSERT:** The new Tuple is written to a Page that has free space.
-* **DELETE:** Postgres **does not immediately delete** the data from disk. It only marks the tuple as "dead" (<Tooltip content="unavailable">Dead Tuple</Tooltip>).
+* **DELETE:** Postgres **does not immediately delete** the data from disk. It only marks the tuple as "dead" (Dead Tuple).
 * **UPDATE:** Is actually a combination of `DELETE` (old row) + `INSERT` (new row). The old row becomes a Dead Tuple, and the new row is written to a different location.
 
 **Why is it designed this way?**
-This is the mechanism of the <Tooltip content="Multi-Version Concurrency Control">MVCC</Tooltip> system. Keeping the "corpses" of old data allows Postgres to manage transactions, support rollbacks, and ensure consistency when multiple connections read/write simultaneously (read consistency) without requiring overly strict locks.
+This is the mechanism of the MVCC system. Keeping the "corpses" of old data allows Postgres to manage transactions, support rollbacks, and ensure consistency when multiple connections read/write simultaneously (read consistency) without requiring overly strict locks.
 
 **Consequence:** Dead Tuples accumulate over time.
 
@@ -67,8 +67,8 @@ This is the mechanism of the <Tooltip content="Multi-Version Concurrency Control
 
 **Cleanup mechanisms:**
 
-* <Tooltip content="PostgreSQL maintenance command that reclaims storage occupied by dead tuples">VACUUM</Tooltip>: Scans and marks the space of Dead Tuples as "reusable" for new data. However, it does **not** return the space to the operating system (OS). The physical file size of the table does not shrink.
-* <Tooltip content="Background daemon that automatically triggers VACUUM based on table activity">Autovacuum</Tooltip>: A background daemon that automatically triggers VACUUM.
+* VACUUM: Scans and marks the space of Dead Tuples as "reusable" for new data. However, it does **not** return the space to the operating system (OS). The physical file size of the table does not shrink.
+* Autovacuum: A background daemon that automatically triggers VACUUM.
 
 <ExcalidrawDiagram src="/database-fragmentation.excalidraw" alt="Fragmentation: pages with few live tuples after VACUUM still cost much I/O" />
 
@@ -193,7 +193,7 @@ ALTER TABLE my_table SET (fillfactor = 90);
 CREATE INDEX idx_name ON my_table(column_name) WITH (fillfactor = 90);
 ```
 
-Adjusting <Tooltip content="Per-table setting that controls how full each page is packed, leaving free space for future UPDATEs">`fillfactor`</Tooltip> helps reduce page splits in indexes and tables, thereby reducing bloat from the start. For tables with frequent UPDATEs, a fillfactor of 80-90 is reasonable.
+Adjusting `fillfactor` helps reduce page splits in indexes and tables, thereby reducing bloat from the start. For tables with frequent UPDATEs, a fillfactor of 80-90 is reasonable.
 
 ### Method 3: Reclaim Unused Pages (Zero-downtime Restructuring)
 
@@ -220,7 +220,7 @@ ORDER BY pg_relation_size(indexrelid) DESC;
 
 ### Method 5: Column Alignment (Memory Layout)
 
-A very "low-level" but interesting detail: column order affects storage size due to the <Tooltip content="padding bytes inserted between fields to align memory on CPU word boundaries">Data Alignment Padding</Tooltip> mechanism of the CPU/OS.
+A very "low-level" but interesting detail: column order affects storage size due to the Data Alignment Padding mechanism of the CPU/OS.
 **Principle:** Arrange columns by data type size from largest to smallest (e.g., `int8` -> `int4` -> `bool`). This minimizes padding bytes inserted between fields for memory alignment, making each row significantly more compact.
 
 ### Method 6: Data Retention Policy

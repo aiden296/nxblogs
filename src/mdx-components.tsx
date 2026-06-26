@@ -7,7 +7,6 @@ import { Tags } from '@/components/tags'
 import { Avatar } from '@/components/avatar'
 import { RedisSortedSetSimulator } from '@/components/redis-sorted-set-simulator'
 import { ExcalidrawDiagram } from '@/components/excalidraw-diagram'
-import { Tooltip } from '@/components/mdx-tooltip'
 
 function Figure({ alt, ...props }: ComponentProps<typeof ImageZoom>) {
   return (
@@ -44,6 +43,5 @@ export function useMDXComponents() {
     Avatar: Avatar,
     RedisSortedSetSimulator: RedisSortedSetSimulator,
     ExcalidrawDiagram: ExcalidrawDiagram,
-    Tooltip: Tooltip,
   }
 }

@@ -33,9 +33,9 @@ As a backend engineer, you might go your whole career barely touching them — u
 
 Before talking about storage, you need to understand the two kinds of workload a database might have to serve. They differ so much that it's nearly impossible to optimize for both at once.
 
-<Tooltip content="Online Transaction Processing">OLTP</Tooltip> is the workload of everyday operational apps: create an order, update a user's profile, decrement inventory. Its hallmark is **many small transactions, each touching few rows but needing nearly all the columns of those rows** — for example, "get all the info for the user with `id = 42`" or "write a new order." PostgreSQL, MySQL, and SQL Server are all OLTP databases.
+OLTP is the workload of everyday operational apps: create an order, update a user's profile, decrement inventory. Its hallmark is **many small transactions, each touching few rows but needing nearly all the columns of those rows** — for example, "get all the info for the user with `id = 42`" or "write a new order." PostgreSQL, MySQL, and SQL Server are all OLTP databases.
 
-<Tooltip content="Online Analytical Processing">OLAP</Tooltip> is the exact opposite: an analytical, aggregating workload. Its hallmark is **few queries, but each one scans a huge number of rows and touches only a few columns** — for example, "sum revenue by country across all 200 million orders." The number of columns read is small, but the number of rows to traverse is enormous.
+OLAP is the exact opposite: an analytical, aggregating workload. Its hallmark is **few queries, but each one scans a huge number of rows and touches only a few columns** — for example, "sum revenue by country across all 200 million orders." The number of columns read is small, but the number of rows to traverse is enormous.
 
 The table below sums up the contrast:
 
@@ -54,7 +54,7 @@ The crux is the "access pattern" row. OLTP reads **few rows × many columns**; O
 
 ## 2. Row store vs Column store — same table, two byte layouts on disk
 
-To see why layout matters, recall one physical fact: disks (SSDs included) read data in **blocks** — a <Tooltip content="The smallest unit a disk reads or writes at once, typically 4KB to a few dozen KB. Reading one byte in a block still loads the whole block">block</Tooltip> is a contiguous chunk of bytes loaded all at once. In other words: **what sits next to each other on disk gets read together**. So the question "what's stored next to what" decides performance.
+To see why layout matters, recall one physical fact: disks (SSDs included) read data in **blocks** — a block is a contiguous chunk of bytes loaded all at once. In other words: **what sits next to each other on disk gets read together**. So the question "what's stored next to what" decides performance.
 
 Take a tiny `orders` table, 3 rows, 4 columns:
 
@@ -100,7 +100,7 @@ Even before general-purpose compression, columnar uses **lightweight encodings**
 />
 
 - **Dictionary encoding** — replace each value with a small integer pointing into a "dictionary" of distinct values. The `country` column has only ~200 distinct values, so instead of storing the string "US" a million times, you store the number `0` a million times. Great for low-cardinality columns (few distinct values).
-- <Tooltip content="Run-Length Encoding">RLE</Tooltip> — replace a run of identical adjacent values with a (value, count) pair. `A A A A` becomes `(A, 4)`. Great when data is sorted or has long repeated runs.
+- RLE — replace a run of identical adjacent values with a (value, count) pair. `A A A A` becomes `(A, 4)`. Great when data is sorted or has long repeated runs.
 - **Delta encoding** — store only the difference between consecutive values instead of the absolute value. `1000, 1002, 1005, 1009` becomes base `1000` plus deltas `0, 2, 3, 4`. Great for increasing ids or timestamps.
 - **Bit-packing** — if a column (after dictionary encoding) only holds values in the range `0..3`, each value needs just 2 bits instead of 32 or 64. Packed tight to the bit, no waste.
 
@@ -110,7 +110,7 @@ The real-world result: a column store typically compresses **5–10×**, while a
 
 **Vectorized execution** is the technique of processing data in column-shaped batches rather than one row at a time, letting the CPU apply the same operation to many values at once.
 
-A column in a columnar store is a contiguous array of same-type values — say, a `double` array for the `amount` column. Modern CPUs process arrays like this extremely fast thanks to <Tooltip content="Single Instruction, Multiple Data — one CPU instruction operating on multiple values at once">SIMD</Tooltip>: a single add instruction can add 8 `double`s in one beat. Contiguous data is also friendly to the <Tooltip content="High-speed memory right inside the CPU; contiguous data raises the cache hit rate">CPU cache</Tooltip>, cutting trips out to RAM.
+A column in a columnar store is a contiguous array of same-type values — say, a `double` array for the `amount` column. Modern CPUs process arrays like this extremely fast thanks to SIMD: a single add instruction can add 8 `double`s in one beat. Contiguous data is also friendly to the CPU cache, cutting trips out to RAM.
 
 In a row store it's the opposite: each row's `amount` value sits wedged between `country`, `email`, `name`... The CPU has to hop around memory, cache-missing constantly, and can't vectorize cleanly. For the same `SUM`, columnar runs several times faster purely because of how the data sits in memory.
 

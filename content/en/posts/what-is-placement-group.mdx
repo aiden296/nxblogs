@@ -18,7 +18,7 @@ Today, let's explore what Placement Groups are and how to use them to optimize p
 
 ## 1. What is a Placement Group?
 
-Simply put, a <Tooltip content="PG">Placement Group</Tooltip> is a logical configuration that allows you to "hint" to AWS about how to arrange your EC2 Instances on physical hardware.
+Simply put, a Placement Group is a logical configuration that allows you to "hint" to AWS about how to arrange your EC2 Instances on physical hardware.
 
 When you launch a group of virtual servers, AWS places them randomly by default to optimize for AWS. However, with PG, you can request AWS to:
 
@@ -41,7 +41,7 @@ This is the "strength in unity" strategy.
   - Extremely high throughput between nodes (up to 10-100 Gbps).
 
 - **Disadvantages:** "All or nothing." Since they are clustered together, if that rack experiences a power or network failure, your entire cluster of instances could go down at once.
-- **Use Case:** Suitable for High Performance Computing (<Tooltip content="High Performance Computing — workloads that require massive parallel processing power">HPC</Tooltip>) applications, graphics rendering, or big data processing applications that require continuous and instantaneous network communication.
+- **Use Case:** Suitable for High Performance Computing (HPC) applications, graphics rendering, or big data processing applications that require continuous and instantaneous network communication.
 
 ### B. Spread Placement Group
 
@@ -66,7 +66,7 @@ This is the "hybrid child," the perfect balance between Cluster and Spread desig
 - **Advantages:**
   - Allows scaling to a much larger number of instances than Spread (since each partition can hold many instances).
   - Still ensures fault isolation: if Partition 1's rack fails, Partition 2 continues running normally.
-- **Special feature:** Instances can access **Metadata** to know exactly which Partition they are in, enabling applications to self-coordinate data placement (<Tooltip content="Application is aware of the physical location of nodes to optimize data placement and replication">Topology-aware</Tooltip>).
+- **Special feature:** Instances can access **Metadata** to know exactly which Partition they are in, enabling applications to self-coordinate data placement (Topology-aware).
 
 - **Use Case:** Large-scale distributed data systems (Big Data) such as **Hadoop HDFS, Cassandra, Kafka**. (For example: Kafka can replicate data to a partition on a different rack to ensure safety).
 

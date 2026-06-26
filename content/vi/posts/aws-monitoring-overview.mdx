@@ -51,9 +51,7 @@ CloudWatch là một "chiếc ô" lớn gồm nhiều thành phần con. Ta đi 
 **Metric** là một chuỗi các điểm dữ liệu (data point) theo thời gian — ví dụ CPU utilization của một EC2 instance đo mỗi phút. Vài khái niệm cần nắm:
 
 - **Namespace** là "thư mục" gom nhóm các metric của một dịch vụ. Metric do AWS sinh ra nằm trong namespace dạng `AWS/EC2`, `AWS/RDS`, `AWS/Lambda`...
-- <Tooltip content="Cặp name/value để định danh một metric, ví dụ InstanceId=i-1234. Giúp phân biệt metric CPU của instance này với instance khác">
-    Dimension
-  </Tooltip>
+- Dimension
   là một thuộc tính của metric (instance id, environment...) giúp bạn lọc tới đúng resource. Một metric có tối đa 30
   dimension.
 - Mỗi điểm dữ liệu đều gắn một timestamp — về bản chất metric là dữ liệu chuỗi thời gian.
@@ -96,7 +94,7 @@ Mặc định, muốn lấy metric ra khỏi CloudWatch bạn phải kéo (pull)
 
 Bạn có thể lọc để chỉ stream một tập con metric thay vì toàn bộ, giúp tiết kiệm chi phí.
 
-**Use case:** đưa metric vào kho phân tích tập trung (data lake trên S3, hoặc công cụ <Tooltip content="Application Performance Monitoring — giám sát hiệu năng ứng dụng, ví dụ Datadog, New Relic">APM</Tooltip> bên thứ ba) theo thời gian thực, thay vì phải gọi API định kỳ.
+**Use case:** đưa metric vào kho phân tích tập trung (data lake trên S3, hoặc công cụ APM bên thứ ba) theo thời gian thực, thay vì phải gọi API định kỳ.
 
 Keyword nhận diện: "stream metrics in near-real-time to a data lake / third-party tool".
 
@@ -184,7 +182,7 @@ Hai nhóm tính năng cao cấp hơn, nhưng vẫn nằm trong tầm SAA:
 
 ## 3. Amazon EventBridge — hệ thần kinh phản ứng theo sự kiện
 
-**Amazon EventBridge** (tên cũ là CloudWatch Events) là một <Tooltip content="Một bus trung tâm nhận sự kiện từ nhiều nguồn rồi định tuyến tới nhiều đích, không cần các bên biết về nhau">serverless event bus</Tooltip> — bạn có thể hình dung nó như một "tổng đài" nhận sự kiện từ khắp nơi rồi định tuyến tới đúng nơi cần xử lý. Đây là dịch vụ khác biệt nhất trong nhóm: nó không đo lường hay ghi lại, mà giúp hệ thống **phản ứng**.
+**Amazon EventBridge** (tên cũ là CloudWatch Events) là một serverless event bus — bạn có thể hình dung nó như một "tổng đài" nhận sự kiện từ khắp nơi rồi định tuyến tới đúng nơi cần xử lý. Đây là dịch vụ khác biệt nhất trong nhóm: nó không đo lường hay ghi lại, mà giúp hệ thống **phản ứng**.
 
 Các thành phần chính:
 

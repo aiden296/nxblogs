@@ -8,12 +8,12 @@ enableComment: true
 
 # AWS VPC: Understanding VPC Through the Lens of a Packet
 
-You've just deployed an e-commerce API on AWS. Following best practices, the EC2 instance sits in a **private subnet** — there's no direct path from the internet in. An <Tooltip content="ALB — a load balancer that operates at the application layer">Application Load Balancer</Tooltip> sits in the **public subnet**, receives requests from clients, and forwards them to EC2.
+You've just deployed an e-commerce API on AWS. Following best practices, the EC2 instance sits in a **private subnet** — there's no direct path from the internet in. An Application Load Balancer sits in the **public subnet**, receives requests from clients, and forwards them to EC2.
 
 Within a single request, 3 network journeys happen inside the VPC:
 
 1. **Client → EC2**: a request from the internet passes through IGW, ALB in the public subnet, then reaches EC2 in the private subnet
-2. **EC2 → S3**: EC2 needs to fetch a file from S3 — routed through a <Tooltip content="An internal VPC shortcut to AWS services that bypasses the internet and avoids NAT Gateway costs">VPC Gateway Endpoint</Tooltip>, never touching the internet
+2. **EC2 → S3**: EC2 needs to fetch a file from S3 — routed through a VPC Gateway Endpoint, never touching the internet
 3. **EC2 → Stripe**: EC2 calls an external payment API — routed through NAT Gateway then out to the internet
 
 This article follows all 3 journeys, introducing each VPC component as the packet passes through it.
@@ -41,15 +41,15 @@ Concrete assumptions:
 
 ## 1. VPC — The City
 
-Before the packet touches any component, it needs to know where it's going. <Tooltip content="Virtual Private Cloud — an isolated virtual network you define within AWS">VPC</Tooltip> is that boundary.
+Before the packet touches any component, it needs to know where it's going. VPC is that boundary.
 
 A VPC is an **isolated IP address space** that you define within AWS. When creating a VPC, you choose a [CIDR](/en/posts/what-is-cidr) block — for example `10.0.0.0/16` — giving you 65,536 IP addresses to work with. A VPC is scoped at the **Region** level, meaning it spans all Availability Zones within that Region.
 
-Think of a VPC as a **private city**: you're given a plot of land (CIDR block), on which you design streets (subnets), install gates (gateways), and set up security systems (<Tooltip content="Stateful firewall at the ENI level that controls inbound/outbound traffic by rules">Security Groups</Tooltip>).
+Think of a VPC as a **private city**: you're given a plot of land (CIDR block), on which you design streets (subnets), install gates (gateways), and set up security systems (Security Groups).
 
 The VPC itself **doesn't process packets**. It's just a logical container — all actual processing happens at the components inside. But without a VPC, nothing exists.
 
-> An interesting detail: when [EC2](/en/posts/learn-ec2-part-1) boots up, the operating system receives its IP through <Tooltip content="Dynamic Host Configuration Protocol — a protocol that automatically assigns network configuration to devices">DHCP</Tooltip>. But in reality, the IP was already picked by AWS **before the OS boots** — when creating the ENI, the control plane selects an IP from the subnet and saves it to the database. DHCP is merely the channel that **delivers** that IP to the OS, not the one that assigns it.
+> An interesting detail: when [EC2](/en/posts/learn-ec2-part-1) boots up, the operating system receives its IP through DHCP. But in reality, the IP was already picked by AWS **before the OS boots** — when creating the ENI, the control plane selects an IP from the subnet and saves it to the database. DHCP is merely the channel that **delivers** that IP to the OS, not the one that assigns it.
 
 ---
 
@@ -62,7 +62,7 @@ In our architecture:
 - `10.0.1.0/24` → **Public Subnet** in AZ `ap-southeast-1a` — where ALB and NAT Gateway live
 - `10.0.2.0/24` → **Private Subnet** in AZ `ap-southeast-1a` — where EC2 lives
 
-An important point: **a subnet is not inherently public or private**. That characteristic is entirely determined by the <Tooltip content="A configuration table of destination → target rules that decides where a packet goes next">route table</Tooltip> attached to it:
+An important point: **a subnet is not inherently public or private**. That characteristic is entirely determined by the route table attached to it:
 
 - Route table has `0.0.0.0/0 → igw-xxx` → **public** subnet (traffic exits to internet via IGW)
 - Route table has `0.0.0.0/0 → nat-xxx` → **private** subnet (traffic exits to internet via NAT Gateway)
@@ -90,7 +90,7 @@ Now let's follow the first journey: a client in Hanoi sends an HTTPS request to 
 
 ### 3. Internet Gateway — The City Gate
 
-The packet from client `1.2.3.4` with destination `52.10.10.10` (ALB's public IP) has arrived at the AWS edge network. The first component it encounters is the <Tooltip content="IGW — the gateway connecting VPC to the internet">Internet Gateway</Tooltip>.
+The packet from client `1.2.3.4` with destination `52.10.10.10` (ALB's public IP) has arrived at the AWS edge network. The first component it encounters is the Internet Gateway.
 
 IGW does exactly **2 things**, nothing more:
 
@@ -219,11 +219,11 @@ EC2 finishes processing the request, now it needs to call `api.stripe.com` to ch
 
 ### 9. NAT Gateway — The Internet Exit for Private Subnets
 
-<Tooltip content="Network Address Translation Gateway — managed AWS service that allows private subnet resources to initiate outbound internet traffic">NAT Gateway</Tooltip> sits in the **public subnet**, has an Elastic IP, and allows resources in private subnets to **send** requests to the internet but **blocks** the internet from sending requests in.
+NAT Gateway sits in the **public subnet**, has an Elastic IP, and allows resources in private subnets to **send** requests to the internet but **blocks** the internet from sending requests in.
 
 Why is NAT Gateway needed? Every service in a private subnet only has a **private IP** — no Elastic IP. The internet has no route to private IPs, so these services **cannot communicate with the internet directly**. NAT Gateway, sitting in the public subnet with an EIP, acts as a **representative** for private subnet services: it receives their packets, replaces the source IP with its own EIP, and sends them out to the internet on their behalf.
 
-But a NAT Gateway has only one EIP — how can it represent dozens or hundreds of services simultaneously? The answer lies in **ports**. NAT Gateway uses a technique called <Tooltip content="Port Address Translation — a technique that maps multiple private connections to one public IP by assigning each connection a unique source port">PAT</Tooltip>: each connection from the private subnet is assigned a **unique port** on the EIP. For example, EC2 `10.0.2.50` opens a connection to Stripe → NAT Gateway assigns port `40001`, the same EC2 opens another connection to a logging service → assigned port `40002`. When a response comes back to the EIP on port `40001`, NAT Gateway checks its mapping table, knows this port belongs to `10.0.2.50`'s Stripe connection, and forwards the response correctly.
+But a NAT Gateway has only one EIP — how can it represent dozens or hundreds of services simultaneously? The answer lies in **ports**. NAT Gateway uses a technique called PAT: each connection from the private subnet is assigned a **unique port** on the EIP. For example, EC2 `10.0.2.50` opens a connection to Stripe → NAT Gateway assigns port `40001`, the same EC2 opens another connection to a logging service → assigned port `40002`. When a response comes back to the EIP on port `40001`, NAT Gateway checks its mapping table, knows this port belongs to `10.0.2.50`'s Stripe connection, and forwards the response correctly.
 
 Port assignment is **per connection** (tracked by 5-tuple: source IP, source port, destination IP, destination port, protocol), not per EC2 instance. A single EC2 can consume thousands of ports if it has many concurrent connections. This is why NAT Gateway has a limit of around 55,000 simultaneous connections per unique destination — approximately the number of ephemeral ports available on a single EIP.
 

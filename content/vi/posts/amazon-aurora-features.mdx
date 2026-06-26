@@ -25,7 +25,7 @@ Aurora không lưu data ở một chỗ. Khi bạn khởi tạo Aurora, nó tự
 - Chỉ cần **4/6 copies** ghi thành công → write được coi là thành công
 - Chỉ cần **3/6 copies** đọc được → read hoạt động bình thường
 
-Đây là mô hình <Tooltip content="Cơ chế đồng thuận yêu cầu một số lượng tối thiểu các bản sao phải đồng ý trước khi một thao tác được coi là thành công.">quorum</Tooltip> — nghĩa là ngay cả khi mất 1 AZ hoàn toàn (2 copies), Aurora vẫn hoạt động bình thường cho cả read lẫn write.
+Đây là mô hình quorum — nghĩa là ngay cả khi mất 1 AZ hoàn toàn (2 copies), Aurora vẫn hoạt động bình thường cho cả read lẫn write.
 
 Lưu ý rằng quá trình đồng bộ dữ liệu giữa các node dữ liệu trong storage layer là synchronize, nghĩa là sẽ bao gồm latency của quá trình sync trong user request. Nhưng latency sẽ không đáng kể vì nhiều yếu tố như các data nodes cùng region, sử dụng backbone network, kỹ thuật sync được tối ưu hơn, ...
 
@@ -117,7 +117,7 @@ Với Aurora thông thường (Provisioned), bạn phải chọn trước instan
 
 Cách hoạt động:
 
-- Compute được đo bằng <Tooltip content="Aurora Capacity Units — đơn vị đo dung lượng compute của Aurora Serverless.">ACU</Tooltip>, mỗi ACU ≈ 2GB RAM
+- Compute được đo bằng ACU, mỗi ACU ≈ 2GB RAM
 - Bạn chỉ cần set **min ACU** và **max ACU**, Aurora tự điều chỉnh
 - **Pay-per-second** — chỉ trả tiền cho compute thực sự sử dụng
 - Có thể **scale to zero** khi không có connection nào (v1)
@@ -146,7 +146,7 @@ Aurora cung cấp nhiều cách để bảo vệ dữ liệu, và một vài tí
 
 - Aurora **tự động backup liên tục** lên S3 — không ảnh hưởng đến performance
 - Retention period: **1–35 ngày**
-- <Tooltip content="Point-in-Time Recovery — khả năng khôi phục database về một thời điểm cụ thể trong quá khứ.">PITR</Tooltip>: restore database về **bất kỳ giây nào** trong khoảng retention. Aurora tạo một cluster mới từ backup.
+- PITR: restore database về **bất kỳ giây nào** trong khoảng retention. Aurora tạo một cluster mới từ backup.
 - Đặc biệt là không thể disable tính năng này trên Aurora.
 
 ### Manual Snapshots
@@ -251,7 +251,7 @@ Tất cả các tính năng trên đều hoạt động trong **một region**. 
 - **1 Primary Region** (read/write) — đây là region chính xử lý toàn bộ write
 - **Lên tới 5 secondary regions** (read-only), replication lag **dưới 1 giây**
 - Mỗi secondary region có thể có tới **16 Read Replicas** (Đối với primary region chỉ tối đa 15 Read Replicas vì đã mất 1 slot cho master instance)
-- Khi cần promote secondary region (disaster recovery), <Tooltip content="Recovery Time Objective — thời gian mục tiêu tối đa để khôi phục hệ thống sau sự cố.">RTO</Tooltip> dưới 1 phút
+- Khi cần promote secondary region (disaster recovery), RTO dưới 1 phút
 
 ```
                     ┌──────────────────────┐

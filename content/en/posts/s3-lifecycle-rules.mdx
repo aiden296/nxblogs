@@ -20,7 +20,7 @@ If you're not familiar with the different S3 storage classes and their trade-off
 
 ## How Lifecycle Rules Work
 
-A <Tooltip content="Bucket-level config that automatically transitions or expires objects based on age and filters">lifecycle rule</Tooltip> consists of:
+A lifecycle rule consists of:
 
 - **Filter**: which objects the rule applies to (by prefix, tag, or both)
 - **Transitions**: when to move objects to a cheaper storage class
@@ -35,7 +35,7 @@ Key constraints:
 
 <ExcalidrawDiagram src="/s3-storage-class-transitions.excalidraw" alt="Objects transition only one way down to cheaper storage classes" />
 
-> If you need objects to move **both directions** automatically (down when idle, back up when accessed), use <Tooltip content="Storage class that auto-moves objects between tiers based on access patterns, no lifecycle rules needed">Intelligent-Tiering</Tooltip> instead of lifecycle rules. Lifecycle rules are best when your access pattern is predictable and decays over time.
+> If you need objects to move **both directions** automatically (down when idle, back up when accessed), use Intelligent-Tiering instead of lifecycle rules. Lifecycle rules are best when your access pattern is predictable and decays over time.
 
 ---
 

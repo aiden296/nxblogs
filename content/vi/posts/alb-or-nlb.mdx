@@ -33,7 +33,7 @@ Hoạt động tại **Tầng ứng dụng (Layer 7)**, ALB có khả năng "soi
 ### Điểm mạnh:
 
 * **Điều hướng linh hoạt (Routing):** Có thể điều hướng dựa trên URL (Ví dụ: `/api` thì đẩy vào cụm API, còn `/images` thì đẩy về S3 hoặc Storage).
-* **Bảo mật mức ứng dụng:** Tích hợp sâu với <Tooltip content="Web Application Firewall — tường lửa ứng dụng web, chặn các tấn công ở tầng HTTP">WAF</Tooltip> để chặn các cuộc tấn công như SQL Injection hay XSS.
+* **Bảo mật mức ứng dụng:** Tích hợp sâu với WAF để chặn các cuộc tấn công như SQL Injection hay XSS.
 * **SSL/TLS Offloading:** Tự động xử lý việc giải mã chứng chỉ bảo mật, giúp giảm tải tính toán cho server backend.
 
 ### Điểm yếu:
@@ -70,13 +70,13 @@ Nhiều kỹ sư có thói quen "tiện tay" chọn ALB vì sự đa năng của
 
 ### Về Hiệu năng:
 
-ALB thực hiện cơ chế <Tooltip content="Ngắt kết nối từ client và tạo một kết nối mới tới backend">"Connection Termination"</Tooltip>. Ngược lại, NLB chỉ đơn giản là <Tooltip content="Chuyển tiếp gói tin từ cổng này sang cổng kia mà không ngắt kết nối">"Forward"</Tooltip> gói tin. Điều này giúp NLB bền bỉ hơn hẳn khi gặp các đợt traffic tăng đột biến (như Flash Sale).
+ALB thực hiện cơ chế "Connection Termination". Ngược lại, NLB chỉ đơn giản là "Forward" gói tin. Điều này giúp NLB bền bỉ hơn hẳn khi gặp các đợt traffic tăng đột biến (như Flash Sale).
 
 ### Về Chi phí:
 
 Dù phí duy trì theo giờ là tương đương, nhưng phí xử lý dữ liệu (Capacity Units) lại là một câu chuyện khác:
 
-* **ALB (<Tooltip content="Load Balancer Capacity Unit — đơn vị đo dung lượng xử lý mà AWS dùng để tính phí ALB">LCU</Tooltip>):** Tính phí dựa trên số lượng rule điều hướng, xử lý SSL và băng thông.
+* **ALB (LCU):** Tính phí dựa trên số lượng rule điều hướng, xử lý SSL và băng thông.
 * **NLB (NLCU):** Chủ yếu tính phí dựa trên băng thông và số lượng kết nối.
 
 > **Mẹo từ chuyên gia:** Với các hệ thống nặng về dữ liệu (Video Streaming, Big Data), việc chuyển từ ALB sang NLB có thể giúp bạn tiết kiệm từ **30-50%** hóa đơn Load Balancer.

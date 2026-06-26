@@ -8,7 +8,7 @@ enableComment: true
 
 # RDS Read Replica vs Multi-AZ: Both Are "Copies", but Don't Mix Them Up!
 
-When first working with AWS <Tooltip content="Relational Database Service — AWS's managed database service">RDS</Tooltip>, there's a question that almost everyone has stumbled on at least once:
+When first working with AWS RDS, there's a question that almost everyone has stumbled on at least once:
 
 > "Read Replica and Multi-AZ — aren't they both just copies of the database? So does it matter which one I pick?"
 
@@ -79,7 +79,7 @@ Multi-AZ (Multi Availability Zone) is the feature that keeps your database alive
 When you enable Multi-AZ, AWS creates:
 
 - **1 Primary instance** in AZ-A — serves all read/write traffic.
-- **1 Standby instance** in AZ-B — a <Tooltip content="primary waits for the standby to confirm the write before returning OK to the client">synchronous replication</Tooltip> copy of the primary.
+- **1 Standby instance** in AZ-B — a synchronous replication copy of the primary.
 
 <ExcalidrawDiagram src="/rds-multi-az-sync.excalidraw" alt="Multi-AZ with a primary in AZ-A replicating synchronously to a standby in AZ-B" />
 
@@ -89,7 +89,7 @@ The "special" point that's often misunderstood:
 
 ### When Failover Occurs
 
-- Primary dies → AWS automatically <Tooltip content="process of redirecting traffic from a failed primary over to the standby">fails over</Tooltip> the DNS endpoint to the standby (~60-120s).
+- Primary dies → AWS automatically fails over the DNS endpoint to the standby (~60-120s).
 - The app **doesn't need to change its connection string** — same endpoint, just a different instance behind it.
 - After failover, AWS automatically provisions a new standby in the remaining AZ.
 
@@ -157,7 +157,7 @@ When your primary starts getting overwhelmed by read queries — dashboards, rep
 
 Core differences from Multi-AZ:
 
-- **Asynchronous replication** — the primary doesn't wait for the replica to confirm, so writes are faster, but replicas always have <Tooltip content="delay between when the primary commits a write and when the replica receives it">replication lag</Tooltip>, from a few ms to several seconds depending on load.
+- **Asynchronous replication** — the primary doesn't wait for the replica to confirm, so writes are faster, but replicas always have replication lag, from a few ms to several seconds depending on load.
 - **Replicas serve read traffic** — you route analytics queries, reports, list pages... to the replica to free up the primary.
 - **Separate endpoints** for each replica — the app must **proactively** route read queries to replicas (via proxy, config, or Aurora's reader endpoint).
 - **Can be placed cross-Region** — serve users in other regions with lower latency, and also serves as a form of DR (Disaster Recovery).

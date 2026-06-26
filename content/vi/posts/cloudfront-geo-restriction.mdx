@@ -8,7 +8,7 @@ enableComment: true
 
 # CloudFront Geo Restriction — Chặn traffic theo quốc gia ngay tại Edge
 
-> Bạn có một ứng dụng Knowledge Base tích hợp <Tooltip content="Large Language Model — mô hình ngôn ngữ lớn, ví dụ như ChatGPT hay Claude">LLM</Tooltip>. Một ngày bạn phát hiện hàng loạt tài khoản mới được tạo từ Nga bằng email tạm thời (temp mail), mục đích là sử dụng miễn phí credit LLM của bạn. Lý do? Tại Nga, các dịch vụ LLM bị hạn chế truy cập, nên người dùng tìm cách "đi đường vòng" qua các ứng dụng tích hợp như của bạn.
+> Bạn có một ứng dụng Knowledge Base tích hợp LLM. Một ngày bạn phát hiện hàng loạt tài khoản mới được tạo từ Nga bằng email tạm thời (temp mail), mục đích là sử dụng miễn phí credit LLM của bạn. Lý do? Tại Nga, các dịch vụ LLM bị hạn chế truy cập, nên người dùng tìm cách "đi đường vòng" qua các ứng dụng tích hợp như của bạn.
 
 Vậy làm thế nào để chặn traffic từ một quốc gia cụ thể mà không cần viết thêm một dòng code nào?
 
@@ -18,13 +18,13 @@ Câu trả lời: **CloudFront Geo Restriction**.
 
 ## 1. CloudFront Geo Restriction là gì?
 
-**Amazon CloudFront** là dịch vụ <Tooltip content="Content Delivery Network — mạng phân phối nội dung qua các server đặt gần người dùng để giảm độ trễ">CDN</Tooltip> của AWS, giúp phân phối nội dung đến người dùng thông qua hệ thống các **Edge Location** (điểm biên) trải khắp thế giới, giúp giảm độ trễ và tăng tốc độ truy cập.
+**Amazon CloudFront** là dịch vụ CDN của AWS, giúp phân phối nội dung đến người dùng thông qua hệ thống các **Edge Location** (điểm biên) trải khắp thế giới, giúp giảm độ trễ và tăng tốc độ truy cập.
 
 **Geo Restriction** (hay Geographic Restrictions) là tính năng có sẵn trong CloudFront cho phép bạn **chặn hoặc cho phép** truy cập dựa trên quốc gia của người dùng.
 
 Cơ chế hoạt động khá đơn giản:
 
-- Khi một request đến CloudFront, hệ thống sẽ tra cứu <Tooltip content="Cơ sở dữ liệu ánh xạ địa chỉ IP sang vị trí địa lý">GeoIP Database</Tooltip> để xác định quốc gia của người gửi request
+- Khi một request đến CloudFront, hệ thống sẽ tra cứu GeoIP Database để xác định quốc gia của người gửi request
 - Nếu quốc gia đó nằm trong danh sách chặn → CloudFront trả về **403 Forbidden** ngay tại Edge, request **không bao giờ** đến được Origin Server (máy chủ gốc của bạn)
 - Nếu không bị chặn → request được chuyển tiếp đến Origin Server bình thường
 
@@ -84,10 +84,10 @@ Trong đó `config.json` chứa cấu hình Distribution với phần `Restricti
 Geo Restriction rất tiện lợi nhưng có một số hạn chế cần lưu ý:
 
 - **Chỉ chặn ở cấp quốc gia**: bạn không thể chặn theo vùng, thành phố hay dải IP cụ thể
-- **Có thể bị bypass bằng VPN**: <Tooltip content="Virtual Private Network — mạng riêng ảo, định tuyến traffic qua server trung gian để ẩn vị trí thật">VPN</Tooltip> cho phép người dùng ẩn vị trí thật bằng cách định tuyến traffic qua server ở quốc gia khác. Người dùng sử dụng VPN có thể vượt qua Geo Restriction
+- **Có thể bị bypass bằng VPN**: VPN cho phép người dùng ẩn vị trí thật bằng cách định tuyến traffic qua server ở quốc gia khác. Người dùng sử dụng VPN có thể vượt qua Geo Restriction
 - **Trang lỗi mặc định**: CloudFront trả về trang 403 generic. Nếu muốn trang lỗi tùy chỉnh, bạn cần cấu hình **Custom Error Responses** trong Distribution
 
-Nếu cần kiểm soát chi tiết hơn, hãy cân nhắc <Tooltip content="Web Application Firewall — tường lửa ứng dụng web, cho phép tạo rule lọc traffic HTTP">AWS WAF</Tooltip>:
+Nếu cần kiểm soát chi tiết hơn, hãy cân nhắc AWS WAF:
 
 | | Geo Restriction | AWS WAF Geographic Match |
 |---|---|---|

@@ -8,7 +8,7 @@ enableComment: true
 
 # How to Test Side Effect of Burst CPU on AWS Auto Scaling
 
-Khi triển khai <Tooltip content="ASG — nhóm EC2 instance tự động scale in/out theo policy">Auto Scaling Group</Tooltip> trên AWS, mình luôn có một câu hỏi trong đầu: **"Liệu scaling policy có thực sự hoạt động khi CPU vượt ngưỡng không?"**. Thay vì ngồi đợi đến lúc production bị quá tải rồi mới biết câu trả lời, mình quyết định tự tay "stress test" để tận mắt chứng kiến ASG tạo thêm instance.
+Khi triển khai Auto Scaling Group trên AWS, mình luôn có một câu hỏi trong đầu: **"Liệu scaling policy có thực sự hoạt động khi CPU vượt ngưỡng không?"**. Thay vì ngồi đợi đến lúc production bị quá tải rồi mới biết câu trả lời, mình quyết định tự tay "stress test" để tận mắt chứng kiến ASG tạo thêm instance.
 
 Bài viết này chia sẻ cách mình SSH vào EC2 instance, dùng công cụ `stress` để đẩy CPU lên cao, và quan sát mọi thứ diễn ra trên CloudWatch.
 
@@ -24,7 +24,7 @@ Bạn đã cấu hình ASG với scaling policy — ví dụ scale out khi CPU t
 
 **Use case 2: Verify CloudWatch Alarm & Notification**
 
-Ngoài việc auto scaling, bạn cũng cần đảm bảo rằng **CloudWatch Alarm sẽ gửi notification đúng lúc** — qua email, SMS, hoặc Slack thông qua <Tooltip content="Simple Notification Service — dịch vụ pub/sub của AWS để fan-out message tới email, SMS, Lambda, HTTPS endpoint...">SNS</Tooltip> topic. Khi hệ thống quá tải, team của bạn cần được thông báo **ngay lập tức** để can thiệp kịp thời. Stress test giúp bạn verify toàn bộ pipeline: CPU tăng → Alarm trigger → Notification gửi đến đúng người.
+Ngoài việc auto scaling, bạn cũng cần đảm bảo rằng **CloudWatch Alarm sẽ gửi notification đúng lúc** — qua email, SMS, hoặc Slack thông qua SNS topic. Khi hệ thống quá tải, team của bạn cần được thông báo **ngay lập tức** để can thiệp kịp thời. Stress test giúp bạn verify toàn bộ pipeline: CPU tăng → Alarm trigger → Notification gửi đến đúng người.
 
 ---
 

@@ -8,7 +8,7 @@ enableComment: true
 
 # PostgreSQL Partitioning: When One Big Table Becomes Many Small Ones
 
-There comes a point in the life of nearly every production system: an `events` (or `logs`, or `orders`) table crosses the half-billion-row mark. Everything starts getting... uncomfortable. Queries return in 30 seconds instead of 30 milliseconds. `VACUUM` has been running for 6 hours and still hasn't finished. You'd like to delete data older than 12 months to reclaim disk space — but the `DELETE` itself produces millions of <Tooltip content="Rows that have been deleted or updated but still occupy disk space until VACUUM reclaims them — a consequence of PostgreSQL's MVCC model.">dead tuples</Tooltip> (see [Deep Dive on Table Bloat](/posts/table-bloat)), making things worse than before you ran it. Indexes balloon to 50GB. Backups take all night.
+There comes a point in the life of nearly every production system: an `events` (or `logs`, or `orders`) table crosses the half-billion-row mark. Everything starts getting... uncomfortable. Queries return in 30 seconds instead of 30 milliseconds. `VACUUM` has been running for 6 hours and still hasn't finished. You'd like to delete data older than 12 months to reclaim disk space — but the `DELETE` itself produces millions of dead tuples (see [Deep Dive on Table Bloat](/posts/table-bloat)), making things worse than before you ran it. Indexes balloon to 50GB. Backups take all night.
 
 The "simplest" answer — bump up the disk, scale up the instance RAM — only buys time. The root cause is structural: **a single table is not the right shape to hold half a billion rows with a clear lifecycle**. This is where **partitioning** comes in — the technique of splitting one logical table into many smaller physical tables so PostgreSQL can manage them efficiently.
 
@@ -18,15 +18,15 @@ This article is a deep dive into how PostgreSQL partitioning works at the mechan
 
 ## 1. What is Partitioning?
 
-<Tooltip content="The technique of splitting one logical table into multiple smaller physical tables based on the value of one or more columns.">Partitioning</Tooltip> is the technique of splitting one logical table into multiple smaller physical tables (called **partitions** or **child tables**), based on the value of one or more columns — the <Tooltip content="The column (or set of columns) used to determine which partition a row belongs to.">partition key</Tooltip>.
+Partitioning is the technique of splitting one logical table into multiple smaller physical tables (called **partitions** or **child tables**), based on the value of one or more columns — the partition key.
 
 The core slogan: **"Single logical table, multiple physical tables."** Application code does not need to know whether the table has been partitioned. The same `SELECT * FROM events WHERE ...` keeps working — except now PostgreSQL automatically routes it to the right partitions instead of scanning a monolithic 500GB table.
 
 ### A Brief History
 
-Before PostgreSQL 10, partitioning was done via <Tooltip content="PostgreSQL's older mechanism that lets one table inherit schema from another — historically used to simulate partitioning before declarative partitioning existed.">table inheritance</Tooltip>: you'd create an empty "parent" table and several "child" tables that inherited from it, along with `CHECK` constraints to bound each child, plus manual **triggers** to route `INSERT`s to the correct child. It worked, but it was tedious, error-prone, and the performance wasn't optimal because PostgreSQL didn't truly understand your partitioning intent.
+Before PostgreSQL 10, partitioning was done via table inheritance: you'd create an empty "parent" table and several "child" tables that inherited from it, along with `CHECK` constraints to bound each child, plus manual **triggers** to route `INSERT`s to the correct child. It worked, but it was tedious, error-prone, and the performance wasn't optimal because PostgreSQL didn't truly understand your partitioning intent.
 
-Starting with PostgreSQL 10, <Tooltip content="PostgreSQL's official PARTITION BY syntax — you declare the strategy and bounds explicitly, and the engine handles routing and pruning.">declarative partitioning</Tooltip> was introduced as a first-class feature. You simply declare the strategy with `PARTITION BY` syntax, and PostgreSQL handles routing, planning, and pruning for you. This entire article focuses on declarative partitioning because it is the modern, concise, and recommended approach.
+Starting with PostgreSQL 10, declarative partitioning was introduced as a first-class feature. You simply declare the strategy with `PARTITION BY` syntax, and PostgreSQL handles routing, planning, and pruning for you. This entire article focuses on declarative partitioning because it is the modern, concise, and recommended approach.
 
 ### Partitioning vs Sharding — Don't Mix Them Up
 
@@ -44,7 +44,7 @@ When you create a partitioned table, PostgreSQL actually creates two very differ
 
 ### Parent Table — Metadata Only
 
-The <Tooltip content="The table you declare with PARTITION BY — it holds only metadata, no row data of its own.">parent table</Tooltip> is the one you declare with `PARTITION BY`. A crucial point that often gets misunderstood: **the parent table holds no row data of its own**. It only stores metadata:
+The parent table is the one you declare with `PARTITION BY`. A crucial point that often gets misunderstood: **the parent table holds no row data of its own**. It only stores metadata:
 - The schema (column names, types, shared constraints).
 - The **partition strategy** (RANGE, LIST, or HASH).
 - The **partition key** (which column drives routing).
@@ -54,13 +54,13 @@ You cannot physically `INSERT` into the parent table directly — every INSERT i
 
 ### Child Partitions — Independent Physical Tables
 
-Each <Tooltip content="The physical child table that holds actual rows — PostgreSQL routes INSERTs into it based on the partition key.">child partition</Tooltip> is a fully-fledged physical table. It has:
-- Its own <Tooltip content="The file on disk that holds actual row data.">heap file</Tooltip>.
+Each child partition is a fully-fledged physical table. It has:
+- Its own heap file.
 - Its own **indexes** — an index `CREATE`d on the parent is propagated down to all children, but each child has its own independent B-tree, stored separately.
 - Its own **statistics** (row count, distribution, etc.) — `ANALYZE` runs independently per child.
 - Its own **visibility map**, **free space map**, and **TOAST tables**.
 
-The crucial implication: **each partition is a "mini-table"** with its own complete <Tooltip content="Multi-Version Concurrency Control — PostgreSQL's model of keeping multiple row versions so readers and writers don't block each other.">MVCC</Tooltip>, VACUUM, and REINDEX machinery. A `VACUUM` running on `events_2026_03` doesn't touch `events_2026_04`. This is exactly why partitioning reduces maintenance overhead — autovacuum operates with a small scope, instead of scanning the whole monolithic table.
+The crucial implication: **each partition is a "mini-table"** with its own complete MVCC, VACUUM, and REINDEX machinery. A `VACUUM` running on `events_2026_03` doesn't touch `events_2026_04`. This is exactly why partitioning reduces maintenance overhead — autovacuum operates with a small scope, instead of scanning the whole monolithic table.
 
 ### Partition Routing
 
@@ -125,7 +125,7 @@ PostgreSQL supports three partition strategies. Choosing the right one depends o
 
 ### 3.1 RANGE
 
-<Tooltip content="Splits data into continuous value ranges based on a partition key with natural ordering (date, timestamp, numeric).">RANGE partitioning</Tooltip> splits data into continuous value ranges. This strategy fits when the partition key has **natural ordering** — typically a `date`, `timestamp`, or some numeric range (like order ID).
+RANGE partitioning splits data into continuous value ranges. This strategy fits when the partition key has **natural ordering** — typically a `date`, `timestamp`, or some numeric range (like order ID).
 
 The canonical use case: **time-series data**. You partition by month (monthly), week (weekly), or even day (daily) depending on volume.
 
@@ -170,7 +170,7 @@ Most serious production systems don't create a default partition. They proactive
 
 ### 3.2 LIST
 
-<Tooltip content="Splits data by discrete values — best when the partition key is an enum, category, or a fixed, known-in-advance set of values.">LIST partitioning</Tooltip> splits data by discrete values — a good fit when the partition key is an enum, a category, or a fixed, known-in-advance set of values.
+LIST partitioning splits data by discrete values — a good fit when the partition key is an enum, a category, or a fixed, known-in-advance set of values.
 
 Typical use case: dividing data by **region**, **country**, **status**, or **tenant tier**.
 
@@ -205,7 +205,7 @@ One anti-pattern to avoid: using LIST on a high-cardinality column (like `user_i
 
 ### 3.3 HASH
 
-<Tooltip content="Applies a hash function to the partition key then takes the modulus by partition count, distributing rows evenly across partitions.">HASH partitioning</Tooltip> applies a hash function to the partition key, then uses `MODULUS` to determine which partition. It distributes data **evenly** across partitions without needing the partition key to carry any natural ordering or category meaning.
+HASH partitioning applies a hash function to the partition key, then uses `MODULUS` to determine which partition. It distributes data **evenly** across partitions without needing the partition key to carry any natural ordering or category meaning.
 
 Use case: when you need even load distribution and have no natural range/list partition key. For example, a `user_sessions` table with millions of users where there's no clear "by month" or "by region" access pattern — you just want to spread out evenly.
 
@@ -251,7 +251,7 @@ Advice: if you choose HASH, pick the number of partitions carefully upfront — 
 
 ## 4. Partition Pruning — How Queries Get Faster
 
-This is the "magic" most people are looking forward to when they hear about partitioning. <Tooltip content="The process where the query planner analyzes the WHERE clause and scans only the partitions that could contain matching rows, skipping the rest.">Partition pruning</Tooltip> is the process where the PostgreSQL **query planner** analyzes the `WHERE` clause of a query, compares it against partition bounds, and decides to scan only the partitions that could possibly contain matching rows — skipping the rest entirely.
+This is the "magic" most people are looking forward to when they hear about partitioning. Partition pruning is the process where the PostgreSQL **query planner** analyzes the `WHERE` clause of a query, compares it against partition bounds, and decides to scan only the partitions that could possibly contain matching rows — skipping the rest entirely.
 
 <ExcalidrawDiagram src="/postgresql-partition-pruning.excalidraw" alt="Partition pruning scans only partitions matching WHERE, skipping the rest" />
 

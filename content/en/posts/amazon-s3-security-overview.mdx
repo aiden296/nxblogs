@@ -17,7 +17,7 @@ You've just moved a system that stores medical records and financial documents o
 - Five different teams need access to five different folders in the same bucket — how do we manage permissions without chaos?
 - When the analytics team reads the data, how do we automatically redact ID numbers and credit card numbers without creating a separate processed copy?
 
-Here's the interesting part: **each question above maps to exactly one S3 security feature.** S3 isn't just a "cheap file store" — it's a set of defense layers, each one born to answer a specific question. This post organizes all of those features into four memorable layers, explains what problem each one solves, when to use it, and pins down the points that tend to show up on the <Tooltip content="AWS Certified Solutions Architect – Associate, the associate-level AWS solutions architect certification">SAA</Tooltip> exam.
+Here's the interesting part: **each question above maps to exactly one S3 security feature.** S3 isn't just a "cheap file store" — it's a set of defense layers, each one born to answer a specific question. This post organizes all of those features into four memorable layers, explains what problem each one solves, when to use it, and pins down the points that tend to show up on the SAA exam.
 
 ---
 
@@ -35,7 +35,7 @@ Instead of memorizing 13 scattered features, tie each one to the **security ques
 Two ideas run through the whole post — pin them down first:
 
 - **Encryption and access control are two different things.** Encryption answers "if the data is taken, can the thief read it"; access control answers "who is allowed to touch the data". A perfectly encrypted bucket can still leak if the policy is wide open, and vice versa.
-- **Versioning is the foundation.** The two most important anti-deletion features — Object Lock and MFA Delete — both require Versioning to be enabled first. <Tooltip content="A feature that keeps every version of an object: on overwrite or delete, S3 doesn't actually lose the data but creates a new version or adds a delete marker">Versioning</Tooltip> means S3 retains every version of an object, so "delete" doesn't mean "lost".
+- **Versioning is the foundation.** The two most important anti-deletion features — Object Lock and MFA Delete — both require Versioning to be enabled first. Versioning means S3 retains every version of an object, so "delete" doesn't mean "lost".
 
 ---
 
@@ -45,13 +45,13 @@ This is the densest part of Section 14, and the one most likely to appear on the
 
 ### 2.1. SSE-S3 — let AWS handle everything
 
-<Tooltip content="Server-Side Encryption with Amazon S3-Managed Keys — server-side encryption using keys managed by S3 itself">SSE-S3</Tooltip> is the default and simplest form of encryption. S3 encrypts the object with the AES-256 algorithm, using a key that AWS creates, manages, and rotates. You don't see the key, don't manage the key, and don't pay extra.
+SSE-S3 is the default and simplest form of encryption. S3 encrypts the object with the AES-256 algorithm, using a key that AWS creates, manages, and rotates. You don't see the key, don't manage the key, and don't pay extra.
 
 Enable SSE-S3 via the header `x-amz-server-side-encryption: AES256`.
 
 ### 2.2. SSE-KMS — key control and audit
 
-<Tooltip content="Server-Side Encryption with AWS KMS Keys — server-side encryption using keys managed through the AWS Key Management Service">SSE-KMS</Tooltip> still lets S3 do the encrypting, but the key lives in AWS KMS — AWS's key management service. The big difference from SSE-S3 comes down to two words: **control and audit.** You create the key yourself, set a policy for who can use it, enable key rotation, and most importantly: every time the key is used to encrypt/decrypt, it's logged in CloudTrail.
+SSE-KMS still lets S3 do the encrypting, but the key lives in AWS KMS — AWS's key management service. The big difference from SSE-S3 comes down to two words: **control and audit.** You create the key yourself, set a policy for who can use it, enable key rotation, and most importantly: every time the key is used to encrypt/decrypt, it's logged in CloudTrail.
 
 - **The problem it solves:** "I need to know exactly who decrypts the data, when, and I want to control the key's lifecycle myself."
 - **Use case:** sensitive data, separation-of-duties requirements (the bucket admin is not the key admin), the need for an audit trail.
@@ -60,11 +60,11 @@ Every time you upload an object, S3 calls the KMS API `GenerateDataKey`; every t
 
 The fix: enable **S3 Bucket Keys** — S3 creates a bucket-level key and uses it to generate data keys locally for each object instead of calling KMS every time, cutting KMS calls by roughly 99% (reducing both cost and the risk of throttling).
 
-The details of how KMS generates keys, <Tooltip content="Nested encryption: a data key encrypts the data, and that data key is itself encrypted by a master key">envelope encryption</Tooltip>, and the key types live in the [AWS Security & Encryption](/en/posts/aws-security-encryption-overview) post — this article focuses only on how S3 puts them to use.
+The details of how KMS generates keys, envelope encryption, and the key types live in the [AWS Security & Encryption](/en/posts/aws-security-encryption-overview) post — this article focuses only on how S3 puts them to use.
 
 ### 2.3. SSE-C — you bring the key, S3 encrypts for you
 
-<Tooltip content="Server-Side Encryption with Customer-Provided Keys — server-side encryption using keys you supply yourself">SSE-C</Tooltip> is for the case where you want to fully manage the key outside AWS, but still let S3 do the encryption work.
+SSE-C is for the case where you want to fully manage the key outside AWS, but still let S3 do the encryption work.
 
 How it works: you attach the key in the headers of every request. S3 uses that key to encrypt (or decrypt) the object, then discards the key immediately — AWS never stores your key.
 
@@ -75,7 +75,7 @@ How it works: you attach the key in the headers of every request. S3 uses that k
 
 ### 2.4. DSSE-KMS — two-layer encryption for strict compliance
 
-<Tooltip content="Dual-layer Server-Side Encryption with AWS KMS Keys — two layers of server-side encryption, both using KMS keys">DSSE-KMS</Tooltip> is like SSE-KMS but applies **two layers** of encryption stacked on top of each other, both using KMS keys. It was created to meet very strict compliance standards (for example, certain US government/defense requirements) that demand multi-layer encryption.
+DSSE-KMS is like SSE-KMS but applies **two layers** of encryption stacked on top of each other, both using KMS keys. It was created to meet very strict compliance standards (for example, certain US government/defense requirements) that demand multi-layer encryption.
 
 - **The problem it solves:** "regulations require the data to be encrypted with two independent layers."
 - **Use case:** organizations under a specific compliance framework that requires dual-layer encryption.
@@ -119,7 +119,7 @@ To force every upload to use exactly one encryption type (for example, accept on
 
 ## 4. Integrity & anti-deletion: Object Lock, Glacier Vault Lock, MFA Delete
 
-Encryption protects confidentiality. This group of features protects **integrity** — preventing data from being modified or deleted, whether by accident, by an insider, or by ransomware. The central concept is <Tooltip content="Write Once Read Many — write once, read many times; cannot be modified or deleted during the retention window">WORM</Tooltip>: write once, and no one can modify/delete it afterward.
+Encryption protects confidentiality. This group of features protects **integrity** — preventing data from being modified or deleted, whether by accident, by an insider, or by ransomware. The central concept is WORM: write once, and no one can modify/delete it afterward.
 
 ### 4.1. S3 Object Lock
 
@@ -150,7 +150,7 @@ While Object Lock protects objects in S3, **Glacier Vault Lock** protects data i
 
 Requires: **Versioning enabled**
 
-<Tooltip content="Multi-Factor Authentication — forces the user to enter an extra code from a device (phone or hardware key) on top of their password/credentials">MFA</Tooltip> Delete forces users to enter an MFA code for the most dangerous operations on a bucket. Only the bucket owner (root account) can enable/disable MFA Delete.
+MFA Delete forces users to enter an MFA code for the most dangerous operations on a bucket. Only the bucket owner (root account) can enable/disable MFA Delete.
 
 Specifically, MFA is required to:
 
@@ -171,7 +171,7 @@ To answer "who accessed which object, and when", you enable **S3 Server Access L
 
 ### 5.2. Pre-signed URLs
 
-A <Tooltip content="A pre-signed URL that carries temporary, time-limited access to a specific object">Pre-signed URL</Tooltip> is a URL you sign that lets whoever holds it access a specific object for a limited time — inheriting exactly the permissions of the signer. This way you grant upload/download access **without making the bucket public**.
+A Pre-signed URL is a URL you sign that lets whoever holds it access a specific object for a limited time — inheriting exactly the permissions of the signer. This way you grant upload/download access **without making the bucket public**.
 
 - **Use case:** allow downloads of premium content only to logged-in users; a constantly changing list of who can download; let a user upload directly to an exact location in the bucket.
 - **Remember:** the URL is time-limited (CLI default is one hour, configurable). The bucket stays fully private.
@@ -269,7 +269,7 @@ Each team's real permissions live in its own access point policy. For example, t
 
 An object's ARN when accessed through an access point takes the form `.../accesspoint/<ap-name>/object/<prefix>`, distinct from the direct bucket ARN. The finance team calls through the `finance-ap` DNS name without needing to know the underlying bucket name. Adding a new team is just creating another access point with its own small, independent policy, instead of inserting another line into the central JSON blob.
 
-- **VPC Origin:** an access point can have its origin set to either the Internet or a <Tooltip content="Virtual Private Cloud — your own isolated virtual network in AWS">VPC</Tooltip>. If you choose VPC Origin, the access point is reachable only from within the VPC, and you must create a **VPC Endpoint** (Gateway or Interface) to reach it — the VPC endpoint policy must allow access to both the bucket and the access point.
+- **VPC Origin:** an access point can have its origin set to either the Internet or a VPC. If you choose VPC Origin, the access point is reachable only from within the VPC, and you must create a **VPC Endpoint** (Gateway or Interface) to reach it — the VPC endpoint policy must allow access to both the bucket and the access point.
 
 Access Points are for **scaling permission management** (many teams/prefixes). Each Access Point = one policy + one DNS.
 
@@ -284,9 +284,9 @@ Sometimes different applications need **different versions** of the same object:
 
 ### 6.3. S3 CORS
 
-<Tooltip content="Cross-Origin Resource Sharing — a browser-enforced mechanism that lets one origin (website) access resources on a different origin">CORS</Tooltip> is a **browser** security mechanism, not an S3-specific one. An origin is defined by scheme + host + port (e.g. `https://www.example.com`). By default, a browser blocks JavaScript from one origin from calling resources on another origin — unless the target origin allows it via CORS headers.
+CORS is a **browser** security mechanism, not an S3-specific one. An origin is defined by scheme + host + port (e.g. `https://www.example.com`). By default, a browser blocks JavaScript from one origin from calling resources on another origin — unless the target origin allows it via CORS headers.
 
-How it works: before the real request, the browser sends a "probe" request (a <Tooltip content="An OPTIONS request the browser sends automatically before the real request, to ask the server whether the cross-origin call is allowed">preflight</Tooltip>) to S3; if the bucket's CORS configuration allows that origin, the browser then sends the real request.
+How it works: before the real request, the browser sends a "probe" request (a preflight) to S3; if the bucket's CORS configuration allows that origin, the browser then sends the real request.
 
 - **Classic exam use case:** a static website hosted on bucket A loads files (images, fonts, data) from bucket B → you must enable the **CORS configuration on bucket B** (the target bucket), allowing bucket A's origin.
 - **Remember:** see "browser", "cross-origin", "static website calling another bucket" → CORS, and the configuration goes on the **bucket being called**.

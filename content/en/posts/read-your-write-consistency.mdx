@@ -34,7 +34,7 @@ This is the most common approach. After a User performs a write operation, the s
 
 While browsing the internet, I found a pretty clever solution from Bitbucket **[Link](https://ujjwal18.hashnode.dev/implementing-read-your-write-consistency-in-distributed-databases-a-deep-dive-into-bitbuckets-approach)**
 
-Bitbucket solved this problem elegantly by tracking the <Tooltip content="Log Sequence Number — a unique identifier for each change in the database's write-ahead log">LSN</Tooltip> or **Timestamp**.
+Bitbucket solved this problem elegantly by tracking the LSN or **Timestamp**.
 
 * **Mechanism:** When a User writes data successfully, the Primary DB returns an identifier for that record (LSN). The application stores this LSN in the User's **Cookie** or **Session**.
 * **On Read:** The application sends this LSN along with the request. The system checks: Has this Replica caught up to this LSN?
@@ -46,7 +46,7 @@ Bitbucket solved this problem elegantly by tracking the <Tooltip content="Log Se
 
 ### Approach 3: Using a Cache Layer (Redis) as a Buffer
 
-Instead of relying entirely on the DB, write new data to Redis with a short <Tooltip content="Time To Live — how long a cache entry stays valid before being automatically evicted">TTL</Tooltip> (equal to or slightly greater than the Max Replication Lag).
+Instead of relying entirely on the DB, write new data to Redis with a short TTL (equal to or slightly greater than the Max Replication Lag).
 
 * **Logic:** Read from Redis first -> If not found, then Read from the DB.
 * **Caution:** This is a double-edged sword. If not managed well, you'll run into complex **Cache Invalidation** issues, leading to extremely smelly code that is incredibly hard to debug when data between Redis and the DB doesn't match.

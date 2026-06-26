@@ -8,11 +8,11 @@ enableComment: true
 
 # AWS Lambda: Features, Limits, and When to Use It for the SAA Exam
 
-You need to generate a thumbnail every time a user uploads an image. This work comes in bursts: sometimes a few thousand images in one minute, sometimes nothing for an hour. The old way, you stand up an <Tooltip content="Elastic Compute Cloud — a virtual server on AWS">EC2</Tooltip> instance running around the clock waiting for work: you pay for the idle hours too, you patch the operating system yourself, and when a wave of uploads hits you have to scramble to add capacity in time.
+You need to generate a thumbnail every time a user uploads an image. This work comes in bursts: sometimes a few thousand images in one minute, sometimes nothing for an hour. The old way, you stand up an EC2 instance running around the clock waiting for work: you pay for the idle hours too, you patch the operating system yourself, and when a wave of uploads hits you have to scramble to add capacity in time.
 
 A natural question follows: why keep a server running 24/7 for a job that only runs in fits and starts? It would be far better to just package up the image-processing code, hand it to AWS, and say: "whenever a new image arrives, run this; when there are no images, I pay nothing." That is exactly what **AWS Lambda** gives you.
 
-This article is a map of Lambda for the <Tooltip content="AWS Certified Solutions Architect – Associate — the associate-level AWS solutions architect certification">SAA</Tooltip> exam. We'll walk through six areas: what Lambda is and what it gives you, the limits that get tested, how to manage concurrency and throttling, SnapStart for handling cold starts, the Lambda@Edge and CloudFront Functions pair that run at the edge, and finally Lambda when placed inside a VPC.
+This article is a map of Lambda for the SAA exam. We'll walk through six areas: what Lambda is and what it gives you, the limits that get tested, how to manage concurrency and throttling, SnapStart for handling cold starts, the Lambda@Edge and CloudFront Functions pair that run at the edge, and finally Lambda when placed inside a VPC.
 
 > **Note:** This is an overview to build a mental model and quickly recognize the answer in the exam. The SAA rarely asks about function syntax; it asks about **characteristics**: which limits are hard, which mechanism fits which problem, and the boundary between near-identical options (for example, Lambda@Edge versus CloudFront Functions). This article focuses on exactly those points.
 
@@ -22,7 +22,7 @@ This article is a map of Lambda for the <Tooltip content="AWS Certified Solution
 
 ### 1.1. The Serverless Model and Function as a Service
 
-**AWS Lambda** is a <Tooltip content="Serverless — a model where you don't manage servers; the provider handles provisioning, scaling, and operating the underlying infrastructure">serverless</Tooltip> compute service that lets you run code without standing up or managing any servers. You don't create EC2 instances, install an operating system, patch it, or worry about scaling: you just upload a **function** — a piece of code that does one thing — and declare which event triggers it. Because the unit of deployment is a function, this model is also called <Tooltip content="Function as a Service — running individual functions in response to events, rather than running a whole long-lived application">Function as a Service (FaaS)</Tooltip>.
+**AWS Lambda** is a serverless compute service that lets you run code without standing up or managing any servers. You don't create EC2 instances, install an operating system, patch it, or worry about scaling: you just upload a **function** — a piece of code that does one thing — and declare which event triggers it. Because the unit of deployment is a function, this model is also called Function as a Service (FaaS).
 
 "Serverless" doesn't mean there are no servers. Real servers still run underneath, but AWS hides them from you entirely: provisioning, operating, and scaling are AWS's job. This is quite different from EC2, where you own and are responsible for each instance.
 
@@ -33,20 +33,20 @@ Lambda works on an **event-driven** model: the code only runs when an event trig
 Four things make Lambda compelling, and they're also four things that show up often in the exam:
 
 - **No server management**: you only deal with code; the infrastructure, operating system, and runtime are AWS's responsibility.
-- **Automatic scaling**: when many events arrive at once, Lambda spins up more parallel instances to serve them; when the work dries up, it shrinks back to zero. You don't configure an <Tooltip content="Auto Scaling Group — a group of EC2 instances that scales the instance count up and down with load; with Lambda you don't need to set this up">Auto Scaling Group</Tooltip> as you would with EC2.
+- **Automatic scaling**: when many events arrive at once, Lambda spins up more parallel instances to serve them; when the work dries up, it shrinks back to zero. You don't configure an Auto Scaling Group as you would with EC2.
 - **Pay for what you actually use**: billed by the number of invocations and the actual run time. When idle, the cost is zero — the biggest contrast with EC2, which bills even while the machine sits idle.
-- **High availability built in**: Lambda runs spread across multiple <Tooltip content="Availability Zone — one or more independent data centers within a Region, fault-isolated from one another">Availability Zones</Tooltip> in the Region without you doing anything.
+- **High availability built in**: Lambda runs spread across multiple Availability Zones in the Region without you doing anything.
 
 ### 1.3. Languages, Runtimes, and Container Images
 
-Lambda runs your code inside a managed <Tooltip content="Runtime — the execution environment that bundles the language and libraries needed to run code, for example Node.js or Python">runtime</Tooltip>. AWS provides runtimes for the popular languages: Node.js, Python, Java, .NET (C#), Go, and Ruby.
+Lambda runs your code inside a managed runtime. AWS provides runtimes for the popular languages: Node.js, Python, Java, .NET (C#), Go, and Ruby.
 
 When you need a language or version that isn't on the list, you have two escape hatches:
 
 - **Custom runtime**: supply your own runtime (for example, for Rust, or an older language version) through Lambda's Runtime API.
 - **Container image**: package the function as a standard container image, up to **10 GB** in size. This is the choice for functions with many heavy libraries, such as machine learning dependencies.
 
-An easy point to confuse in the exam: a container image on Lambda is **still Lambda** (event-driven, with all of Lambda's limits), not a switch to running containers the way <Tooltip content="Elastic Container Service — AWS's service for running and orchestrating containers">ECS</Tooltip> or <Tooltip content="A serverless container engine that runs containers without managing servers, used with ECS or EKS">Fargate</Tooltip> do.
+An easy point to confuse in the exam: a container image on Lambda is **still Lambda** (event-driven, with all of Lambda's limits), not a switch to running containers the way ECS or Fargate do.
 
 ### 1.4. What Triggers Lambda?
 
@@ -59,14 +59,14 @@ Lambda's real power is that it plugs into nearly every other AWS service and run
 - EventBridge: run a function on a schedule (replacing cron) or on system events.
 - ALB: point directly at Lambda as an HTTP backend, with no EC2 needed (details in the [Elastic Load Balancer](/en/posts/aws-elastic-load-balancer-overview) article).
 
-To call other services, each Lambda function attaches an <Tooltip content="IAM Role — a role holding the temporary permissions Lambda uses to call other AWS services; called the execution role">IAM execution role</Tooltip> holding exactly the permissions it needs — for example, permission to write to a DynamoDB table.
+To call other services, each Lambda function attaches an IAM execution role holding exactly the permissions it needs — for example, permission to write to a DynamoDB table.
 
 ### 1.5. Pricing Model
 
 Lambda bills along two axes, and most importantly: **no event means no charge**.
 
 - **By number of invocations**: charged on the total number of times the function is triggered.
-- **By run time**: charged in <Tooltip content="GB-second — a unit equal to the memory allocated to the function (in GB) multiplied by its run time (in seconds)">GB-seconds</Tooltip>, that is, the memory you allocate to the function multiplied by how long it runs. Allocating more memory makes each second more expensive, but the function also gets more CPU and so usually runs faster.
+- **By run time**: charged in GB-seconds, that is, the memory you allocate to the function multiplied by how long it runs. Allocating more memory makes each second more expensive, but the function also gets more CPU and so usually runs faster.
 
 AWS also gives a generous monthly free tier (1 million invocations and 400,000 GB-seconds), so most small applications pay almost nothing for Lambda. For the exam, pin down the "pay per use" idea: Lambda is the economical choice for bursty or uneven workloads, while a workload that runs continuously at high, steady load may be cheaper on EC2 or Fargate.
 
@@ -89,9 +89,9 @@ This is the area the SAA asks about most, because many questions are really "doe
 
 A few points that often become traps:
 
-- **15 minutes is a hard ceiling.** If a question describes a task running longer than 15 minutes (large data processing that drags on for hours, say), Lambda is the wrong answer — think EC2, Fargate, or <Tooltip content="AWS Batch — a service for running batch processing jobs on AWS-managed infrastructure">AWS Batch</Tooltip>.
+- **15 minutes is a hard ceiling.** If a question describes a task running longer than 15 minutes (large data processing that drags on for hours, say), Lambda is the wrong answer — think EC2, Fargate, or AWS Batch.
 - **CPU isn't configured separately.** You don't pick the CPU count directly; CPU is allocated in proportion to memory. A compute-heavy function that runs slowly is usually fixed by raising the memory to pull more CPU along with it.
-- **`/tmp` is scratch space, not durable storage.** For durable storage or sharing across functions, use S3 or <Tooltip content="Elastic File System — a shared network file system that can be mounted by multiple Lambda functions or EC2 instances">EFS</Tooltip>.
+- **`/tmp` is scratch space, not durable storage.** For durable storage or sharing across functions, use S3 or EFS.
 - **6 MB payload.** To pass larger data, store it in S3 and pass only a reference (the path) to the object.
 
 ---
@@ -129,7 +129,7 @@ This is the choice for latency-sensitive applications with predictable traffic �
 
 ### 3.5. Throttling
 
-When the number of concurrent instances exceeds the limit (whether the Region's shared quota or a function's reserved concurrency), Lambda **throttles** — it rejects some invocations and returns a <Tooltip content="The HTTP 429 status code means too many requests were sent; with Lambda it comes with the TooManyRequestsException error">429 TooManyRequestsException</Tooltip> error. What happens next depends on how the function was invoked:
+When the number of concurrent instances exceeds the limit (whether the Region's shared quota or a function's reserved concurrency), Lambda **throttles** — it rejects some invocations and returns a 429 TooManyRequestsException error. What happens next depends on how the function was invoked:
 
 - **Synchronous** invocation (for example, through API Gateway): the error goes straight back to the caller, which decides whether to retry.
 - **Asynchronous** invocation (for example, from S3, SNS): Lambda **retries on its own** for a period of time, so short load spikes are usually absorbed without losing events.
@@ -158,24 +158,24 @@ For the exam, the keyword that identifies SnapStart is "reduce cold starts for a
 
 ### 5.1. Why Run Code at the Edge?
 
-<Tooltip content="Amazon CloudFront — AWS's content delivery network (CDN), caching content at points close to users">CloudFront</Tooltip> is AWS's <Tooltip content="Content Delivery Network — a network of servers spread around the world to serve content from the point closest to the user">CDN</Tooltip>: it caches content at points close to users to cut latency. Often you want to **run a piece of logic right at that edge**, before the request reaches the origin — for example, rewriting a URL, checking an authentication token, adding or removing HTTP headers, or serving different content by device. Running at the edge lets this logic execute close to the user instead of making the round trip back to the Region.
+CloudFront is AWS's CDN: it caches content at points close to users to cut latency. Often you want to **run a piece of logic right at that edge**, before the request reaches the origin — for example, rewriting a URL, checking an authentication token, adding or removing HTTP headers, or serving different content by device. Running at the edge lets this logic execute close to the user instead of making the round trip back to the Region.
 
 AWS has two tools for this, and the SAA very often asks you to tell them apart: **CloudFront Functions** and **Lambda@Edge**.
 
 ### 5.2. CloudFront Functions
 
-**CloudFront Functions** are ultra-lightweight JavaScript functions that run right at the <Tooltip content="Edge location — a CloudFront point of presence placed around the world, where content is cached closest to users">edge locations</Tooltip> (a very large number, hundreds of them), with execution times under a millisecond. They're designed for enormous volume (millions of requests per second) and truly short tasks:
+**CloudFront Functions** are ultra-lightweight JavaScript functions that run right at the edge locations (a very large number, hundreds of them), with execution times under a millisecond. They're designed for enormous volume (millions of requests per second) and truly short tasks:
 
 - Manipulating and rewriting HTTP headers.
 - Rewriting or redirecting URLs.
-- Normalizing the <Tooltip content="Cache key — the combination of attributes (URL, headers, and so on) CloudFront uses as the key to look up and store cache entries">cache key</Tooltip>.
+- Normalizing the cache key.
 - Checking a token or simple authentication.
 
 The price of that speed and low cost is a set of restrictions: JavaScript only, very little memory, **no network calls**, and triggering at only two points — viewer request (before CloudFront checks the cache) and viewer response (before returning to the user).
 
 ### 5.3. Lambda@Edge
 
-**Lambda@Edge** is running a Lambda function (Node.js or Python) at the <Tooltip content="Regional Edge Cache — CloudFront's larger cache tier, sitting between the edge locations and the origin; fewer in number than edge locations">Regional Edge Caches</Tooltip>. It's heavier and more powerful than CloudFront Functions: longer run times, more memory, and **network calls allowed** (querying other services, calling APIs). Importantly for the exam, Lambda@Edge triggers at **four** points in the CloudFront lifecycle:
+**Lambda@Edge** is running a Lambda function (Node.js or Python) at the Regional Edge Caches. It's heavier and more powerful than CloudFront Functions: longer run times, more memory, and **network calls allowed** (querying other services, calling APIs). Importantly for the exam, Lambda@Edge triggers at **four** points in the CloudFront lifecycle:
 
 - Viewer request and viewer response (like CloudFront Functions).
 - Plus origin request (before the request reaches the origin) and origin response (after the origin replies).
@@ -202,23 +202,23 @@ Choosing quickly in the exam: for **ultra-light, ultra-fast, enormous-scale** wo
 
 ### 6.1. By Default, Lambda Lives Outside Your VPC
 
-By default, a Lambda function runs in an AWS-managed <Tooltip content="Virtual Private Cloud — your own virtual private network on AWS, where you place resources like EC2 and RDS">VPC</Tooltip>, separate from your own VPC. An important consequence: in this default mode, the function **can reach the internet** (call public APIs) but **can't access private resources in your VPC** — for example, an <Tooltip content="Relational Database Service — AWS's managed relational database service">RDS</Tooltip> database or an <Tooltip content="ElastiCache — AWS's managed in-memory cache service (Redis/Memcached)">ElastiCache</Tooltip> cluster sitting in a private subnet.
+By default, a Lambda function runs in an AWS-managed VPC, separate from your own VPC. An important consequence: in this default mode, the function **can reach the internet** (call public APIs) but **can't access private resources in your VPC** — for example, an RDS database or an ElastiCache cluster sitting in a private subnet.
 
 ### 6.2. Attaching Lambda to a VPC
 
-When the function needs to reach those private resources, you configure it to run **inside your VPC**: you specify the subnets and a <Tooltip content="Security Group — a stateful firewall at the resource level, controlling inbound and outbound traffic">Security Group</Tooltip>. Lambda then creates <Tooltip content="Elastic Network Interface — a virtual network card in the VPC; the bridge Lambda uses to talk to resources in the VPC">ENIs</Tooltip> in the VPC to bridge to the resources.
+When the function needs to reach those private resources, you configure it to run **inside your VPC**: you specify the subnets and a Security Group. Lambda then creates ENIs in the VPC to bridge to the resources.
 
 These days AWS uses **Hyperplane ENIs** — shared ENIs created ahead of time at function-configuration level rather than one per invocation. Because of this, attaching Lambda to a VPC no longer causes the heavy cold starts it did in the early days. For the exam, just remember: Lambda talks to resources in the VPC through ENIs.
 
 ### 6.3. Entering a VPC Means Losing the Default Internet Route
 
-This is the most classic Lambda trap on the SAA exam. When you attach a function to a VPC, it **loses its default internet access**. Putting the function in a <Tooltip content="Public subnet — a subnet with a direct route to the internet through an Internet Gateway">public subnet</Tooltip> doesn't help either, because a Lambda function has no public IP.
+This is the most classic Lambda trap on the SAA exam. When you attach a function to a VPC, it **loses its default internet access**. Putting the function in a public subnet doesn't help either, because a Lambda function has no public IP.
 
-For a function in a VPC to both reach private resources and get to the internet (or call AWS's public APIs), the correct architecture is: put the function in a **private subnet**, and give that subnet a route to a <Tooltip content="NAT Gateway — a service that lets resources in a private subnet initiate outbound connections to the internet, while the internet can't connect back in">NAT Gateway</Tooltip> in a public subnet. The NAT Gateway handles the internet egress. (The [VPC Networking](/en/posts/aws-vpc-networking-overview) article goes deeper on subnets and NAT.)
+For a function in a VPC to both reach private resources and get to the internet (or call AWS's public APIs), the correct architecture is: put the function in a **private subnet**, and give that subnet a route to a NAT Gateway in a public subnet. The NAT Gateway handles the internet egress. (The [VPC Networking](/en/posts/aws-vpc-networking-overview) article goes deeper on subnets and NAT.)
 
 ### 6.4. Calling S3 and DynamoDB Without a NAT
 
-If a function in a VPC only needs to call **S3** or **DynamoDB**, you don't necessarily have to stand up a NAT Gateway (which costs money). These two services support a <Tooltip content="Gateway VPC Endpoint — a gateway allowing private access to S3 and DynamoDB from inside the VPC without going over the internet, with no processing charge">Gateway VPC Endpoint</Tooltip>: add a route in the route table so traffic to S3/DynamoDB goes through this endpoint, stays entirely within the AWS network, never touches the internet, and incurs no NAT charge. When the exam asks "a Lambda in a VPC needs to access S3 at the lowest cost," the answer is a Gateway Endpoint, not a NAT Gateway.
+If a function in a VPC only needs to call **S3** or **DynamoDB**, you don't necessarily have to stand up a NAT Gateway (which costs money). These two services support a Gateway VPC Endpoint: add a route in the route table so traffic to S3/DynamoDB goes through this endpoint, stays entirely within the AWS network, never touches the internet, and incurs no NAT charge. When the exam asks "a Lambda in a VPC needs to access S3 at the lowest cost," the answer is a Gateway Endpoint, not a NAT Gateway.
 
 ---
 

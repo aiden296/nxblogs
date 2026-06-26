@@ -8,7 +8,7 @@ enableComment: true
 
 # Quorum: One Overlap Rule, Two AWS Use Cases
 
-You run a datastore of 3 nodes — 3 copies of the same data. An application just wrote a new value, and a moment later another request reads it back. But right then, one node is lagging behind on replication, or an entire <Tooltip content="Availability Zone — one or more independent data centers inside the same AWS region, with separate power and networking so that if one AZ dies the others keep running">AZ</Tooltip> is flickering. How can you be sure that read returns the **latest write** rather than stale data?
+You run a datastore of 3 nodes — 3 copies of the same data. An application just wrote a new value, and a moment later another request reads it back. But right then, one node is lagging behind on replication, or an entire AZ is flickering. How can you be sure that read returns the **latest write** rather than stale data?
 
 And in a problem that sounds completely unrelated: when the node coordinating the cluster dies, how does the cluster elect **exactly one** replacement — and not two nodes both claiming to be in charge, overwriting each other?
 
@@ -61,7 +61,7 @@ Because the write set and read set are forced to share at least one copy, a read
 
 ### DynamoDB
 
-Amazon DynamoDB splits each piece of data into **3 replicas** placed across 3 different AZs, with one replica acting as the **leader** (the only copy that takes a write first, then propagates it to the others). A write is acknowledged as soon as the <Tooltip content="A log entry describing a data change, written sequentially before being applied to the main copy — the basis for keeping replicas in sync">log record</Tooltip> is durably stored on **2 of the 3** replicas, i.e. the leader plus one follower. That's W = 2 out of N = 3.
+Amazon DynamoDB splits each piece of data into **3 replicas** placed across 3 different AZs, with one replica acting as the **leader** (the only copy that takes a write first, then propagates it to the others). A write is acknowledged as soon as the log record is durably stored on **2 of the 3** replicas, i.e. the leader plus one follower. That's W = 2 out of N = 3.
 
 Reads come in two modes, and this is the distinction you need to be clear on:
 
@@ -72,7 +72,7 @@ A common exam point: the **2/3 figure is an internal detail of DynamoDB; you can
 
 ### Aurora
 
-Amazon Aurora pushes the same idea further at the storage layer. Each piece of data has **6 copies** spread across 3 AZs, 2 copies per AZ. Aurora sets a **write quorum Vw = 4** and a **read quorum Vr = 3**, satisfying both conditions above: 4 + 3 > 6 and 4 > 6/2. A write completes as soon as **4 of 6** copies confirm. As a result Aurora **survives the loss of an entire AZ** (2 copies) and still accepts writes, and survives an AZ plus one extra copy without losing data. Note that Aurora ships only <Tooltip content="An append-only log describing each change at the physical level; the storage layer replays this log to rebuild data pages on its own">redo log records</Tooltip> to the 6 copies rather than full data pages.
+Amazon Aurora pushes the same idea further at the storage layer. Each piece of data has **6 copies** spread across 3 AZs, 2 copies per AZ. Aurora sets a **write quorum Vw = 4** and a **read quorum Vr = 3**, satisfying both conditions above: 4 + 3 > 6 and 4 > 6/2. A write completes as soon as **4 of 6** copies confirm. As a result Aurora **survives the loss of an entire AZ** (2 copies) and still accepts writes, and survives an AZ plus one extra copy without losing data. Note that Aurora ships only redo log records to the 6 copies rather than full data pages.
 
 There's a common misconception worth correcting here: in steady state, **Aurora doesn't really do quorum reads**. The Vr = 3 figure exists so that the inequality W + R > N always holds — a design constraint that keeps the system safe after failures. But on the hot read path, Aurora **doesn't gather 3 of 6 copies**: the writer knows exactly which copy holds the latest version of each block, so it reads straight from that **single** copy. The 3/6 read quorum only really kicks in during **recovery** — an instance restarting, a replica being promoted to a new writer, or a lost copy being rebuilt.
 
@@ -86,9 +86,9 @@ The second problem sounds entirely different: in a cluster, we need exactly one 
 
 Surprisingly, the same principle from Section 1 solves it. This time **both quorums are one and the same** — the set of votes. A candidate becomes leader only by collecting a **majority** of votes. Setting Q₁ = Q₂ = majority into the overlap constraint gives **M + M > N**, i.e. each leader needs **M > N/2** votes. In a 3-node cluster, a candidate needs 2 votes: its own plus one more.
 
-Why does this prevent two leaders? Because any two majority sets are forced to share at least one voter — exactly the overlap property from Section 1. And each voter casts **only one vote per <Tooltip content="A logical time period with at most one leader; each new election round increments the term monotonically, distinguishing old leaders from new ones">term</Tooltip>**. A member can't vote for both candidate A and candidate B in the same term; yet two majorities must share at least one voter — so at most one candidate can reach a majority. **At most one leader per term.**
+Why does this prevent two leaders? Because any two majority sets are forced to share at least one voter — exactly the overlap property from Section 1. And each voter casts **only one vote per term**. A member can't vote for both candidate A and candidate B in the same term; yet two majorities must share at least one voter — so at most one candidate can reach a majority. **At most one leader per term.**
 
-There's one practical gap left: the handover. The old leader may not yet know it's been replaced (due to network delay) while the new leader has just come up — in that instant, both think they're in charge. This is exactly <Tooltip content="A situation where the cluster splits in two and each half believes it is the primary, each with its own leader accepting writes — leading to diverging data that can't be reconciled">split-brain</Tooltip>. The fix is a <Tooltip content="A time-bounded grant of leadership; it must be continuously renewed, and if it expires without renewal the holder is considered to have lost leadership">lease</Tooltip>: leadership is granted for a limited time, and the new leader must **wait for the old leader's lease to expire** before it starts serving writes. That way there's never a window in which two leaders both accept writes.
+There's one practical gap left: the handover. The old leader may not yet know it's been replaced (due to network delay) while the new leader has just come up — in that instant, both think they're in charge. This is exactly split-brain. The fix is a lease: leadership is granted for a limited time, and the new leader must **wait for the old leader's lease to expire** before it starts serving writes. That way there's never a window in which two leaders both accept writes.
 
 The interesting part: this isn't distant theory. DynamoDB from Section 2 elects a leader for each group of 3 replicas in exactly this way — the leader holds its role via a lease, refreshed by heartbeats; when the heartbeats stop, the remaining replicas elect a new leader. One quorum principle running both use cases.
 

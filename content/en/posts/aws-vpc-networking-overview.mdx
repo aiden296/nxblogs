@@ -8,7 +8,7 @@ enableComment: true
 
 # AWS VPC Networking: Site-to-Site VPN, Direct Connect, Transit Gateway, Endpoints, and What to Remember for the SAA Exam
 
-Your system has grown up. It started as one tidy <Tooltip content="Virtual Private Cloud — your private virtual network in AWS, where resources like EC2 and RDS live">VPC</Tooltip>. Now there are dozens of VPCs scattered across multiple accounts, plus an on-premises data center (run in-house by the company) that still holds most of the internal data. And a pile of connectivity questions starts landing on your desk:
+Your system has grown up. It started as one tidy VPC. Now there are dozens of VPCs scattered across multiple accounts, plus an on-premises data center (run in-house by the company) that still holds most of the internal data. And a pile of connectivity questions starts landing on your desk:
 
 - How do you connect the on-prem data center to a VPC on AWS securely — and how do you do it quickly versus how do you do it with stable, high bandwidth?
 - Two VPCs in two different accounts need to talk to each other over private IPs — how do you wire that up? And what if it's fifty VPCs?
@@ -19,7 +19,7 @@ Your system has grown up. It started as one tidy <Tooltip content="Virtual Priva
 
 Here's the interesting part: **each question above maps to exactly one networking service that AWS built to solve it.** There's no all-purpose "network service" — instead there's a whole family of connectivity tools, each filling a specific need: reach outward, reach each other, reach AWS services privately, inspect and filter traffic, and optimize the cost of moving data.
 
-This post is the map to tell them apart. For each service I'll go through: what problem it solves, the core features, real use cases, and the points that tend to show up on the <Tooltip content="AWS Certified Solutions Architect – Associate, the associate-level AWS solutions architect certification">SAA</Tooltip> exam.
+This post is the map to tell them apart. For each service I'll go through: what problem it solves, the core features, real use cases, and the points that tend to show up on the SAA exam.
 
 > **Note:** This is an overview meant to build a mental model and let you recognize the right answer fast in the exam. Most of the traps in SAA questions live at the **boundary** between services — VPN or Direct Connect, Peering or Transit Gateway, Gateway Endpoint or Interface Endpoint — so this post focuses on why each one exists and how they differ.
 
@@ -38,7 +38,7 @@ Every service in this post falls into one of six groups, each answering a differ
 | "How do I inspect and filter traffic for security?"     | **Inspection & filtering**   | Traffic Mirroring, Network Firewall       |
 | "Why is the data-transfer bill so high?"                | **Cost**                     | Data-transfer pricing rules               |
 
-One idea runs through the whole post — pin it down first: when you connect two private networks (VPC to VPC, or VPC to on-prem), the foundational rule is that their address ranges must **not overlap**. Each network is described by a <Tooltip content="Classless Inter-Domain Routing — a way to write a range of IP addresses, e.g. 10.0.0.0/16 covers the IPs from 10.0.0.0 to 10.0.255.255">CIDR</Tooltip> (an IP range). If two networks share an IP range, the router can't tell which side an address belongs to — so every form of peer-to-peer connection requires non-overlapping CIDRs. Keep that in mind, and let's walk through each group.
+One idea runs through the whole post — pin it down first: when you connect two private networks (VPC to VPC, or VPC to on-prem), the foundational rule is that their address ranges must **not overlap**. Each network is described by a CIDR (an IP range). If two networks share an IP range, the router can't tell which side an address belongs to — so every form of peer-to-peer connection requires non-overlapping CIDRs. Keep that in mind, and let's walk through each group.
 
 ---
 
@@ -46,16 +46,16 @@ One idea runs through the whole post — pin it down first: when you connect two
 
 **Site-to-Site VPN** creates an encrypted tunnel between an on-prem data center and a VPC, running **over the public internet**. Its biggest advantage is that it's extremely fast to set up (minutes to tens of minutes) and requires laying no physical cabling at all.
 
-Its foundation is <Tooltip content="Internet Protocol Security — a suite of protocols that creates an encrypted tunnel between two networks, protecting data as it crosses a public network">IPsec</Tooltip> — a protocol suite that wraps packets in an encrypted "tunnel," so that even as data crosses the internet, an eavesdropper in the middle sees only meaningless bytes. A VPN connection needs two ends, each a "gateway":
+Its foundation is IPsec — a protocol suite that wraps packets in an encrypted "tunnel," so that even as data crosses the internet, an eavesdropper in the middle sees only meaningless bytes. A VPN connection needs two ends, each a "gateway":
 
-- **Virtual Private Gateway** is the VPN gateway on the AWS side — you attach it to the VPC. You can set a custom <Tooltip content="Autonomous System Number — an identifier for an autonomous network in the BGP routing protocol; each side of a BGP connection has its own Autonomous System Number">Autonomous System Number</Tooltip> on the Virtual Private Gateway if you want.
+- **Virtual Private Gateway** is the VPN gateway on the AWS side — you attach it to the VPC. You can set a custom Autonomous System Number on the Virtual Private Gateway if you want.
 - **Customer Gateway** represents the on-prem device (a physical or software router). In AWS, you declare the Customer Gateway with the public IP address of that device.
 
 ### 2.1. The path of a request, from on-prem to EC2
 
 To see how the pieces above — route table, BGP, route propagation, Security Group — work together, trace one concrete request. Say the on-prem server has IP `192.168.1.10` and an EC2 instance in the VPC has private IP `10.0.1.20`; the VPC uses CIDR `10.0.0.0/16`, and the on-prem network uses `192.168.0.0/16`.
 
-1. **The on-prem server creates the request.** The server sends a packet to destination `10.0.1.20`. It knows nothing about the VPN — it just sees an address on another network, so it hands the packet to its <Tooltip content="Default gateway — the default router a device sends packets to when the destination is outside its local network">default gateway</Tooltip> (the internal router).
+1. **The on-prem server creates the request.** The server sends a packet to destination `10.0.1.20`. It knows nothing about the VPN — it just sees an address on another network, so it hands the packet to its default gateway (the internal router).
 2. **The on-prem router routes it into the tunnel.** The on-prem router has a route declaring that the `10.0.0.0/16` range (the VPC's CIDR) must go through the VPN tunnel. This is the critical config step: without this route, the packet never enters the tunnel.
 3. **The Customer Gateway encrypts.** The Customer Gateway wraps the original packet in an encapsulation layer (encapsulation — the original packet becomes the payload inside a new packet) and encrypts it with IPsec, then sends it across the internet to the public IP of the AWS-side tunnel endpoint.
 4. **The Virtual Private Gateway decrypts.** The Virtual Private Gateway on the AWS side receives the packet, decrypts it, strips the encapsulation, and recovers the original packet bound for `10.0.1.20`.
@@ -90,7 +90,7 @@ How it works: at a **Direct Connect Location** (an AWS physical connection point
 - **Dedicated:** a physical port reserved for you, at **1 / 10 / 100 Gbps**. Requested through AWS, provisioned by a Direct Connect partner.
 - **Hosted:** bought through a partner, with flexible capacity from **50 Mbps to 10 Gbps**, scalable up or down on demand.
 
-On a DX connection, you create <Tooltip content="Virtual Interface — a virtual interface configured on a Direct Connect connection to route traffic to a specific kind of destination">VIFs</Tooltip> (virtual interfaces) depending on where you want to go:
+On a DX connection, you create VIFs (virtual interfaces) depending on where you want to go:
 
 - **Private VIF**: reach VPC resources by private IP (e.g. EC2). Connects to a VGW or a Direct Connect Gateway.
 - **Public VIF**: reach AWS public services (S3, DynamoDB...) by public IP, but over the private DX path rather than the internet.
@@ -165,11 +165,11 @@ The core difference from peering: TGW allows **transitive routing**. Everything 
 
 Standout features, each a "keyword" in exam questions:
 
-- **Cross-account via RAM:** share a TGW with other accounts using <Tooltip content="AWS Resource Access Manager — a service for sharing AWS resources across multiple accounts in an organization">RAM</Tooltip>.
+- **Cross-account via RAM:** share a TGW with other accounts using RAM.
 - **Cross-region:** two TGWs in two regions can peer with each other.
 - **Route tables for segmentation:** a TGW has its own route tables, letting you control which attachment can reach which — used to isolate (segment) network domains.
-- **Supports IP multicast:** TGW is the **only** AWS service that supports <Tooltip content="IP multicast — sending one packet to many subscribed receivers at once, instead of sending a separate copy to each receiver">IP multicast</Tooltip>. When you see "multicast," think TGW.
-- **Scale VPN bandwidth with ECMP:** a Site-to-Site VPN is capped around 1.25 Gbps per tunnel. With TGW, you use <Tooltip content="Equal-Cost Multi-Path routing — routing that splits load across several paths of the same 'cost' at once, aggregating their bandwidth">ECMP</Tooltip> to bundle multiple parallel VPN connections, aggregating bandwidth beyond the ceiling of a single connection.
+- **Supports IP multicast:** TGW is the **only** AWS service that supports IP multicast. When you see "multicast," think TGW.
+- **Scale VPN bandwidth with ECMP:** a Site-to-Site VPN is capped around 1.25 Gbps per tunnel. With TGW, you use ECMP to bundle multiple parallel VPN connections, aggregating bandwidth beyond the ceiling of a single connection.
 
 - **Use case:** a connectivity hub for hundreds of VPCs and many accounts; sharing one Direct Connect across multiple accounts; scaling VPN bandwidth; controlled network segmentation.
 - **Remember:** many VPCs / cross-account / need transitive routing means Transit Gateway. Increasing Site-to-Site VPN bandwidth means TGW + ECMP.
@@ -193,11 +193,11 @@ When you see "access S3/DynamoDB privately, off the internet, save cost," the an
 ### 7.2. Interface Endpoint (AWS PrivateLink)
 
 - For **most other AWS services**, as well as your own or third-party services.
-- Works by provisioning an <Tooltip content="Elastic Network Interface — a virtual network card attached to an instance/subnet, carrying a private IP inside the VPC">ENI</Tooltip> with a private IP right in your subnet. Because it's an ENI, it uses a **Security Group** for access control.
+- Works by provisioning an ENI with a private IP right in your subnet. Because it's an ENI, it uses a **Security Group** for access control.
 - Has a cost (per hour + per GB processed).
 - Reachable over both Direct Connect and VPN — so it's the choice when you need to reach a private service from **on-prem**.
 
-**AWS PrivateLink** is the technology behind Interface Endpoints, and the most secure way for **a service provider to expose their service to thousands of other VPCs** without peering, without an Internet Gateway, without touching route tables: the consumer provisions an Interface Endpoint connecting to a <Tooltip content="Network Load Balancer — a Layer 4 (TCP/UDP) load balancer that handles very high traffic at low latency">NLB</Tooltip> placed in front of the provider's service.
+**AWS PrivateLink** is the technology behind Interface Endpoints, and the most secure way for **a service provider to expose their service to thousands of other VPCs** without peering, without an Internet Gateway, without touching route tables: the consumer provisions an Interface Endpoint connecting to a NLB placed in front of the provider's service.
 
 - **Remember an on-prem trap:** a Gateway Endpoint **cannot** be reached from on-prem (over DX/VPN). If the question says "need to access S3 privately from the on-prem data center," the answer is an **Interface Endpoint** for S3, not a Gateway Endpoint.
 
@@ -228,11 +228,11 @@ The last two services aren't about "connecting" — they're about **looking into
 - **Non-intrusive:** no agent needs to be installed on the source instances.
 - Source and destination can be in the same VPC, or different VPCs (via peering / Transit Gateway).
 
-- **Use case:** feed traffic into <Tooltip content="Intrusion Detection System — analyzes network traffic to identify attack behavior">IDS</Tooltip> appliances, content inspection, network troubleshooting, post-incident investigation.
+- **Use case:** feed traffic into IDS appliances, content inspection, network troubleshooting, post-incident investigation.
 
 ### 9.2. AWS Network Firewall
 
-To see why this service exists, recall the limits of the filtering tools you already have. Security Groups and <Tooltip content="Network Access Control List — a list of rules that filter traffic at the subnet level, operating statelessly">NACLs</Tooltip> work only at Layer 3/4 (IP and port). <Tooltip content="Web Application Firewall — filters Layer 7 HTTP/HTTPS traffic, blocking web exploits like SQL injection and XSS">WAF</Tooltip> filters HTTP at Layer 7 but only attaches to ALB, CloudFront, API Gateway. So if you need to protect an **entire VPC** at the network layer, with deep packet inspection, what then?
+To see why this service exists, recall the limits of the filtering tools you already have. Security Groups and NACLs work only at Layer 3/4 (IP and port). WAF filters HTTP at Layer 7 but only attaches to ALB, CloudFront, API Gateway. So if you need to protect an **entire VPC** at the network layer, with deep packet inspection, what then?
 
 That's **AWS Network Firewall** — a managed firewall that protects at the **whole-VPC** level, from Layer 3 to Layer 7. A handy way to remember "layers": Layer 3/4 is IPs and ports (who talks to whom), while Layer 7 is application content (HTTP, domain names) — inspecting all the way to Layer 7 means the firewall understands the content, not just the address.
 
@@ -240,7 +240,7 @@ Core features:
 
 - Protects VPC-to-VPC traffic, in/out of the internet, and even traffic to/from Direct Connect & Site-to-Site VPN.
 - Under the hood, it uses an **AWS Gateway Load Balancer** to steer traffic through the inspection engines.
-- A rich rule set: stateful/stateless, **domain-name** filtering (allow/deny lists of domains, URLs), intrusion prevention (<Tooltip content="Intrusion Prevention System — not only detects but actively blocks attack traffic">IPS</Tooltip>), signature-based inspection.
+- A rich rule set: stateful/stateless, **domain-name** filtering (allow/deny lists of domains, URLs), intrusion prevention (IPS), signature-based inspection.
 - Centrally managed across accounts via **AWS Firewall Manager**; sends logs to S3, CloudWatch, Kinesis Data Firehose.
 
 - **Remember:** filter/inspect across an entire VPC, Layer 3–7, filter by domain means **Network Firewall**. Distinguish from WAF (HTTP Layer 7 only, on ALB/CloudFront/API Gateway), Shield (DDoS protection), Security Group/NACL (basic Layer 3/4 filtering).

@@ -58,8 +58,8 @@ Snow Family comes in three "sizes":
 - **AWS Snowcone** — a small, rugged, portable device (fits in a backpack), with 8 TB (HDD) or 14 TB (SSD) of capacity. Good for tight spaces and harsh conditions. It can transfer data offline (ship the device back) or online via DataSync itself (the agent comes pre-installed).
 - **AWS Snowball Edge** — the "workhorse" for large migrations, in two variants:
   - **Storage Optimized**: maximum capacity (210 TB SSD), used to move large volumes of data.
-  - **Compute Optimized**: more vCPU/RAM, to run EC2 and Lambda right on the device — serving <Tooltip content="Edge computing — processing data right where it is generated instead of sending everything to the cloud, useful when the network is weak/intermittent or low latency is needed">edge computing</Tooltip> in places with poor connectivity.
-  - <Tooltip content="Block storage is a raw disk volume like EBS; object storage is an object store like S3 (files plus metadata, accessed via API)">Both block and object storage</Tooltip> are available on the device.
+  - **Compute Optimized**: more vCPU/RAM, to run EC2 and Lambda right on the device — serving edge computing in places with poor connectivity.
+  - Both block and object storage are available on the device.
 - **AWS Snowmobile** — exabyte scale: a 45-foot shipping container that carries up to 100 PB per trip. Used to relocate an entire massive data center (10+ PB).
 
 The two main use cases for Snow Family:
@@ -67,7 +67,7 @@ The two main use cases for Snow Family:
 - **Data migration:** get large volumes of data to the cloud when the network can't handle it — historical backups, video libraries, scientific data, and so on.
 - **Edge computing:** with Snowcone and Snowball Edge Compute Optimized, you process data on the spot (ships, oil rigs, mines, military vehicles, remote areas) — where the internet is intermittent or absent — and only send the results/device back later.
 
-Snow Family **does not load** data directly into <Tooltip content="A very cheap S3 storage tier for archival data that is rarely accessed, in exchange for slower retrieval times">S3 Glacier</Tooltip>. Data always lands in S3 (Standard) first, after which you use an S3 Lifecycle rule to automatically move it to Glacier.
+Snow Family **does not load** data directly into S3 Glacier. Data always lands in S3 (Standard) first, after which you use an S3 Lifecycle rule to automatically move it to Glacier.
 
 The reason: the data enters S3 through an import process, rather than using the S3 API like other services do.
 
@@ -77,12 +77,12 @@ The reason: the data enters S3 through an import process, rather than using the 
 
 Core features:
 
-- **Bidirectional and multi-point:** moves data between on-premises and AWS, and between regions/storage services within AWS. On the on-premises side, you install a DataSync agent (a virtual machine) to read data over <Tooltip content="Network File System — a popular file-sharing protocol on Linux/Unix">NFS</Tooltip> or <Tooltip content="Server Message Block — the Windows file-sharing protocol">SMB</Tooltip>.
+- **Bidirectional and multi-point:** moves data between on-premises and AWS, and between regions/storage services within AWS. On the on-premises side, you install a DataSync agent (a virtual machine) to read data over NFS or SMB.
 - **Diverse targets:** S3, EFS, and FSx.
 - **Scheduled, not real-time:** you schedule runs by the hour / day / week. DataSync is not a real-time replication tool — it runs periodic "sync passes."
 - **Preserves metadata & permissions:** file ownership, timestamps, and access permissions are all retained — important when migrating a real file server.
 
-The big picture: the on-premises agent reads data over NFS/SMB, encrypts it, and ships it over <Tooltip content="Transport Layer Security — the protocol that encrypts data in transit so it cannot be read while crossing the internet">TLS</Tooltip> to the DataSync service inside the Region, which writes it down to the storage targets — S3 (any storage class), EFS, or FSx:
+The big picture: the on-premises agent reads data over NFS/SMB, encrypts it, and ships it over TLS to the DataSync service inside the Region, which writes it down to the storage targets — S3 (any storage class), EFS, or FSx:
 
 <ExcalidrawDiagram
   src="/aws-datasync-architecture.excalidraw"
@@ -103,35 +103,35 @@ FSx comes in four flavors, each aimed at a different world:
 
 ### 3.1. FSx for Windows File Server
 
-A true **Windows-native** file system: it uses the SMB protocol and the NTFS file system, integrates with <Tooltip content="Active Directory — Microsoft's directory service for managing users, computers, and access permissions in a Windows environment">Active Directory</Tooltip> for user permissions, and supports <Tooltip content="Access Control List — defines who can read/write each file or folder">ACLs</Tooltip> and user quotas. It supports Windows enterprise features like <Tooltip content="Distributed File System (DFS) Namespaces — groups multiple file systems into a single unified namespace, letting users reach them through one common path even though the data is spread out">DFS Namespaces</Tooltip> to group files spread across multiple file systems.
+A true **Windows-native** file system: it uses the SMB protocol and the NTFS file system, integrates with Active Directory for user permissions, and supports ACLs and user quotas. It supports Windows enterprise features like DFS Namespaces to group files spread across multiple file systems.
 
 Points often tested:
 
 - **Not just for Windows:** even though it's a Windows file system, it can be mounted on Linux EC2 too, not only Windows EC2.
 - **High performance:** scales to tens of GB/s of throughput, millions of IOPS, and hundreds of PB of data.
-- **Two storage options:** SSD for latency-sensitive workloads (databases, media processing, data analytics) and HDD for broader, cheaper workloads (home directories, <Tooltip content="Content Management System — software like WordPress or Drupal">CMS</Tooltip>).
-- **Access from on-premises:** reachable from on-premises infrastructure via <Tooltip content="VPN — an encrypted tunnel over the public internet to connect an on-premises network to a VPC">VPN</Tooltip> or <Tooltip content="AWS Direct Connect — a dedicated, stable physical link connecting your data center straight into AWS, bypassing the public internet">Direct Connect</Tooltip>.
+- **Two storage options:** SSD for latency-sensitive workloads (databases, media processing, data analytics) and HDD for broader, cheaper workloads (home directories, CMS).
+- **Access from on-premises:** reachable from on-premises infrastructure via VPN or Direct Connect.
 - **High availability:** can be configured as Multi-AZ (spread across multiple Availability Zones) for fault tolerance; data is backed up daily to S3.
 
 **Use case:** on-premises Windows applications that need a file share in the cloud.
 
 ### 3.2. FSx for Lustre
 
-**Lustre** is an open-source parallel, distributed file system for large-scale computing — its name is a blend of "Linux" + "cluster." FSx for Lustre delivers throughput up to hundreds of GB/s, millions of IOPS, and sub-millisecond latency — built for <Tooltip content="High Performance Computing — using many machines running in parallel for scientific simulation, large-scale analysis, and ML training">HPC</Tooltip> workloads.
+**Lustre** is an open-source parallel, distributed file system for large-scale computing — its name is a blend of "Linux" + "cluster." FSx for Lustre delivers throughput up to hundreds of GB/s, millions of IOPS, and sub-millisecond latency — built for HPC workloads.
 
 Points often tested:
 
 - **Two storage options:** SSD for low-latency, IOPS-heavy workloads with small & random file operations; HDD for throughput-oriented workloads with large & sequential file operations.
 - **Seamless S3 integration:** it can read S3 as a file system (through FSx) and write computation results back to S3 — a great fit for the pattern "pull raw data from S3, process it at high speed on Lustre, push the output back to S3."
-- **Access from on-premises:** usable from on-premises servers via <Tooltip content="VPN — an encrypted tunnel over the public internet to connect an on-premises network to a VPC">VPN</Tooltip> or <Tooltip content="AWS Direct Connect — a dedicated, stable physical link connecting your data center straight into AWS, bypassing the public internet">Direct Connect</Tooltip>.
+- **Access from on-premises:** usable from on-premises servers via VPN or Direct Connect.
 
-**Use case:** Machine Learning, HPC, video processing, financial modeling, <Tooltip content="Electronic Design Automation — software for designing and simulating microchips, which demands very heavy I/O">Electronic Design Automation (EDA)</Tooltip> — generally, any workload that needs extremely fast I/O over large datasets.
+**Use case:** Machine Learning, HPC, video processing, financial modeling, Electronic Design Automation (EDA) — generally, any workload that needs extremely fast I/O over large datasets.
 
 ### 3.3. FSx for NetApp ONTAP
 
 **The problem:** bring ONTAP workloads to the cloud.
 
-<Tooltip content="NetApp ONTAP — a very popular enterprise storage operating system; many companies run it on-premises and want to bring their workloads over as-is">NetApp ONTAP</Tooltip> is a widely used enterprise storage platform. FSx for NetApp ONTAP is its managed version on AWS, notable for being **multi-protocol**: it supports NFS, SMB, and <Tooltip content="iSCSI — a protocol that exposes block (raw disk) storage over an IP network, as if it were a directly attached drive">iSCSI</Tooltip> simultaneously. That makes it the most broadly compatible FSx flavor.
+NetApp ONTAP is a widely used enterprise storage platform. FSx for NetApp ONTAP is its managed version on AWS, notable for being **multi-protocol**: it supports NFS, SMB, and iSCSI simultaneously. That makes it the most broadly compatible FSx flavor.
 
 Points often tested:
 
@@ -140,7 +140,7 @@ Points often tested:
 - **Full ONTAP feature set:** snapshots, replication, compression, deduplication, and low cost.
 - **Point-in-time cloning:** create an instant copy at a moment in time — very useful for testing new workloads against real data without touching the original.
 
-**Use case:** migrate workloads running on NetApp ONTAP or <Tooltip content="Network Attached Storage — a network-connected storage device that serves files over NFS/SMB to many machines on a local network">NAS</Tooltip> on-premises to AWS with almost no changes, or when you need a file system that works well with both Linux and Windows.
+**Use case:** migrate workloads running on NetApp ONTAP or NAS on-premises to AWS with almost no changes, or when you need a file system that works well with both Linux and Windows.
 
 ### 3.4. FSx for OpenZFS
 
@@ -202,7 +202,7 @@ Provides **block storage** (raw disk volumes) over the iSCSI protocol, backed up
 
 **Use case:** back up on-premises volumes to the cloud, or provide disaster recovery for block data.
 
-**Recovery points — the anchor for recovering after a failure.** A Volume Gateway periodically creates a <Tooltip content="Recovery point — a consistent point-in-time snapshot of a volume, stored durably in AWS; it can be used to recreate a volume or be exported as an EBS snapshot">recovery point</Tooltip> for each volume — a consistent point-in-time snapshot of the volume, stored durably in AWS. This is what disaster recovery rests on: even if the on-premises gateway hardware fails completely, the data and its recovery points remain intact in AWS.
+**Recovery points — the anchor for recovering after a failure.** A Volume Gateway periodically creates a recovery point for each volume — a consistent point-in-time snapshot of the volume, stored durably in AWS. This is what disaster recovery rests on: even if the on-premises gateway hardware fails completely, the data and its recovery points remain intact in AWS.
 
 From that, the correct recovery process when the hardware running the gateway dies completely is:
 
@@ -216,7 +216,7 @@ Two traps that show up on the exam:
 
 ### 4.4. Tape Gateway
 
-Many enterprises still have **tape**-based backup processes. Tape Gateway emulates a <Tooltip content="Virtual Tape Library — a virtual tape library that simulates tape drives and libraries so legacy backup software thinks it is writing to real tape">Virtual Tape Library (VTL)</Tooltip>: the existing backup software keeps writing to "tape" as before, but the data is actually stored in S3 and Glacier.
+Many enterprises still have **tape**-based backup processes. Tape Gateway emulates a Virtual Tape Library (VTL): the existing backup software keeps writing to "tape" as before, but the data is actually stored in S3 and Glacier.
 
 **Use case:** replace expensive physical tape infrastructure with the cloud, without changing the backup software.
 
@@ -228,7 +228,7 @@ Many enterprises still have **tape**-based backup processes. Tape Gateway emulat
 
 Core features:
 
-- Supports three protocols: SFTP (<Tooltip content="SSH File Transfer Protocol — secure file transfer over an encrypted SSH channel">SSH File Transfer Protocol</Tooltip>), FTPS (<Tooltip content="FTP over SSL/TLS — FTP with an added encryption layer">FTP with TLS encryption</Tooltip>), and FTP (unencrypted, for internal networks only).
+- Supports three protocols: SFTP (SSH File Transfer Protocol), FTPS (FTP with TLS encryption), and FTP (unencrypted, for internal networks only).
 - The backing storage is Amazon S3 or Amazon EFS.
 - **Authentication integration** with existing identity systems: Microsoft Active Directory, LDAP, Amazon Cognito, or custom (via Lambda).
 - The infrastructure is AWS-managed, auto-scaling, billed per provisioned endpoint (hourly) plus data transferred.

@@ -10,7 +10,7 @@ enableComment: true
 
 You've just finished coding a Shopify App, `shopify app dev` runs smoothly on local, everything works. And then you ask yourself: "How do I deploy this to Shopify?"
 
-This is where many developers start getting confused. Because the truth is: **Shopify does not host your application**. Shopify is not a PaaS platform like Heroku or Vercel where you push code and it just runs. Shopify only manages your app at a **logical level** — scopes, permissions, app info, <Tooltip content="Authorization protocol that lets an app access resources on behalf of a user without handling their password">OAuth</Tooltip> flow, billing, ... — while the "actually running" part is your responsibility.
+This is where many developers start getting confused. Because the truth is: **Shopify does not host your application**. Shopify is not a PaaS platform like Heroku or Vercel where you push code and it just runs. Shopify only manages your app at a **logical level** — scopes, permissions, app info, OAuth flow, billing, ... — while the "actually running" part is your responsibility.
 
 Think of Shopify as the **management office of a shopping mall**. They manage store signs, lease agreements, access cards, and security policies. But they **don't build the store for you**. You have to build the physical store yourself (deploy your app to the cloud), then go to the management office to register (create a logical app on Shopify) and point it to your store's address.
 
@@ -31,7 +31,7 @@ Before you begin, make sure you have:
 - **Shopify Partners account** — register at [partners.shopify.com](https://partners.shopify.com)
 - **Cloud provider ready** — AWS (App Runner, ECS, EC2), Railway, Fly.io, Render, or any platform you're familiar with
 - **Development Store** — to test the app after deployment
-- <Tooltip content="Shopify's official command-line tool for scaffolding, developing, and deploying apps">Shopify CLI</Tooltip> — `@shopify/cli` installed
+- Shopify CLI — `@shopify/cli` installed
 - **`shopify.app.toml` file** — your app's config file (you can have multiple files for different environments, e.g., `shopify.app.staging.toml`, `shopify.app.production.toml`)
 
 ---
@@ -100,8 +100,8 @@ This step **isn't always necessary**, but if your app falls into one of the foll
 
 Shopify categorizes API scopes into two groups:
 
-- <Tooltip content="basic permissions like `read_products`, `write_products`, `read_orders`. You can use these immediately without approval">Standard scopes</Tooltip>
-- <Tooltip content="permissions related to sensitive data or high-impact actions (creating orders, accessing all customer data, ...). Shopify requires you to explain your reasons and get approved before using them">Restricted scopes</Tooltip>
+- Standard scopes
+- Restricted scopes
 
 ### How to Enable
 
@@ -117,8 +117,8 @@ Shopify categorizes API scopes into two groups:
 
 Go back to **dev.shopify.com**, navigate to the **Settings** section of the app you just created, and you'll find:
 
-- <Tooltip content="also known as API Key">Client ID</Tooltip>
-- <Tooltip content="also known as API Secret Key">Client Secret</Tooltip>
+- Client ID
+- Client Secret
 
 These are the "keys" that allow your app to authenticate and communicate with Shopify. Update these values in your cloud application's environment variables:
 
@@ -188,7 +188,7 @@ After installation, verify the following:
 - **OAuth flow** completes without errors — app is installed successfully
 - **App loads** correctly in Shopify Admin — no blank page or CORS errors
 - **API calls** work — try basic operations (read products, create draft order, ...)
-- <Tooltip content="HTTP callbacks Shopify sends to your URL when an event occurs (new order, product updated, ...)">Webhooks</Tooltip> are received (if the app registered any) — check logs on the cloud
+- Webhooks are received (if the app registered any) — check logs on the cloud
 - **App Extensions** render correctly (if applicable) — check on the storefront or checkout
 
 > If the OAuth flow has a redirect error, check whether the `redirect_urls` in the toml file exactly match the URL on the cloud (including the `https://` protocol and trailing path).

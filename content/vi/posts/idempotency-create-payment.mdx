@@ -12,7 +12,7 @@ Hãy tưởng tượng: bạn đang ở quầy thanh toán online, bấm nút **
 
 Nửa tiếng sau, bạn nhận được **3 email xác nhận** và tài khoản bị trừ **$300**.
 
-Đây là cơn ác mộng kinh điển của mọi đội ngũ làm payment, và là lý do tồn tại của một khái niệm tưởng nghe rất hàn lâm: <Tooltip content="Tính chất của một thao tác mà thực hiện 1 lần hay N lần đều cho cùng kết quả trên hệ thống">Idempotency</Tooltip>. Bài này sẽ đi từ nguồn gốc toán học của nó, sang cách nó hoạt động trong API, và cuối cùng là một implementation chạy được cho **Create Payment** với Node.js + Redis.
+Đây là cơn ác mộng kinh điển của mọi đội ngũ làm payment, và là lý do tồn tại của một khái niệm tưởng nghe rất hàn lâm: Idempotency. Bài này sẽ đi từ nguồn gốc toán học của nó, sang cách nó hoạt động trong API, và cuối cùng là một implementation chạy được cho **Create Payment** với Node.js + Redis.
 
 ---
 
@@ -82,7 +82,7 @@ Một số endpoint idempotent **tự nhiên** vì ngữ nghĩa:
 - `PUT /users/123 {"name": "Quang"}` — set state về một giá trị cụ thể; chạy 10 lần vẫn ra cùng state.
 - `DELETE /orders/abc` — lần đầu xoá, các lần sau no-op (hoặc trả 404 idempotent).
 
-Còn `POST /payments` thì **không** tự nhiên idempotent. Mỗi lần POST mặc định = một payment mới. Để biến nó thành idempotent, ta cần một <Tooltip content="định danh do client cung cấp, không phải server sinh ra, để gắn nhãn duy nhất cho một ý định thao tác">định danh ngoại</Tooltip> — đó chính là <Tooltip content="Một chuỗi duy nhất (thường là UUID v4) gắn vào HTTP header để server nhận biết các retry của cùng một ý định">Idempotency Key</Tooltip>.
+Còn `POST /payments` thì **không** tự nhiên idempotent. Mỗi lần POST mặc định = một payment mới. Để biến nó thành idempotent, ta cần một định danh ngoại — đó chính là Idempotency Key.
 
 ### 2.3. Sơ đồ luồng tổng quát
 
@@ -260,7 +260,7 @@ Hai dòng quan trọng nhất trong toàn bộ handler:
 ## 5. Lời khuyên thực tế
 
 1. **Áp dụng cho mọi `POST` quan trọng**: payment, order, refund, send-email, send-sms, transfer. Bất kỳ thao tác nào "làm 2 lần là sai" đều cần idempotency.
-2. **Đừng bắt đầu phức tạp.** Pattern `SET NX + TTL + request hash` ở trên đã bao phủ 90% use case. Lease, <Tooltip content="Giao thức điều phối phân tán gồm pha prepare và pha commit, đảm bảo tất cả node cùng commit hoặc cùng rollback">two-phase commit</Tooltip>, outbox pattern chỉ cần khi bạn ở quy mô như Stripe hay AWS.
+2. **Đừng bắt đầu phức tạp.** Pattern `SET NX + TTL + request hash` ở trên đã bao phủ 90% use case. Lease, two-phase commit, outbox pattern chỉ cần khi bạn ở quy mô như Stripe hay AWS.
 3. **Đặt vào API contract ngay từ đầu.** Thêm `Idempotency-Key` vào một API đã có 1000 client đang dùng là cực khổ — bạn phải migrate dần, hỗ trợ cả mode có và không có key. Cho nên: ngày đầu tiên thiết kế POST endpoint, hãy hỏi "endpoint này có cần idempotency không?".
 4. **Document rõ behavior**: TTL bao lâu, response khi reuse key, response khi in-progress, format key cho phép. Client SDK sẽ implement retry logic dựa trên những gì bạn document.
 5. **Đo bằng metrics**: tỉ lệ retry hit cache, tỉ lệ 409, tỉ lệ 422. Spike 422 = client đang reuse key sai cách. Spike 409 = có thể có race condition phía client.

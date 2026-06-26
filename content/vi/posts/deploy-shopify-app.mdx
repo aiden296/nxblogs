@@ -10,7 +10,7 @@ enableComment: true
 
 Bạn vừa hoàn thành code một Shopify App, chạy `shopify app dev` mượt mà trên local, mọi thứ đều hoạt động. Và rồi bạn tự hỏi: "Giờ làm sao để deploy lên Shopify?"
 
-Đây là lúc mà nhiều developer mới bắt đầu bối rối. Bởi vì sự thật là: **Shopify không host ứng dụng của bạn**. Shopify không phải là một nền tảng PaaS như Heroku hay Vercel nơi bạn push code lên và nó tự chạy. Shopify chỉ quản lý app ở **mức logic** — scopes, permissions, app info, <Tooltip content="Giao thức ủy quyền cho phép app truy cập tài nguyên thay mặt người dùng mà không cần biết mật khẩu">OAuth</Tooltip> flow, billing, ... — còn phần "chạy thực sự" là việc của bạn.
+Đây là lúc mà nhiều developer mới bắt đầu bối rối. Bởi vì sự thật là: **Shopify không host ứng dụng của bạn**. Shopify không phải là một nền tảng PaaS như Heroku hay Vercel nơi bạn push code lên và nó tự chạy. Shopify chỉ quản lý app ở **mức logic** — scopes, permissions, app info, OAuth flow, billing, ... — còn phần "chạy thực sự" là việc của bạn.
 
 Hãy hình dung Shopify như **ban quản lý một trung tâm thương mại**. Họ quản lý biển hiệu cửa hàng, hợp đồng thuê, thẻ ra vào, quy định an ninh. Nhưng họ **không xây cửa hàng cho bạn**. Bạn phải tự xây dựng cửa hàng vật lý (deploy app lên cloud), sau đó đến ban quản lý để đăng ký (tạo logical app trên Shopify) và trỏ về địa chỉ cửa hàng của mình.
 
@@ -31,7 +31,7 @@ Trước khi bắt đầu, hãy đảm bảo bạn đã có:
 - **Tài khoản Shopify Partners** — đăng ký tại [partners.shopify.com](https://partners.shopify.com)
 - **Cloud provider sẵn sàng** — AWS (App Runner, ECS, EC2), Railway, Fly.io, Render, hoặc bất kỳ nền tảng nào bạn quen thuộc
 - **Development Store** — để test app sau khi deploy
-- <Tooltip content="Công cụ dòng lệnh chính thức của Shopify để tạo, phát triển và deploy app">Shopify CLI</Tooltip> — đã cài đặt `@shopify/cli`
+- Shopify CLI — đã cài đặt `@shopify/cli`
 - **File `shopify.app.toml`** — file cấu hình app của bạn (có thể có nhiều file cho nhiều environment, ví dụ: `shopify.app.staging.toml`, `shopify.app.production.toml`)
 
 ---
@@ -104,8 +104,8 @@ Bước này **không phải lúc nào cũng cần thiết**, nhưng nếu app c
 
 Shopify phân loại API scopes thành hai nhóm:
 
-- <Tooltip content="các quyền cơ bản như `read_products`, `write_products`, `read_orders`. Bạn có thể sử dụng ngay mà không cần phê duyệt">Standard scopes</Tooltip>
-- <Tooltip content="các quyền liên quan đến dữ liệu nhạy cảm hoặc hành động ảnh hưởng lớn (tạo đơn hàng, truy cập toàn bộ customer data, ...). Shopify yêu cầu bạn phải giải thích lý do và được phê duyệt trước khi sử dụng">Restricted scopes</Tooltip>
+- Standard scopes
+- Restricted scopes
 
 ### Cách enable
 
@@ -121,8 +121,8 @@ Shopify phân loại API scopes thành hai nhóm:
 
 Quay lại **dev.shopify.com**, vào phần **Settings** của app vừa tạo, bạn sẽ tìm thấy:
 
-- <Tooltip content="hay còn gọi là API Key">Client ID</Tooltip>
-- <Tooltip content="hay còn gọi là API Secret Key">Client Secret</Tooltip>
+- Client ID
+- Client Secret
 
 Đây là "chìa khóa" để app của bạn có thể xác thực và giao tiếp với Shopify. Hãy cập nhật các giá trị này vào biến môi trường của ứng dụng trên cloud:
 
@@ -202,7 +202,7 @@ Sau khi install, hãy verify các điểm sau:
 - **OAuth flow** hoàn tất không lỗi — app được install thành công
 - **App loads** đúng trong Shopify Admin — không bị blank page hay lỗi CORS
 - **API calls** hoạt động — thử các operation cơ bản (read products, create draft order, ...)
-- <Tooltip content="HTTP callback do Shopify gửi tới URL của bạn khi có sự kiện xảy ra (đơn hàng mới, sản phẩm cập nhật, ...)">Webhooks</Tooltip> được nhận (nếu app có đăng ký) — kiểm tra logs trên cloud
+- Webhooks được nhận (nếu app có đăng ký) — kiểm tra logs trên cloud
 - **App Extensions** render đúng (nếu có) — kiểm tra trên storefront hoặc checkout
 
 > Nếu OAuth flow bị lỗi redirect, hãy kiểm tra lại `redirect_urls` trong file toml có khớp chính xác với URL trên cloud hay không (bao gồm cả protocol `https://` và trailing path).

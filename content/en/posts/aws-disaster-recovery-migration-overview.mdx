@@ -32,8 +32,8 @@ Before the details, pin down two ideas.
 
 **Idea two — the two metrics that decide every DR strategy.** Every DR question revolves around these two numbers:
 
-- <Tooltip content="Recovery Point Objective — the recovery point, measured BACKWARD into the past from the moment of disaster">RPO</Tooltip> is the **maximum amount of data you can afford to lose**. It's the time between the most recent backup/replica and the moment of disaster. An RPO of 1 hour means you accept losing up to 1 hour of data. This number reflects the backup frequency.
-- <Tooltip content="Recovery Time Objective — the recovery time, measured FORWARD into the future from the moment of disaster">RTO</Tooltip> is the **maximum acceptable downtime** to get the system running again. An RTO of 10 minutes means that after a disaster, the system must be back within 10 minutes. This number drives the DR strategy you choose.
+- RPO is the **maximum amount of data you can afford to lose**. It's the time between the most recent backup/replica and the moment of disaster. An RPO of 1 hour means you accept losing up to 1 hour of data. This number reflects the backup frequency.
+- RTO is the **maximum acceptable downtime** to get the system running again. An RTO of 10 minutes means that after a disaster, the system must be back within 10 minutes. This number drives the DR strategy you choose.
 
 RPO answers the question: "How much data will I lose after recovery?"
 
@@ -68,7 +68,7 @@ This is the most important "concept" section of the whole chapter, and the exam 
   alt="Warm standby strategy: a scaled-down copy running on AWS, scale up on failover"
 />
 
-**4. Multi-Site / Hot Site (RPO/RTO near zero, most expensive).** Run the system full-scale in both (or more) places at once in an <Tooltip content="Both sites receive and serve real traffic at the same time; no site is sitting idle waiting">active-active</Tooltip> manner. Traffic is split across both; if one site dies, the other takes the full load almost instantly. RPO/RTO are near zero, but you pay for two parallel production systems.
+**4. Multi-Site / Hot Site (RPO/RTO near zero, most expensive).** Run the system full-scale in both (or more) places at once in an active-active manner. Traffic is split across both; if one site dies, the other takes the full load almost instantly. RPO/RTO are near zero, but you pay for two parallel production systems.
 
 <ExcalidrawDiagram
   src="/aws-dr-multi-site.excalidraw"
@@ -94,11 +94,11 @@ The components and features to know:
 - **Backup Vault:** the "safe" that holds the backups (recovery points). You manage access permissions on this vault.
 - **Cross-Region backup:** copy backups to another region — the foundation for region-level DR.
 - **Cross-Account backup:** copy backups to another account (via AWS Organizations) — to isolate backups from the production account in case it gets compromised.
-- <Tooltip content="Point-In-Time Recovery — restore to any arbitrary moment in the past, not just discrete snapshot marks">PITR</Tooltip> for the services that support it (such as RDS, Aurora, S3...).
+- PITR for the services that support it (such as RDS, Aurora, S3...).
 
 The most "point-scoring" feature on the exam is **AWS Backup Vault Lock**:
 
-- It applies a <Tooltip content="Write Once Read Many — write once, read many times; once written it cannot be altered or deleted within the retention period">WORM</Tooltip> model to the vault: backups become **immutable** — no one can delete or modify them within the retention period, even if the account is taken over. This is the classic shield against ransomware and accidental/malicious deletion.
+- It applies a WORM model to the vault: backups become **immutable** — no one can delete or modify them within the retention period, even if the account is taken over. This is the classic shield against ransomware and accidental/malicious deletion.
 - It has two modes:
   - **Governance mode:** the backups are locked, but a user with special IAM permissions can still bypass the lock (override). Good when you want internal discipline while leaving an "escape hatch" for admins.
   - **Compliance mode:** a hard lock. After a "cooling-off" period, **no one** can delete or change the lock configuration anymore — not even the root user or AWS Support. Use this for strict legal/compliance requirements.
@@ -136,7 +136,7 @@ Strengths:
 
 ## 5. AWS Application Migration Service (MGN) — lift-and-shift into AWS
 
-**AWS Application Migration Service (MGN)** is AWS's primary migration service for the <Tooltip content="Lift-and-shift / rehost — moving an existing server to the cloud as-is, without modifying the application">lift-and-shift</Tooltip> approach. It replaces the older, retired AWS Server Migration Service (SMS).
+**AWS Application Migration Service (MGN)** is AWS's primary migration service for the lift-and-shift approach. It replaces the older, retired AWS Server Migration Service (SMS).
 
 And here's the "aha": MGN uses **the exact same continuous block replication mechanism as DRS**. It continuously copies your source server (physical/virtual/cloud) into a staging area in AWS; when you're ready, you perform a cutover — MGN automatically converts the replica into a natively running EC2 instance and boots it. Because replication has been running in the background all along, the downtime at cutover is extremely short.
 
@@ -164,7 +164,7 @@ So what's the difference between DRS and MGN? Same engine, different purpose:
 How it works:
 
 - DMS runs on a replication instance (an EC2 instance managed by DMS) sitting between source and target.
-- It supports one-time migration (full load) and/or continuous replication via <Tooltip content="Change Data Capture — captures the changes (insert/update/delete) happening at the source and continuously applies them to the target to keep both in sync">CDC</Tooltip>. Thanks to CDC, you can do a full load first, let DMS catch up on new changes, and once both sides are nearly in sync, cut over to the target with tiny downtime.
+- It supports one-time migration (full load) and/or continuous replication via CDC. Thanks to CDC, you can do a full load first, let DMS catch up on new changes, and once both sides are nearly in sync, cut over to the target with tiny downtime.
 - DMS itself is resilient.
 
 There are two migration flavors, and this is the part the exam loves to probe:
@@ -172,7 +172,7 @@ There are two migration flavors, and this is the part the exam loves to probe:
 ### 6.1. Homogeneous vs heterogeneous + the Schema Conversion Tool
 
 - **Homogeneous migration** — the same engine type (e.g. Oracle → Oracle, PostgreSQL → PostgreSQL). Since the schema structures are compatible, you only need DMS to move the data.
-- **Heterogeneous migration** — a different engine type (e.g. Microsoft SQL Server → Aurora, Oracle → PostgreSQL). Now the schema and code (stored procedures, data types...) are incompatible, so you also need the <Tooltip content="AWS Schema Conversion Tool — converts a database's schema and code from one engine to another before DMS moves the data">SCT</Tooltip>: use it to convert the schema to the target engine first, **then** use DMS to move the data.
+- **Heterogeneous migration** — a different engine type (e.g. Microsoft SQL Server → Aurora, Oracle → PostgreSQL). Now the schema and code (stored procedures, data types...) are incompatible, so you also need the SCT: use it to convert the schema to the target engine first, **then** use DMS to move the data.
 
 DMS supports many sources and targets: the source can be a database on-premises, on EC2, RDS, Aurora, S3, Azure SQL...; the target can be RDS, Aurora, Redshift, DynamoDB, S3, OpenSearch, Kinesis, Kafka...
 
@@ -220,7 +220,7 @@ When you need to bring a large block of data (files/objects) into AWS, the core 
 - It runs on a schedule (hourly/daily/weekly) and incrementally — after the first run, it only transfers what changed.
 - It preserves metadata (permissions, timestamps...) — important when migrating file systems.
 
-**Performance lives in the Agent.** DataSync's throughput (transfer speed) depends heavily on the resources you give the Agent — the software that runs on the on-premises side, typically deployed on a <Tooltip content="Virtualization software that runs multiple virtual machines on a single physical host, e.g. VMware ESXi, Microsoft Hyper-V, or Linux KVM">hypervisor</Tooltip>. Starve the Agent of resources and transfers stay slow no matter how fast the network is. Three things to provision generously:
+**Performance lives in the Agent.** DataSync's throughput (transfer speed) depends heavily on the resources you give the Agent — the software that runs on the on-premises side, typically deployed on a hypervisor. Starve the Agent of resources and transfers stay slow no matter how fast the network is. Three things to provision generously:
 
 - **CPU:** handles compression, encryption, and orchestrating the transfer.
 - **RAM (memory):** processes many files in parallel.
@@ -263,7 +263,7 @@ AWS's rule of thumb: estimate the time to transfer over the network — **if it 
 
 ## 9. VMware Cloud on AWS
 
-**VMware Cloud on AWS** lets you run a VMware vSphere environment (a full <Tooltip content="Software-Defined Data Center — a data center defined entirely in software, with virtualized compute/storage/network using the VMware toolset">SDDC</Tooltip>: vSphere, vSAN, NSX) on AWS bare-metal infrastructure.
+**VMware Cloud on AWS** lets you run a VMware vSphere environment (a full SDDC: vSphere, vSAN, NSX) on AWS bare-metal infrastructure.
 
 Its audience is very specific: enterprises already running VMware on-premises who want to extend or migrate to AWS without refactoring/re-platforming their applications. They keep their familiar VMware tools, skills, and processes, but run them on the cloud.
 

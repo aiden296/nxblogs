@@ -23,9 +23,9 @@ If you've read the [Rate Limiting Patterns](/posts/rate-limiting-patterns) artic
 **Sorted Set** (or **ZSet**) is a Redis data type that stores `(member, score)` pairs:
 
 - **Member**: a unique string (no duplicates) — like a key in a hash map.
-- **Score**: a 64-bit real number (<Tooltip content="The IEEE 754 standard for double-precision floating point — represents real numbers using 64 bits (1 sign bit, 11 exponent bits, 52 mantissa bits)">IEEE 754 double</Tooltip>) — used for ordering.
+- **Score**: a 64-bit real number (IEEE 754 double) — used for ordering.
 
-Redis **automatically maintains order** by score (ascending). If two members have the same score, they are sorted by <Tooltip content="String comparison character-by-character (or byte-by-byte) from left to right, like sorting words in a dictionary">lexicographic</Tooltip> order of the member name.
+Redis **automatically maintains order** by score (ascending). If two members have the same score, they are sorted by lexicographic order of the member name.
 
 <ExcalidrawDiagram src="/sorted-set-overview.excalidraw" alt="Sorted Set stores member-score pairs, auto-sorted by ascending score" />
 
@@ -173,7 +173,7 @@ Characteristics:
 - **Operations are O(N)**: insert/search must scan sequentially. But when N is small (≤128), O(N) on contiguous memory is actually **faster** than O(log N) on a skip list — because the skip list must chase pointers across different RAM regions (cache miss).
 - Header is only 6 bytes. Integers use 1-8 bytes, strings have a 1-5 byte length prefix.
 
-> Before Redis 7.0, Redis used <Tooltip content="An older compact Redis encoding that stores entries back-to-back in a contiguous memory block — the predecessor of listpack">ziplist</Tooltip> instead of listpack. Ziplist had a bug: when inserting/deleting in the middle, it could cause **cascading updates** — resizing one entry forces the next entry to re-encode, propagating to the end of the list. Listpack fixes this by storing only forward size + backlen suffix, eliminating dependencies between entries.
+> Before Redis 7.0, Redis used ziplist instead of listpack. Ziplist had a bug: when inserting/deleting in the middle, it could cause **cascading updates** — resizing one entry forces the next entry to re-encode, propagating to the end of the list. Listpack fixes this by storing only forward size + backlen suffix, eliminating dependencies between entries.
 
 ### 4.2. When does Redis switch to Skiplist+Hashtable?
 

@@ -16,7 +16,7 @@ After mastering the [fundamentals](/posts/cache-fundamentals) and the [consisten
 
 ## 1. Cache Avalanche — Mass "Snowslide"
 
-**Definition:** <Tooltip content="Mass key expiration overwhelming the DB at once">Cache Avalanche</Tooltip> occurs when a large number of keys in the Cache **expire or are deleted at the same time**. A flood of requests experience Cache Miss and rush to the Database, overwhelming it.
+**Definition:** Cache Avalanche occurs when a large number of keys in the Cache **expire or are deleted at the same time**. A flood of requests experience Cache Miss and rush to the Database, overwhelming it.
 
 **Causes:**
 
@@ -36,7 +36,7 @@ After mastering the [fundamentals](/posts/cache-fundamentals) and the [consisten
 
 ## 2. Thundering Herd (Cache Stampede) — The "Stampeding Herd"
 
-**Definition:** Similar to Cache Avalanche, but occurs with only **a single <Tooltip content="Key with extreme request concentration at one moment">Hot Key</Tooltip>** (e.g., "Lottery results at 6:30 PM"). When the Hot Key expires, a massive number of requests flood the DB.
+**Definition:** Similar to Cache Avalanche, but occurs with only **a single Hot Key** (e.g., "Lottery results at 6:30 PM"). When the Hot Key expires, a massive number of requests flood the DB.
 
 The solution depends on the type of Cache:
 
@@ -126,7 +126,7 @@ def get_data_with_pee(key):
 
 ## 3. Cache Penetration — "Piercing Through" Cache
 
-**Definition:** <Tooltip content="Repeated queries for nonexistent data bypassing the Cache">Cache Penetration</Tooltip> occurs when users (or hackers) continuously query data that **doesn't exist in Cache or Database**. Example: a hacker sends millions of requests for `user_id = -1` or random UUIDs -> DB gets DDoS'd.
+**Definition:** Cache Penetration occurs when users (or hackers) continuously query data that **doesn't exist in Cache or Database**. Example: a hacker sends millions of requests for `user_id = -1` or random UUIDs -> DB gets DDoS'd.
 
 ### 3.1. Cache Null Values
 
@@ -157,10 +157,10 @@ def get_data_with_null_caching(key):
 
 ### 3.2. Bloom Filter
 
-<Tooltip content="Probabilistic Data Structure">Bloom Filter</Tooltip> is a probabilistic data structure that is extremely memory-efficient, answering in terms of:
+Bloom Filter is a probabilistic data structure that is extremely memory-efficient, answering in terms of:
 
-- <Tooltip content="Definitely No">"Definitely not present"</Tooltip>
-- <Tooltip content="Possibly Yes — False Positive">"Possibly present"</Tooltip>
+- "Definitely not present"
+- "Possibly present"
 
 We use a Bloom Filter to **quickly check** whether a key might exist before allowing a Cache/DB query. If the Bloom Filter says "No" -> **block immediately**.
 

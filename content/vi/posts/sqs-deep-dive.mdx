@@ -14,9 +14,9 @@ Vấn đề cốt lõi ở đây không phải database yếu — mà là kiến
 
 Giải pháp? Đặt một **hàng đợi tin nhắn (message queue)** ở giữa. Thay vì ghi thẳng xuống database, application chỉ cần "ném" request vào hàng đợi. Phía bên kia, các worker lấy message ra và ghi xuống database với tốc độ mà database chịu được. Hàng đợi đóng vai trò như một **bộ giảm xóc** — hấp thụ traffic đột biến và giải phóng từ từ, đều đặn.
 
-Đây chính là bài toán mà <Tooltip content="Simple Queue Service">Amazon SQS</Tooltip> giải quyết. Một hàng đợi tin nhắn **fully managed**, không cần provisioning, không cần lo capacity planning. Bạn gửi message vào, consumer lấy ra. AWS lo toàn bộ phần availability, durability, và scaling phía dưới.
+Đây chính là bài toán mà Amazon SQS giải quyết. Một hàng đợi tin nhắn **fully managed**, không cần provisioning, không cần lo capacity planning. Bạn gửi message vào, consumer lấy ra. AWS lo toàn bộ phần availability, durability, và scaling phía dưới.
 
-Bài viết này sẽ đi sâu vào kiến trúc bên trong của SQS — từ cách message được lưu trữ và replicate trên nhiều server phân tán, sự khác biệt giữa Standard Queue và <Tooltip content="First In, First Out — message được consume theo đúng thứ tự đã gửi">FIFO</Tooltip> Queue (và tại sao Standard Queue deliver message không theo thứ tự), visibility timeout, long polling, Dead Letter Queue, cho đến các patterns thực tế như tích hợp Auto Scaling Group và dùng SQS làm buffer cho database writes.
+Bài viết này sẽ đi sâu vào kiến trúc bên trong của SQS — từ cách message được lưu trữ và replicate trên nhiều server phân tán, sự khác biệt giữa Standard Queue và FIFO Queue (và tại sao Standard Queue deliver message không theo thứ tự), visibility timeout, long polling, Dead Letter Queue, cho đến các patterns thực tế như tích hợp Auto Scaling Group và dùng SQS làm buffer cho database writes.
 
 <ExcalidrawDiagram src="/sqs-overview.excalidraw" alt="Producer gửi message vào queue, consumer poll ra xử lý" />
 
@@ -61,7 +61,7 @@ SQS được xây dựng trên ba tầng chính:
 
 **Frontend Layer** — tầng tiếp nhận request. Load balancer phân phối request đến các frontend server, nơi thực hiện authentication (xác thực qua IAM), validation (kiểm tra kích thước message, queue tồn tại hay không), và routing request xuống tầng storage.
 
-**Backend Storage Layer** — trái tim của SQS. Đây là một <Tooltip content="Hệ thống lưu trữ phân tán dạng key-value">distributed key-value store</Tooltip>. Message được lưu dưới dạng cặp key-value, trong đó key được tạo từ queue ID và message metadata, value là message body (tối đa 256KB) cùng các attributes. Điểm quan trọng: message được **shard** (phân mảnh) trên nhiều storage node dựa theo queue ID để cân bằng tải.
+**Backend Storage Layer** — trái tim của SQS. Đây là một distributed key-value store. Message được lưu dưới dạng cặp key-value, trong đó key được tạo từ queue ID và message metadata, value là message body (tối đa 256KB) cùng các attributes. Điểm quan trọng: message được **shard** (phân mảnh) trên nhiều storage node dựa theo queue ID để cân bằng tải.
 
 **Coordination Layer** — tầng điều phối, sử dụng cơ chế **distributed consensus** (tương tự Paxos hoặc Raft) để đảm bảo tính nhất quán giữa các node. Với Standard Queue, tầng này hoạt động ở mức tối thiểu để ưu tiên throughput. Với FIFO Queue, tầng này hoạt động chặt chẽ hơn để đảm bảo thứ tự và exactly-once delivery.
 
@@ -71,7 +71,7 @@ Khi producer gửi một message vào SQS, điều xảy ra phía sau là:
 
 1. Frontend server nhận request, xác thực, validate.
 2. Message được **replicate đồng bộ (synchronous replication)** lên nhiều storage node nằm ở **nhiều Availability Zone (AZ)** khác nhau.
-3. SQS sử dụng cơ chế <Tooltip content="Ghi được coi là thành công khi M trong N replicas xác nhận đã lưu">quorum-based writes</Tooltip>. Điều này đảm bảo message tồn tại ngay cả khi một AZ gặp sự cố.
+3. SQS sử dụng cơ chế quorum-based writes. Điều này đảm bảo message tồn tại ngay cả khi một AZ gặp sự cố.
 4. Chỉ sau khi đủ quorum, SQS mới trả về response thành công cho producer.
 
 Nhờ cơ chế này, SQS đạt độ bền dữ liệu cực cao — AWS công bố **11 nines durability (99.999999999%)**. Message của bạn gần như không thể mất.
@@ -129,9 +129,9 @@ Một message đi qua các giai đoạn sau:
 
 **Bước 2 — Stored**: Message nằm trong queue ở trạng thái **visible** — sẵn sàng để bất kỳ consumer nào poll.
 
-**Bước 3 — ReceiveMessage**: Consumer poll message. SQS trả về message kèm một <Tooltip content='"Vé" mà consumer cần giữ để thao tác tiếp với message — ví dụ xoá hoặc gia hạn timeout'>receipt handle</Tooltip>.
+**Bước 3 — ReceiveMessage**: Consumer poll message. SQS trả về message kèm một receipt handle.
 
-**Bước 4 — In-flight**: Message chuyển sang trạng thái **invisible** — các consumer khác không nhìn thấy message này nữa. Đây chính là <Tooltip content="Khoảng thời gian message bị ẩn khỏi các consumer khác sau khi được receive, để consumer hiện tại có cơ hội xử lý mà không bị duplicate">visibility timeout</Tooltip> đang hoạt động.
+**Bước 4 — In-flight**: Message chuyển sang trạng thái **invisible** — các consumer khác không nhìn thấy message này nữa. Đây chính là visibility timeout đang hoạt động.
 
 **Bước 5 — Kết thúc**: Có hai kịch bản:
 
@@ -176,7 +176,7 @@ Khi consumer gọi `ReceiveMessage`, có hai cách SQS trả về kết quả: *
 
 **Short polling** — SQS trả về kết quả **ngay lập tức**, kể cả khi không có message nào. Nếu queue đang trống, bạn nhận response rỗng. Consumer phải poll liên tục theo interval để kiểm tra message mới.
 
-<Tooltip content="Cơ chế poll mà SQS giữ kết nối mở chờ message đến trong tối đa WaitTimeSeconds giây trước khi trả về, giúp giảm chi phí API và latency">Long polling</Tooltip> — SQS **chờ** trong khoảng thời gian `WaitTimeSeconds` (tối đa 20 giây) cho đến khi có message, rồi mới trả về. Nếu hết thời gian chờ mà vẫn không có message, nó mới trả về response rỗng.
+Long polling — SQS **chờ** trong khoảng thời gian `WaitTimeSeconds` (tối đa 20 giây) cho đến khi có message, rồi mới trả về. Nếu hết thời gian chờ mà vẫn không có message, nó mới trả về response rỗng.
 
 Nếu bạn nghĩ long polling là vô ích — "chỉ cần poll liên tục thì trước sau cũng nhận được message thôi" — bạn đã sai. Long polling mang lại ba lợi ích quan trọng:
 
@@ -364,7 +364,7 @@ Các pattern trước (ASG, buffer, Lambda) đều xử lý một luồng duy nh
 
 Ví dụ: khi một đơn hàng được tạo, hệ thống cần đồng thời kiểm tra gian lận (Fraud Service), xử lý vận chuyển (Shipping Service), gửi email xác nhận (Notification Service), và cập nhật analytics. Nếu Buying Service gửi message trực tiếp đến từng service, bạn tạo ra **tight coupling** — mỗi khi thêm một service mới, phải sửa code ở Buying Service.
 
-**Fan-out pattern** giải quyết vấn đề này bằng cách kết hợp <Tooltip content="Simple Notification Service">SNS</Tooltip> — một dịch vụ pub/sub (publish-subscribe) cho phép gửi một message đến nhiều subscriber cùng lúc — với **SQS** để đảm bảo mỗi subscriber nhận và xử lý message một cách đáng tin cậy.
+**Fan-out pattern** giải quyết vấn đề này bằng cách kết hợp SNS — một dịch vụ pub/sub (publish-subscribe) cho phép gửi một message đến nhiều subscriber cùng lúc — với **SQS** để đảm bảo mỗi subscriber nhận và xử lý message một cách đáng tin cậy.
 
 ### Kiến trúc
 

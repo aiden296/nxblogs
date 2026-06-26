@@ -12,7 +12,7 @@ Imagine this: you're at an online checkout, clicking the **"Pay $100"** button. 
 
 Half an hour later, you receive **3 confirmation emails** and your account has been charged **$300**.
 
-This is the classic nightmare of every payment team, and the reason behind a concept that sounds very academic: <Tooltip content="The property of an operation where running it 1 time or N times produces the same result on the system">Idempotency</Tooltip>. This article will trace its mathematical origins, explain how it works in APIs, and finally walk through a working implementation for **Create Payment** with Node.js + Redis.
+This is the classic nightmare of every payment team, and the reason behind a concept that sounds very academic: Idempotency. This article will trace its mathematical origins, explain how it works in APIs, and finally walk through a working implementation for **Create Payment** with Node.js + Redis.
 
 ---
 
@@ -82,7 +82,7 @@ Some endpoints are **naturally** idempotent by semantics:
 - `PUT /users/123 {"name": "Quang"}` — sets state to a specific value; running it 10 times produces the same state.
 - `DELETE /orders/abc` — first call deletes, subsequent calls are no-ops (or return idempotent 404).
 
-But `POST /payments` is **not** naturally idempotent. Each POST by default = a new payment. To make it idempotent, we need an <Tooltip content="A client-provided identifier (rather than server-generated) used to uniquely tag a single operation intent">external identifier</Tooltip> — that's the <Tooltip content="A unique string (typically UUID v4) attached as an HTTP header so the server can recognize retries of the same intent">Idempotency Key</Tooltip>.
+But `POST /payments` is **not** naturally idempotent. Each POST by default = a new payment. To make it idempotent, we need an external identifier — that's the Idempotency Key.
 
 ### 2.3. General Flow Diagram
 
@@ -260,7 +260,7 @@ The two most important lines in the entire handler:
 ## 5. Practical Advice
 
 1. **Apply to every critical `POST`**: payment, order, refund, send-email, send-sms, transfer. Any operation where "doing it twice is wrong" needs idempotency.
-2. **Don't start complex.** The `SET NX + TTL + request hash` pattern above covers 90% of use cases. Leases, <Tooltip content="A distributed coordination protocol with a prepare phase and a commit phase, ensuring all nodes either all commit or all rollback">two-phase commits</Tooltip>, and outbox patterns are only needed at the scale of Stripe or AWS.
+2. **Don't start complex.** The `SET NX + TTL + request hash` pattern above covers 90% of use cases. Leases, two-phase commits, and outbox patterns are only needed at the scale of Stripe or AWS.
 3. **Include it in the API contract from day one.** Adding `Idempotency-Key` to an API that already has 1000 clients is painful — you have to migrate gradually, supporting both modes with and without the key. So: on the first day you design a POST endpoint, ask "does this endpoint need idempotency?".
 4. **Document the behavior clearly**: TTL duration, response on key reuse, response when in-progress, allowed key format. Client SDKs will implement retry logic based on what you document.
 5. **Measure with metrics**: retry cache hit rate, 409 rate, 422 rate. A spike in 422 = clients are reusing keys incorrectly. A spike in 409 = there may be a race condition on the client side.

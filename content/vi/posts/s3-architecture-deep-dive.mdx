@@ -165,7 +165,7 @@ Lý tưởng cho các ứng dụng yêu cầu độ trễ tối thiểu, chẳng
 
 S3 Express One Zone có thể tích hợp với các dịch vụ AWS như Amazon EMR, Amazon SageMaker và Amazon Athena để hỗ trợ các workload analytics và AI/ML.
 
-Để có hiệu suất tối ưu, hãy chỉ định AWS Region và Availability Zone gần với compute instance của bạn (ví dụ: Amazon EC2, Amazon EKS hoặc Amazon ECS). Bạn có thể truy cập S3 Express One Zone directory buckets từ <Tooltip content="Virtual Private Cloud — mạng ảo riêng biệt và cô lập trong AWS, nơi bạn có thể chạy tài nguyên với toàn quyền kiểm soát địa chỉ IP, subnet, routing và bảo mật.">VPC</Tooltip> bằng gateway VPC endpoint, không cần internet gateway hay NAT device.
+Để có hiệu suất tối ưu, hãy chỉ định AWS Region và Availability Zone gần với compute instance của bạn (ví dụ: Amazon EC2, Amazon EKS hoặc Amazon ECS). Bạn có thể truy cập S3 Express One Zone directory buckets từ VPC bằng gateway VPC endpoint, không cần internet gateway hay NAT device.
 
 ### **Thêm dữ liệu vào object trong directory buckets (Appending data)**
 
@@ -394,7 +394,7 @@ Khi bạn gửi request để khởi tạo multipart upload, hãy đảm bảo c
 
 Khi upload một part, bạn phải chỉ định part number cùng với upload ID. Bạn có thể chọn bất kỳ part number nào từ 1 đến 10.000. Part number xác định duy nhất một part và vị trí của nó trong object đang upload. Part number bạn chọn không cần theo thứ tự liên tiếp (ví dụ, có thể là 1, 5 và 14). Lưu ý rằng nếu bạn upload part mới với cùng part number như part đã upload trước đó, part trước đó sẽ bị ghi đè.
 
-Khi upload part, Amazon S3 trả về **loại checksum algorithm cùng giá trị checksum cho mỗi part trong header của phản hồi.** Với mỗi lần upload part, bạn phải ghi lại part number và giá trị <Tooltip content="Entity tag — chuỗi định danh (thường là MD5 hash) mà S3 trả về sau khi upload, dùng để xác minh tính toàn vẹn dữ liệu và làm precondition cho các thao tác có điều kiện.">ETag</Tooltip>. Bạn phải đính kèm các giá trị này trong request hoàn tất multipart upload. Mỗi part sẽ có ETag riêng tại thời điểm upload. Tuy nhiên, sau khi multipart upload hoàn tất và tất cả part được hợp nhất, tất cả part thuộc về một ETag dưới dạng checksum của các checksum (checksum of checksums).
+Khi upload part, Amazon S3 trả về **loại checksum algorithm cùng giá trị checksum cho mỗi part trong header của phản hồi.** Với mỗi lần upload part, bạn phải ghi lại part number và giá trị ETag. Bạn phải đính kèm các giá trị này trong request hoàn tất multipart upload. Mỗi part sẽ có ETag riêng tại thời điểm upload. Tuy nhiên, sau khi multipart upload hoàn tất và tất cả part được hợp nhất, tất cả part thuộc về một ETag dưới dạng checksum của các checksum (checksum of checksums).
 
 ![Mỗi part trả về ETag riêng, ghép lại thành checksum của các checksum](https://miro.medium.com/v2/resize:fit:1080/format:webp/1*lBdDkQAmiP6ESbI_OvUtTQ.png)
 
@@ -711,7 +711,7 @@ Nếu muốn sử dụng **customer managed key** cho SSE-KMS, hãy tạo symmet
 Trong phương pháp này, AWS ủy quyền "root/master key" cho AWS "KMS key", cho phép có giải pháp linh hoạt hơn trong việc khắc phục một số hạn chế đã thảo luận trước đó.
 
 *   AWS "KMS key" có thể tạo "Data Key" duy nhất để mã hóa mỗi object upload lên S3. Điều này khá giống phương pháp SSE-S3 nhưng về cơ bản thay thế "root/master key" của SSE-S3 bằng AWS "KMS key".
-*   Với cách tiếp cận AWS "KMS Key", bạn có khả năng tạo "KMS Key" riêng, được gọi là "Customer Managed <Tooltip content="Customer Master Key — encryption key cấp cao nhất trong AWS KMS mà khách hàng quản lý, dùng để mã hóa các data key bảo vệ dữ liệu thực tế.">CMK</Tooltip>". Điều này cho phép bạn áp dụng permissions, xoay vòng key và có phân tách vai trò (role separation) mạnh mẽ.
+*   Với cách tiếp cận AWS "KMS Key", bạn có khả năng tạo "KMS Key" riêng, được gọi là "Customer Managed CMK". Điều này cho phép bạn áp dụng permissions, xoay vòng key và có phân tách vai trò (role separation) mạnh mẽ.
 *   Phân tách vai trò cho AWS "KMS Key" có thể thực hiện bằng cách giới hạn vai trò AWS administrator cho "KMS Key" được chỉ định.
 
 **S3 Bucket Keys**
@@ -759,7 +759,7 @@ Ngoài tính resilience (khả năng phục hồi) được cung cấp bởi AWS
 *   **S3 Replication:** Bạn có thể sử dụng live replication để cho phép sao chép object tự động, bất đồng bộ qua các Amazon S3 bucket.
 *   **Multi-Region Access Points và failover controls:** Amazon S3 Multi-Region Access Points cung cấp global endpoint mà ứng dụng có thể sử dụng để thực hiện request từ S3 bucket ở nhiều AWS Region.
 *   **S3 Versioning:** Versioning là cách giữ nhiều biến thể (variant) của object trong cùng bucket. Bạn có thể sử dụng versioning để bảo tồn, truy xuất và khôi phục mọi phiên bản của mọi object lưu trong Amazon S3 bucket.
-*   **S3 Object Lock:** Bạn có thể sử dụng S3 Object Lock để lưu object sử dụng mô hình <Tooltip content="Write Once, Read Many — ghi một lần, đọc nhiều lần: object đã ghi không thể sửa đổi hay xóa trong khoảng thời gian quy định, dùng cho dữ liệu tuân thủ pháp lý.">WORM</Tooltip>. Sử dụng S3 Object Lock, bạn có thể ngăn object bị xóa hoặc ghi đè trong khoảng thời gian cố định hoặc vô thời hạn.
+*   **S3 Object Lock:** Bạn có thể sử dụng S3 Object Lock để lưu object sử dụng mô hình WORM. Sử dụng S3 Object Lock, bạn có thể ngăn object bị xóa hoặc ghi đè trong khoảng thời gian cố định hoặc vô thời hạn.
 *   **AWS Backup:** Amazon S3 được tích hợp nguyên bản với AWS Backup, dịch vụ fully managed dựa trên policy mà bạn có thể sử dụng để định nghĩa tập trung backup policy bảo vệ dữ liệu trong Amazon S3.
 
 **Sao chép object trong cùng Region và giữa các Region**

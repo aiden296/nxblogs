@@ -212,15 +212,15 @@ async function tokenBucket(userId: string, capacity: number, refillPerSec: numbe
 }
 ```
 
-> **Note:** the code above **has a race condition** — read and write are not atomic. Production must wrap it in a <Tooltip content="A Lua program executed atomically inside Redis via the EVAL command, letting multiple reads and writes run as a single indivisible step.">Lua script</Tooltip> (see section 4).
+> **Note:** the code above **has a race condition** — read and write are not atomic. Production must wrap it in a Lua script (see section 4).
 
-**Advantages.** **Allows bursts** up to capacity. Fits well with uneven traffic: web/mobile is usually quiet then bursts during user sessions. <Tooltip content="A rate-limiting algorithm that maintains a 'bucket' of tokens refilled over time; each request consumes a token, and requests are rejected when the bucket is empty.">Token bucket</Tooltip> "rewards" frugal clients by letting them spend more when needed.
+**Advantages.** **Allows bursts** up to capacity. Fits well with uneven traffic: web/mobile is usually quiet then bursts during user sessions. Token bucket "rewards" frugal clients by letting them spend more when needed.
 
 **Important variants:**
 
 - **Weighted token bucket.** Expensive requests cost more tokens. AWS API: `DescribeInstances` costs 1 token, `RunInstances` costs 5 tokens. Stripe API has a similar concept for expensive calls.
 - **Hierarchical bucket.** Bucket per-user nested inside bucket per-org, nested inside bucket per-region. A request consumes tokens at every level.
-- **<Tooltip content="Generic Cell Rate Algorithm">GCRA</Tooltip>.** A mathematically compact variant of token bucket that only needs to store **1 number** (`theoretical arrival time`) instead of 2 (tokens + last_refill). The Redis module `redis-cell` implements exactly this.
+- **GCRA.** A mathematically compact variant of token bucket that only needs to store **1 number** (`theoretical arrival time`) instead of 2 (tokens + last_refill). The Redis module `redis-cell` implements exactly this.
 
 **When to use.** Public APIs with burst traffic (most user-facing APIs), APIs with unequal request costs, systems that need to "accumulate quota when not in use". This is the most common pattern in production.
 
@@ -230,7 +230,7 @@ The code isn't long, but must be atomic (Lua script), refill math must be precis
 
 ### 2.5. Leaky Bucket (queue-based)
 
-**How it works.** Incoming requests **queue up FIFO** in a bucket. A consumer drains requests at a fixed rate of `r`/second and processes them. Queue full → reject. Unlike token bucket: <Tooltip content="A rate-limiting algorithm using a FIFO queue: requests are drained at a fixed rate, smoothing output regardless of how spiky the input is.">leaky bucket</Tooltip> doesn't let bursts through — output is always smooth at exactly rate `r`.
+**How it works.** Incoming requests **queue up FIFO** in a bucket. A consumer drains requests at a fixed rate of `r`/second and processes them. Queue full → reject. Unlike token bucket: leaky bucket doesn't let bursts through — output is always smooth at exactly rate `r`.
 
 <ExcalidrawDiagram src="/rate-limiting-leaky-bucket.excalidraw" alt="Leaky bucket queues requests FIFO, draining at a fixed rate to smooth the output" />
 

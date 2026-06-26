@@ -8,13 +8,13 @@ enableComment: true
 
 # Elastic Load Balancer: Four Types, Four Problems — Choosing ALB, NLB, GWLB, or CLB for the SAA Exam
 
-You just deployed a web app onto a single <Tooltip content="Elastic Compute Cloud — a virtual server on AWS">EC2</Tooltip> instance. Everything runs fine — until the day traffic spikes. One morning that EC2 dies, and because it is the only entry point, the whole system goes down with it. You spin up a few more EC2 instances to share the load, but immediately hit a wall: how does a client know which EC2 to call? If one EC2 dies, who notices and stops sending traffic to it? When traffic drops, who consolidates clients onto fewer machines to save money?
+You just deployed a web app onto a single EC2 instance. Everything runs fine — until the day traffic spikes. One morning that EC2 dies, and because it is the only entry point, the whole system goes down with it. You spin up a few more EC2 instances to share the load, but immediately hit a wall: how does a client know which EC2 to call? If one EC2 dies, who notices and stops sending traffic to it? When traffic drops, who consolidates clients onto fewer machines to save money?
 
 This is exactly the problem a **load balancer** solves: it sits in front of a group of servers, takes every request from clients, and distributes it to the servers that are currently healthy — so the system both handles load well and survives a single machine dying.
 
-But your needs do not stop at web. Next week, the game team needs to balance <Tooltip content="User Datagram Protocol — a fast, connectionless transport protocol, common for games and streaming">UDP</Tooltip> traffic with near-zero latency. The month after, a B2B partner asks you for a static IP to whitelist. Then the security team wants to insert a fleet of third-party firewalls into the packet path to inspect every flow. Each of these needs, it turns out, calls for a different **type** of load balancer in AWS's <Tooltip content="AWS's managed load balancing service, comprising four types: ALB, NLB, GWLB, CLB">Elastic Load Balancing</Tooltip> family.
+But your needs do not stop at web. Next week, the game team needs to balance UDP traffic with near-zero latency. The month after, a B2B partner asks you for a static IP to whitelist. Then the security team wants to insert a fleet of third-party firewalls into the packet path to inspect every flow. Each of these needs, it turns out, calls for a different **type** of load balancer in AWS's Elastic Load Balancing family.
 
-This article is the map that helps you tell those four types apart. For each one, we will cover: how it works under the hood, what problem it solves, when to use it, and the points that tend to get asked in the <Tooltip content="AWS Certified Solutions Architect – Associate — the associate-level AWS solutions architect certification">SAA</Tooltip> exam.
+This article is the map that helps you tell those four types apart. For each one, we will cover: how it works under the hood, what problem it solves, when to use it, and the points that tend to get asked in the SAA exam.
 
 > **Note:** This is an overview to build a mental model and quickly recognize the answer in the exam. Most SAA traps live at the **boundary** between types — ALB or NLB, NLB or GWLB — so this article focuses on why each one exists and how they differ. Two dedicated deep-dives already exist: the mechanics behind ALB (load balancer nodes, scaling, why it has no static IP) in [ALB Under The Hood](/en/posts/alb-under-the-hood), and the cost comparison of ALB versus NLB in [Choosing ALB or NLB](/en/posts/alb-or-nlb).
 
@@ -24,7 +24,7 @@ This article is the map that helps you tell those four types apart. For each one
 
 **Elastic Load Balancing (ELB)** is AWS's fully managed load balancing service. You do not stand up HAProxy or Nginx servers yourself, you do not patch them, and you do not scale them: you declare a load balancer, and AWS handles the infrastructure underneath.
 
-The first thing to pin down: an ELB is not "a single machine." Under the hood, AWS deploys **load balancer nodes** spread across the multiple <Tooltip content="Availability Zone — one or more independent data centers within a Region, fault-isolated from each other">Availability Zones (AZ)</Tooltip> you choose. As a result, if an entire AZ fails, the nodes in the remaining AZs keep taking traffic — the load balancer itself comes with high availability built in. These nodes scale up and down with traffic, so an ELB absorbs even sudden traffic surges without you doing anything.
+The first thing to pin down: an ELB is not "a single machine." Under the hood, AWS deploys **load balancer nodes** spread across the multiple Availability Zones (AZ) you choose. As a result, if an entire AZ fails, the nodes in the remaining AZs keep taking traffic — the load balancer itself comes with high availability built in. These nodes scale up and down with traffic, so an ELB absorbs even sudden traffic surges without you doing anything.
 
 The core value every ELB type delivers:
 
@@ -32,7 +32,7 @@ The core value every ELB type delivers:
 - **Health check**: automatically stops sending traffic to a failing target, and resumes when it recovers.
 - **High availability** built in by spreading across multiple AZs.
 - **Decoupling** clients from servers: clients only ever see one entry point, while the servers behind it can be added or removed freely.
-- **Auto Scaling integration**: when an <Tooltip content="Auto Scaling Group — a group of EC2 instances that automatically scales the instance count up or down based on load or schedule">Auto Scaling Group</Tooltip> adds or removes EC2 instances, targets are automatically registered with or removed from the load balancer.
+- **Auto Scaling integration**: when an Auto Scaling Group adds or removes EC2 instances, targets are automatically registered with or removed from the load balancer.
 
 AWS splits ELB into four types, each working at a different **layer** of the networking model. A handy mnemonic about "layers": the lower the layer, the more "naive" and fast the load balancer (it only looks at IP and port); the higher the layer, the more it "understands" the content and routes intelligently — at the cost of more processing.
 
@@ -95,9 +95,9 @@ A **sticky session** forces all requests from the same client to always land on 
 
 ### 2.6. Other shared features
 
-- **SSL/TLS termination**: the load balancer can hold the TLS certificate (managed through <Tooltip content="AWS Certificate Manager — a service that issues and manages TLS certificates for free">ACM</Tooltip>) and decrypt HTTPS, offloading work from the backend. Both ALB and NLB support <Tooltip content="Server Name Indication — a technique that lets you attach multiple TLS certificates for multiple domains on a single listener">SNI</Tooltip> to serve many domains with many certificates on a single listener.
+- **SSL/TLS termination**: the load balancer can hold the TLS certificate (managed through ACM) and decrypt HTTPS, offloading work from the backend. Both ALB and NLB support SNI to serve many domains with many certificates on a single listener.
 - **Connection draining** (called **deregistration delay** on ALB/NLB, default 300 seconds): when removing a target, the load balancer stops sending new requests but lets in-flight requests finish, avoiding mid-request cutoffs.
-- **Access logs**: record every request to <Tooltip content="Simple Storage Service — AWS's object storage service">S3</Tooltip> for analysis or incident investigation.
+- **Access logs**: record every request to S3 for analysis or incident investigation.
 - **Deletion protection**: guards a production load balancer against accidental deletion.
 
 That covers the framework. Now to each type and the differences that give it its identity.
@@ -108,7 +108,7 @@ That covers the framework. Now to each type and the differences that give it its
 
 ### 3.1. The problem it solves
 
-ALB operates at **Layer 7** (the application layer), meaning it can "open" the HTTP/HTTPS packet and read it. Because it understands the content, it routes based on things inside the request — path, hostname, header — not just IP and port. This is the load balancer you put in front of a web app, <Tooltip content="An architecture that splits an application into many small independent services, each handling one business concern">microservices</Tooltip>, or a container cluster.
+ALB operates at **Layer 7** (the application layer), meaning it can "open" the HTTP/HTTPS packet and read it. Because it understands the content, it routes based on things inside the request — path, hostname, header — not just IP and port. This is the load balancer you put in front of a web app, microservices, or a container cluster.
 
 ### 3.2. The routing mechanism under the hood
 
@@ -128,19 +128,19 @@ The possible actions are:
 - `fixed-response`: return a fixed response directly, for example a `503` maintenance page.
 - `authenticate`: authenticate the user before letting them through.
 
-For choosing a target within a group, ALB defaults to **round robin** (each target in turn), but can switch to <Tooltip content="Least Outstanding Requests — sends each new request to the target with the fewest in-flight requests">least outstanding requests</Tooltip> to favor the least-busy target — handy when per-request processing times vary widely.
+For choosing a target within a group, ALB defaults to **round robin** (each target in turn), but can switch to least outstanding requests to favor the least-busy target — handy when per-request processing times vary widely.
 
-A core trait: ALB **terminates the connection** (connection termination). It acts as a <Tooltip content="Reverse proxy — an intermediary server that accepts the client's connection and opens a new connection to the backend on the client's behalf">reverse proxy</Tooltip> — it ends the connection from the client and opens a new connection to the backend. The consequence is that the backend no longer sees the client's original IP.
+A core trait: ALB **terminates the connection** (connection termination). It acts as a reverse proxy — it ends the connection from the client and opens a new connection to the backend. The consequence is that the backend no longer sees the client's original IP.
 
 To compensate, ALB inserts the headers `X-Forwarded-For` (the original client IP), `X-Forwarded-Proto` (http or https), and `X-Forwarded-Port`. If your application needs to know the real client, read these headers instead of the connection's IP.
 
 ### 3.3. Distinctive features worth remembering
 
 - **Lambda as a target**: ALB can invoke a Lambda function directly, turning it into an HTTP-serving backend without any EC2.
-- **Authentication offload**: ALB handles login itself through <Tooltip content="Amazon Cognito — AWS's user management and authentication service">Cognito</Tooltip> or any <Tooltip content="OpenID Connect — an authentication standard built on OAuth 2.0, used for single sign-on (SSO)">OIDC</Tooltip> provider, so the application does not have to write its own login layer.
-- **WAF integration**: you can attach a <Tooltip content="Web Application Firewall — a Layer 7 firewall that filters HTTP requests, blocking SQL injection, XSS...">WAF</Tooltip> to block application-layer web attacks.
+- **Authentication offload**: ALB handles login itself through Cognito or any OIDC provider, so the application does not have to write its own login layer.
+- **WAF integration**: you can attach a WAF to block application-layer web attacks.
 - **gRPC, HTTP/2, WebSocket**: supports modern HTTP-based protocols, fitting microservices and realtime.
-- **mTLS**: supports <Tooltip content="Mutual TLS — two-way authentication where both client and server present certificates; a client without a valid certificate is rejected">mutual TLS</Tooltip>, useful for B2B APIs that require the client to present a certificate.
+- **mTLS**: supports mutual TLS, useful for B2B APIs that require the client to present a certificate.
 
 One point to remember for the exam: ALB has **no static IP**, only a DNS name. The reason lies in its mechanism of continuously adding and removing nodes — detailed in [ALB Under The Hood](/en/posts/alb-under-the-hood). If a question demands a static IP yet still needs Layer 7 routing, that is a hint to put an NLB in front of an ALB (section 4.4).
 
@@ -154,19 +154,19 @@ NLB works at **Layer 4**: it only looks at IP and port, never opening the packet
 
 ### 4.2. Under the hood: flow hashing, no connection termination
 
-Unlike ALB, NLB does **not** terminate connections. When a new connection arrives, NLB computes a <Tooltip content="A function that combines several fields into one value to pick a target consistently">hash</Tooltip> over the **5-tuple** — source IP, source port, destination IP, destination port, and protocol — and uses that value to pick a target. Every packet of that connection then flows straight to the chosen target, with NLB not stepping in the middle like a proxy.
+Unlike ALB, NLB does **not** terminate connections. When a new connection arrives, NLB computes a hash over the **5-tuple** — source IP, source port, destination IP, destination port, and protocol — and uses that value to pick a target. Every packet of that connection then flows straight to the chosen target, with NLB not stepping in the middle like a proxy.
 
 Precisely because it does not have to set up and maintain two connections and does not read the content, NLB reaches extremely low latency. NLB also **preserves the client's source IP** (source IP preservation). The backend sees the client's real IP directly, without reading an `X-Forwarded-For` header as it would with ALB.
 
 ### 4.3. Static IP — NLB's specialty
 
-NLB provides **one static IP per AZ**, and you can attach a fixed <Tooltip content="Elastic IP — a static public IPv4 address that you own and attach to an AWS resource">Elastic IP</Tooltip> for each AZ. This is the number-one reason to choose NLB: when a partner or a corporate firewall requires whitelisting a fixed IP, ALB (DNS only, IP changing constantly) cannot meet it, while NLB has it ready.
+NLB provides **one static IP per AZ**, and you can attach a fixed Elastic IP for each AZ. This is the number-one reason to choose NLB: when a partner or a corporate firewall requires whitelisting a fixed IP, ALB (DNS only, IP changing constantly) cannot meet it, while NLB has it ready.
 
 ### 4.4. Distinctive features worth remembering
 
-- **Fronting PrivateLink**: only NLB (and GWLB) can be the front for an <Tooltip content="VPC Endpoint Service — a way to expose a service in your VPC for other VPCs to reach privately over PrivateLink, without going through the internet">endpoint service</Tooltip>. To expose an internal service for a customer's VPC to reach privately over PrivateLink, you put an NLB in front.
+- **Fronting PrivateLink**: only NLB (and GWLB) can be the front for an endpoint service. To expose an internal service for a customer's VPC to reach privately over PrivateLink, you put an NLB in front.
 - **NLB in front of ALB**: an NLB's target can be an ALB. This pairing gives you the best of both — NLB's static IP on the outside, and ALB's Layer 7 routing on the inside.
-- **Security Group support**: NLB used to not support a <Tooltip content="Security Group — a stateful firewall at the instance/ENI level that controls inbound and outbound traffic">Security Group</Tooltip>, but since 2023 it does — a relatively new change, so do not rely on the old belief that NLB always lacks this feature.
+- **Security Group support**: NLB used to not support a Security Group, but since 2023 it does — a relatively new change, so do not rely on the old belief that NLB always lacks this feature.
 - **Idle timeout** defaults to 350 seconds for TCP flows, far longer than ALB's 60 seconds — fitting long-held connections.
 
 ---
@@ -177,7 +177,7 @@ NLB provides **one static IP per AZ**, and you can attach a fixed <Tooltip conte
 
 This is the strangest and most-confused type. GWLB does **not** serve application traffic the way ALB or NLB do.
 
-Instead, it exists to solve a very specific security problem: you want to insert a **fleet of third-party virtual appliances** — firewalls, intrusion detection systems (<Tooltip content="Intrusion Detection System — detects intrusions and raises alerts when it sees suspicious traffic">IDS</Tooltip>), intrusion prevention systems (<Tooltip content="Intrusion Prevention System — actively blocks attack traffic, not just detects it">IPS</Tooltip>), or deep packet inspection devices — **into the middle of the traffic path** for inspection, while still being highly available and auto-scaling with load.
+Instead, it exists to solve a very specific security problem: you want to insert a **fleet of third-party virtual appliances** — firewalls, intrusion detection systems (IDS), intrusion prevention systems (IPS), or deep packet inspection devices — **into the middle of the traffic path** for inspection, while still being highly available and auto-scaling with load.
 
 GWLB does two things at once: it is both a **transparent network gateway** (a single entry/exit point for traffic) and a **load balancer** that distributes that traffic across the appliance fleet.
 
@@ -185,18 +185,18 @@ GWLB does two things at once: it is both a **transparent network gateway** (a si
 
 GWLB operates at **Layer 3** — it works on raw IP packets. Two concepts make up its "transparent" mechanism:
 
-- **GENEVE port 6081**: GWLB uses the <Tooltip content="Generic Network Virtualization Encapsulation — a protocol that wraps the original packet inside a new one to send it to the inspection appliance, running on port 6081">GENEVE</Tooltip> protocol to wrap the entire original packet and tunnel it to the appliance. The appliance must "speak" GENEVE to decapsulate and inspect — which is also the main reason it does not serve application traffic the way ALB and NLB do.
-- **GWLB Endpoint (GWLBe)**: a kind of VPC endpoint (running on <Tooltip content="AWS PrivateLink — technology for private connectivity to a service without traversing the internet">PrivateLink</Tooltip>) placed in the application VPC. You edit the **route table** to steer traffic through the GWLBe; the GWLBe forwards to the GWLB in another VPC (usually a centralized inspection VPC), the GWLB distributes across the appliance fleet, and the traffic then returns along the correct path.
+- **GENEVE port 6081**: GWLB uses the GENEVE protocol to wrap the entire original packet and tunnel it to the appliance. The appliance must "speak" GENEVE to decapsulate and inspect — which is also the main reason it does not serve application traffic the way ALB and NLB do.
+- **GWLB Endpoint (GWLBe)**: a kind of VPC endpoint (running on PrivateLink) placed in the application VPC. You edit the **route table** to steer traffic through the GWLBe; the GWLBe forwards to the GWLB in another VPC (usually a centralized inspection VPC), the GWLB distributes across the appliance fleet, and the traffic then returns along the correct path.
 
 The subtle point that makes GWLB fit **stateful** firewalls: it maintains **flow stickiness** — every packet of the same flow (by default the 5-tuple, optionally the 3-tuple or 2-tuple) always lands on the same appliance, and both the forward and return directions go through that same appliance (a symmetric flow). That is how a stateful firewall gets to see both directions of a session to make a decision.
 
-Why can NLB not replace GWLB here? NLB is a connection-distributing proxy, not a transparent gateway: forcing NLB to act as an inline inspection device requires complex routing configuration and usually <Tooltip content="Source Network Address Translation — rewrites the source IP of a packet, so the backend no longer sees the original IP">source NAT</Tooltip>, which breaks the transparency the problem demands. GWLB is what AWS purpose-built for exactly this need.
+Why can NLB not replace GWLB here? NLB is a connection-distributing proxy, not a transparent gateway: forcing NLB to act as an inline inspection device requires complex routing configuration and usually source NAT, which breaks the transparency the problem demands. GWLB is what AWS purpose-built for exactly this need.
 
 ---
 
 ## 6. CLB — Classic Load Balancer (legacy)
 
-The **Classic Load Balancer** is AWS's first-generation load balancer, dating back to the <Tooltip content="EC2-Classic — AWS's original flat network model, discontinued in 2022, the predecessor to VPC">EC2-Classic</Tooltip> network era. It can do both Layer 4 (TCP/SSL) and Layer 7 (HTTP/HTTPS) at a basic level, but lacks almost all the features that make ALB and NLB powerful: no rule engine for path/host routing, only a single TLS certificate (no SNI), no Lambda targets, no gRPC, none of the modern protocols.
+The **Classic Load Balancer** is AWS's first-generation load balancer, dating back to the EC2-Classic network era. It can do both Layer 4 (TCP/SSL) and Layer 7 (HTTP/HTTPS) at a basic level, but lacks almost all the features that make ALB and NLB powerful: no rule engine for path/host routing, only a single TLS certificate (no SNI), no Lambda targets, no gRPC, none of the modern protocols.
 
 One frequently misunderstood point needs to be clear: CLB has **not** been retired. What ended in 2022 was the **EC2-Classic network**, not the Classic Load Balancer itself — CLB still runs inside a VPC. But it is **previous generation**, and AWS recommends moving to ALB or NLB for any new design.
 

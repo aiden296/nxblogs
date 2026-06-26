@@ -8,7 +8,7 @@ enableComment: true
 
 # ALB Under The Hood: Bên Dưới "Nàng Lễ Tân Thông Minh" Thật Sự Là Gì?
 
-Khi bạn tạo một <Tooltip content="Application Load Balancer — load balancer hoạt động ở Layer 7 (HTTP/HTTPS), có khả năng inspect nội dung request để định tuyến theo path, host, header...">Application Load Balancer</Tooltip> trên AWS, bạn nhận được đúng **một thứ duy nhất**: một DNS name dài ngoằng kiểu `my-alb-123456789.ap-southeast-1.elb.amazonaws.com`. Không có IP tĩnh. Không có server nào bạn có thể SSH vào. Vậy bên dưới cái DNS name đó, **thật sự là gì?**
+Khi bạn tạo một Application Load Balancer trên AWS, bạn nhận được đúng **một thứ duy nhất**: một DNS name dài ngoằng kiểu `my-alb-123456789.ap-southeast-1.elb.amazonaws.com`. Không có IP tĩnh. Không có server nào bạn có thể SSH vào. Vậy bên dưới cái DNS name đó, **thật sự là gì?**
 
 Bài viết này sẽ "lật mặt" kiến trúc ẩn sau ALB — từ đội quân load balancer nodes âm thầm hoạt động, đến cơ chế scaling, và lý do tại sao ALB không bao giờ có static IP.
 
@@ -41,7 +41,7 @@ Mỗi node tiêu thụ **1 IP address** trong subnet. Vì vậy, AWS yêu cầu:
 
 ## 2. Tại Sao ALB Chỉ Có DNS Name, Không Có Static IP?
 
-Đây là câu hỏi kinh điển: <Tooltip content="Network Load Balancer — load balancer hoạt động ở Layer 4 (TCP/UDP), chỉ forward packet mà không inspect nội dung, hỗ trợ static IP qua Elastic IP.">NLB</Tooltip> có thể gắn Elastic IP (static), vậy tại sao ALB thì không?
+Đây là câu hỏi kinh điển: NLB có thể gắn Elastic IP (static), vậy tại sao ALB thì không?
 
 Câu trả lời nằm ở chính cơ chế scaling vừa mô tả ở trên:
 
@@ -64,7 +64,7 @@ Khi client resolve DNS name của ALB:
 
 NLB hoạt động ở Layer 4 — nó chỉ forward TCP/UDP packets mà không cần inspect nội dung. Kiến trúc của NLB đơn giản hơn nhiều:
 
-- NLB tạo **1 <Tooltip content="Elastic Network Interface — interface mạng ảo trong VPC của AWS, có thể gắn IP riêng (kể cả Elastic IP) và di chuyển giữa các instance.">ENI</Tooltip> cố định** per AZ
+- NLB tạo **1 ENI cố định** per AZ
 - Mỗi ENI có thể gắn **1 Elastic IP** (static)
 - Bên trong, AWS dùng **Hyperplane** technology để scale capacity mà không cần thêm ENI
 
@@ -90,7 +90,7 @@ ALB scaling có một đặc điểm thú vị: **bất đối xứng**.
 
 ### LCU Reservation — "Đặt Chỗ Trước" Cho Traffic Spike
 
-Trước đây, nếu bạn biết sắp có đợt traffic lớn (Black Friday, Flash Sale), bạn phải liên hệ AWS Support để "pre-warm" ALB. Bây giờ, AWS cung cấp tính năng <Tooltip content="Load Balancer Capacity Unit Reservation — cho phép pre-book capacity ALB trước event traffic lớn, tránh tình trạng ALB chưa scale kịp khi traffic spike.">**LCU Reservation**</Tooltip> — cho phép bạn tự đặt trước capacity.
+Trước đây, nếu bạn biết sắp có đợt traffic lớn (Black Friday, Flash Sale), bạn phải liên hệ AWS Support để "pre-warm" ALB. Bây giờ, AWS cung cấp tính năng **LCU Reservation** — cho phép bạn tự đặt trước capacity.
 
 **Cách hoạt động:**
 
@@ -125,7 +125,7 @@ Với cross-zone load balancing **bật** (mặc định), mỗi ALB node phân 
 
 ### Khi nào nên tắt cross-zone?
 
-Bạn có thể tắt cross-zone ở <Tooltip content="Target group — nhóm các target backend (EC2 instance, IP, Lambda...) mà ALB forward traffic tới. Mọi cấu hình routing, health check, load balancing algorithm đều set ở level này.">**target group level**</Tooltip> trong một số trường hợp:
+Bạn có thể tắt cross-zone ở **target group level** trong một số trường hợp:
 
 - Muốn giữ traffic trong cùng AZ để giảm latency
 - Sử dụng **zonal shift** (AZ evacuation) cho disaster recovery

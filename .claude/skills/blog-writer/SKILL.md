@@ -242,16 +242,11 @@ Immediately after the opening hook paragraphs, before the first `## 1.` section:
    - **Main-idea definitions** — when the sentence's purpose IS to define the term. Bold the term and let the sentence carry the definition:
      - Example: `**Broker** là một server (hay process) trong Kafka cluster chịu trách nhiệm nhận, lưu trữ, và phục vụ dữ liệu.`
 
-   - **Inline-aside definitions → use `<Tooltip>`** — when the explanation is a parenthetical or em-dash aside that interrupts a longer thought (acronym expansions, short definitions tucked into a sentence about something else). Wrap the term in `<Tooltip content="explanation">term</Tooltip>` and remove the parenthetical entirely. Example transformation:
-     - Before: `Đây cũng là lý do **UUID v7** (và **ULID** — Universally Unique Lexicographically Sortable Identifier, một format tương tự ra đời sớm hơn) được sinh ra.`
-     - After: `Đây cũng là lý do **UUID v7** (và <Tooltip content="Universally Unique Lexicographically Sortable Identifier — một format tương tự ra đời sớm hơn">ULID</Tooltip>) được sinh ra.`
-     - The Tooltip component already styles its trigger as bold + dashed underline, so drop the `**...**` around the term *inside* the Tooltip. Inline code backticks (e.g., `` `BIGSERIAL` ``) work fine inside the Tooltip trigger and should be preserved for SQL keywords / identifiers.
-     - **Also covers nested-paren patterns** — when the parenthetical itself contains an em-dash separating a full-name expansion from a translation/clarification. Treat the *whole* parenthetical content as the tooltip content:
-       - Before: `**B-tree** (Balanced Tree — cây cân bằng) là một cấu trúc cây mà...`
-       - After: `<Tooltip content="Balanced Tree — cây cân bằng">B-tree</Tooltip> là một cấu trúc cây mà...`
-       - Before: `Broker coi message là **opaque bytes** (dữ liệu mờ — broker không hiểu nội dung bên trong), chỉ lưu và chuyển tiếp.`
-       - After: `Broker coi message là <Tooltip content="Dữ liệu mờ — broker không hiểu nội dung bên trong">opaque bytes</Tooltip>, chỉ lưu và chuyển tiếp.`
-     - **When NOT to tooltip:** illustrative asides that elaborate *why* something matters (rather than defining a term) read more naturally as parentheticals. E.g., keep `riêng tư (ID liên tiếp lộ thông tin business — đơn hàng số 7000 hôm nay tiết lộ doanh nghiệp xử lý 7000 đơn/ngày)` inline — it's elaborating context, not defining "riêng tư".
+   - **Inline-aside definitions → keep them inline in prose** — when the explanation is a parenthetical or em-dash aside that interrupts a longer thought (acronym expansions, short definitions tucked into a sentence about something else), write the definition directly in the sentence as a parenthetical. Examples:
+     - `Đây cũng là lý do **UUID v7** (và **ULID** — Universally Unique Lexicographically Sortable Identifier, một format tương tự ra đời sớm hơn) được sinh ra.`
+     - `**B-tree** (Balanced Tree — cây cân bằng) là một cấu trúc cây mà...`
+     - `Broker coi message là **opaque bytes** (dữ liệu mờ — broker không hiểu nội dung bên trong), chỉ lưu và chuyển tiếp.`
+     - Keep SQL keywords / identifiers in inline code backticks (e.g., `` `BIGSERIAL` ``).
 
 2. **Emphasis: bold only, never italic.** Use `**text**` to emphasize a word or phrase. Never use italic — neither `*text*` nor `_text_`, and not bold-italic (`***text***` / `**_text_**`). If something needs emphasis, bold it; if bolding feels too heavy (e.g. a term already bolded on first mention), leave it as plain text.
 

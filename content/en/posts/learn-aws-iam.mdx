@@ -8,7 +8,7 @@ enableComment: true
 
 # Getting Started with AWS: From Global Infrastructure to Security Thinking with IAM
 
-Hello everyone, I'm in the process of studying AWS and realized that before touching any complex services, understanding **Infrastructure** and <Tooltip content="Identity and Access Management — the AWS service used to manage users, groups, roles, and access permissions to resources within an account">Identity and Access Management (IAM)</Tooltip> is the most important foundation.
+Hello everyone, I'm in the process of studying AWS and realized that before touching any complex services, understanding **Infrastructure** and Identity and Access Management (IAM) is the most important foundation.
 
 Today, I'd like to share the notes I've distilled from my learning. I hope they'll be helpful for those of you who are also just getting started!
 
@@ -28,7 +28,7 @@ Each AWS **Region** (geographic area) typically has a minimum of **3 AZs** (and 
 
 ### Point of Presence (Edge Location)
 
-If you've heard of <Tooltip content="Content Delivery Network — a globally distributed network of servers that delivers content as close to end users as possible to reduce access latency">CDN</Tooltip>, this is it. With over 400 points across 90 cities, Edge Locations help deliver content as close to users as possible, minimizing latency.
+If you've heard of CDN, this is it. With over 400 points across 90 cities, Edge Locations help deliver content as close to users as possible, minimizing latency.
 
 > **Quick note:** Not every service is available in every Region. And remember to check the Region on the Console, because an EC2 you created in the US won't appear when you're viewing the Singapore region!
 
@@ -40,7 +40,7 @@ IAM (Identity and Access Management) is where you manage who can do what on your
 
 ### Root Account: "Supreme Power"
 
-When you first create an account, you have the **Root Account**. The hard-earned advice is: **Never use the Root Account for daily work.** Use it to create a separate admin User for yourself, set up <Tooltip content="Multi-Factor Authentication — a security mechanism that requires multiple authentication factors (e.g., password + OTP from a phone) to strengthen account security">MFA</Tooltip>, and lock this Root "key" away in a glass cabinet.
+When you first create an account, you have the **Root Account**. The hard-earned advice is: **Never use the Root Account for daily work.** Use it to create a separate admin User for yourself, set up MFA, and lock this Root "key" away in a glass cabinet.
 
 ### User, Group, and Policies
 

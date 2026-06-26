@@ -33,14 +33,14 @@ The **runtime** is everything **surrounding** the engine: the APIs the engine ca
 
 ### 1.1 The Compilation Pipeline
 
-Regardless of the engine — <Tooltip content="Google's Javascript engine, written in C++, powering both Chrome and Node.js">V8</Tooltip>, SpiderMonkey, or JavaScriptCore — they all go through the same pipeline:
+Regardless of the engine — V8, SpiderMonkey, or JavaScriptCore — they all go through the same pipeline:
 
 <ExcalidrawDiagram src="/browser-vs-nodejs-engine-pipeline.excalidraw" alt="Javascript engine compilation pipeline from source code to machine code" />
 
 1. **Lexer/Tokenizer**: Breaks source code into tokens (keywords, variables, operators)
-2. **Parser**: Builds an <Tooltip content="Abstract Syntax Tree — a tree data structure describing the program's logic">AST</Tooltip>
+2. **Parser**: Builds an AST
 3. **Bytecode Interpreter**: Executes bytecode immediately — fast startup, but not optimized
-4. **JIT Compiler**: When it detects "hot" code (executed many times), <Tooltip content="Just-In-Time — compiles code at runtime rather than ahead of time">JIT</Tooltip> compiles it directly into highly optimized machine code
+4. **JIT Compiler**: When it detects "hot" code (executed many times), JIT compiles it directly into highly optimized machine code
 
 ### 1.2 V8 — The Shared Heart of Chrome and Node.js
 
@@ -75,7 +75,7 @@ The `fibonacci` function uses only the pure engine (computation, recursion). It 
 
 Both browser and Node.js run Javascript on a **single thread**. No multithreading for Javascript code. So how do they handle thousands of concurrent requests without blocking?
 
-The answer: the <Tooltip content="A loop that coordinates async tasks on a single thread — pull a task from a queue, execute, repeat">event loop</Tooltip> — a continuous loop that checks: "is there work to do?" → execute → check again.
+The answer: the event loop — a continuous loop that checks: "is there work to do?" → execute → check again.
 
 Think of the event loop as **a single chef in a kitchen**. The chef can only chop one ingredient at a time, but while the soup simmers (I/O waiting), they move on to the next task. Both browser and Node.js have "one chef", but the kitchen layouts are different.
 
@@ -97,7 +97,7 @@ Each browser tab has its own event loop. Each iteration:
 
 <ExcalidrawDiagram src="/nodejs-event-loop.excalidraw" alt="Node.js event loop with the six libuv phases running sequentially" />
 
-Node.js uses a C library called <Tooltip content="Cross-platform C library providing async I/O, event loop, and thread pool — the runtime backbone of Node.js">libuv</Tooltip> to manage the event loop. Instead of a simple loop, libuv divides it into **6 phases** running sequentially:
+Node.js uses a C library called libuv to manage the event loop. Instead of a simple loop, libuv divides it into **6 phases** running sequentially:
 
 1. **Timers**: Execute expired `setTimeout` and `setInterval` callbacks
 2. **Pending Callbacks**: Process deferred I/O callbacks from the previous cycle (e.g., TCP errors)
@@ -210,7 +210,7 @@ The two worlds are gradually **converging**. Many APIs that were browser-only no
 | `performance.now()` | Since the beginning | v8+ (`perf_hooks`) |
 | `globalThis` | ES2020 | ES2020 |
 
-<Tooltip content="Web-interoperable Runtimes Community Group">WinterCG</Tooltip> is the effort to standardize a minimal shared API set across all runtimes: Node.js, Deno, Bun, Cloudflare Workers. The goal: write once, run everywhere — at least for the parts unrelated to DOM or file system.
+WinterCG is the effort to standardize a minimal shared API set across all runtimes: Node.js, Deno, Bun, Cloudflare Workers. The goal: write once, run everywhere — at least for the parts unrelated to DOM or file system.
 
 ```js
 // This code runs on BOTH browser AND Node.js 18+

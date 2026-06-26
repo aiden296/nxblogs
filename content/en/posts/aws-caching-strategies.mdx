@@ -29,7 +29,7 @@ The SAA exam tests exactly this skill: read a scenario, recognize which caching 
 
 First, a clear definition. A **cache** is a fast intermediate store that keeps a copy of data so that later reads don't have to touch the slower source of truth. A cache doesn't create new data — it just holds a copy of something that already exists somewhere (a database, an API, a disk).
 
-When a read finds the data in the cache, we call it a <Tooltip content="Cache hit — the request finds the data already in the cache and never touches the source of truth">cache hit</Tooltip>. When it doesn't, that's a <Tooltip content="Cache miss — the data isn't in the cache, so you must go down to the source to fetch it and (usually) repopulate the cache">cache miss</Tooltip>, and you pay for it: one trip down to the cache (a miss), one trip to the database, then one trip back up to write the cache. Three trips for a single miss. That's why a cache only truly pays off when the hit rate is high enough.
+When a read finds the data in the cache, we call it a cache hit. When it doesn't, that's a cache miss, and you pay for it: one trip down to the cache (a miss), one trip to the database, then one trip back up to write the cache. Three trips for a single miss. That's why a cache only truly pays off when the hit rate is high enough.
 
 A complete caching system has to answer four questions — and this is also the lens for reading every SAA question about caching:
 
@@ -139,7 +139,7 @@ In return there are three downsides:
 
 **Write-Back** (or **Write-Behind**) is the strategy where the application writes to the cache first and considers itself done immediately, while pushing the data down to the database asynchronously afterward (in batches, on a schedule, or when idle).
 
-The problem it solves: systems that need to minimize write latency at very high volume. Because the user only waits for the in-memory write (the cache), write latency is nearly instant, and many writes can be coalesced into fewer database writes. This is a familiar mechanism inside databases (for example, <Tooltip content="Write-ahead log / buffer — a mechanism that buffers writes in memory then flushes them to disk in batches, making writes fast while staying durable">Postgres's write buffer</Tooltip>), where durability is protected by dedicated techniques.
+The problem it solves: systems that need to minimize write latency at very high volume. Because the user only waits for the in-memory write (the cache), write latency is nearly instant, and many writes can be coalesced into fewer database writes. This is a familiar mechanism inside databases (for example, Postgres's write buffer), where durability is protected by dedicated techniques.
 
 The fatal downside is the **risk of data loss**: if the cache dies before it can flush to the database, the unflushed data is gone. Because of this trade-off, **no AWS cache service offers managed write-back to your database** — it's an application-layer pattern and rarely the answer on the SAA exam. You need to recognize the name so you can rule it out when the question stresses "no data loss."
 
@@ -191,7 +191,7 @@ For Redis (via ElastiCache), this behavior is controlled by the `maxmemory-polic
 | `volatile-lru` | LRU, but only among keys with a TTL | When the cache also holds data meant to be kept long-term |
 | `volatile-ttl` | The key with the shortest remaining TTL | When you want to prefer dropping things about to expire |
 
-<Tooltip content="Least Recently Used — drops the entry that has gone the longest without being accessed">LRU</Tooltip> and <Tooltip content="Least Frequently Used — drops the entry with the lowest access frequency">LFU</Tooltip> are the two foundational algorithms; their theory and implementation live in [Caching fundamentals](/posts/cache-fundamentals).
+LRU and LFU are the two foundational algorithms; their theory and implementation live in [Caching fundamentals](/posts/cache-fundamentals).
 
 A few exam-worthy points:
 
@@ -207,7 +207,7 @@ The four sections above are strategy theory. This one maps them onto the four AW
 
 ### 6.1. CloudFront — caching at the edge (CDN)
 
-A <Tooltip content="Content Delivery Network — a network of servers spread around the globe, serving content from the point closest to the user to reduce latency">CDN</Tooltip> is a network of servers spread worldwide that serves content from the point closest to the user. **CloudFront** is AWS's CDN: it caches content at <Tooltip content="Edge location — a CloudFront point of presence placed near users, where content is cached and served">edge locations</Tooltip> right next to users, so a user in Hanoi doesn't have to reach all the way to an origin in Singapore or the US for every request.
+A CDN is a network of servers spread worldwide that serves content from the point closest to the user. **CloudFront** is AWS's CDN: it caches content at edge locations right next to users, so a user in Hanoi doesn't have to reach all the way to an origin in Singapore or the US for every request.
 
 With CloudFront, cache duration is determined by the interaction between the headers from the origin and the three TTL settings of the cache policy:
 
@@ -290,7 +290,7 @@ Internally, DAX keeps **two independent caches**:
 
 Two important limits for the exam:
 
-- DAX only serves **eventually consistent reads**. If the application requests a <Tooltip content="Strongly consistent read — a read guaranteed to reflect the results of all writes completed before it">strongly consistent read</Tooltip>, that request goes straight down to DynamoDB, bypassing DAX.
+- DAX only serves **eventually consistent reads**. If the application requests a strongly consistent read, that request goes straight down to DynamoDB, bypassing DAX.
 - DAX runs **inside a VPC** and is **only for DynamoDB**. It accelerates nothing for RDS, S3, or any other data source.
 
 **When NOT to use DAX:** write-heavy, read-light workloads (write-through only adds latency), needing strongly consistent reads, or an application that doesn't use DynamoDB. When you need a cache for something other than DynamoDB, the answer is ElastiCache.
@@ -307,7 +307,7 @@ And caching on AWS is multi-layered, not a single point. A request might be serv
 
 Don't forget the **cost** angle — a motivation often hidden in SAA questions:
 
-- DAX and ElastiCache reduce the number of reads down to the database, i.e., reduce DynamoDB's <Tooltip content="Read Capacity Unit — the unit of read capacity you pay for on DynamoDB">RCU</Tooltip> or RDS's load.
+- DAX and ElastiCache reduce the number of reads down to the database, i.e., reduce DynamoDB's RCU or RDS's load.
 - CloudFront reduces the volume of requests (and bandwidth) reaching the origin, lowering S3/ALB cost and data-transfer-out cost too.
 - The API Gateway cache reduces the number of Lambda invocations.
 

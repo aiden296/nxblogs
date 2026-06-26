@@ -8,7 +8,7 @@ enableComment: true
 
 # Hành trình "nhập môn" AWS: Từ hạ tầng toàn cầu đến tư duy bảo mật với IAM
 
-Chào mọi người, mình đang trong quá trình "cày cuốc" AWS và nhận ra rằng, trước khi chạm tay vào những dịch vụ phức tạp, việc hiểu rõ **Hạ tầng (Infrastructure)** và <Tooltip content="Identity and Access Management — dịch vụ của AWS dùng để quản lý người dùng, nhóm, vai trò và quyền truy cập vào các tài nguyên trong tài khoản">Quản lý định danh (IAM)</Tooltip> là bước đệm quan trọng nhất.
+Chào mọi người, mình đang trong quá trình "cày cuốc" AWS và nhận ra rằng, trước khi chạm tay vào những dịch vụ phức tạp, việc hiểu rõ **Hạ tầng (Infrastructure)** và Quản lý định danh (IAM) là bước đệm quan trọng nhất.
 
 Hôm nay, mình xin chia sẻ lại những "note" tâm đắc mà mình đã đúc kết được. Hy vọng nó sẽ giúp ích cho các bạn cũng đang bắt đầu như mình!
 
@@ -28,7 +28,7 @@ Mỗi **Region** (vùng địa lý) của AWS thường có tối thiểu **3 AZ
 
 ### Point of Presence (Edge Location)
 
-Nếu bạn từng nghe về <Tooltip content="Content Delivery Network — mạng lưới máy chủ phân tán toàn cầu giúp đưa nội dung đến gần người dùng cuối nhất, giảm độ trễ truy cập">CDN</Tooltip>, thì đây chính là nó. Với hơn 400 điểm tại 90 thành phố, Edge Location giúp đưa nội dung đến gần người dùng nhất có thể, giảm thiểu độ trễ (latency).
+Nếu bạn từng nghe về CDN, thì đây chính là nó. Với hơn 400 điểm tại 90 thành phố, Edge Location giúp đưa nội dung đến gần người dùng nhất có thể, giảm thiểu độ trễ (latency).
 
 > **Lưu ý nhỏ:** Không phải dịch vụ nào cũng có mặt ở mọi Region. Và hãy nhớ kiểm tra Region trên Console, vì EC2 bạn tạo ở Mỹ sẽ không thấy xuất hiện khi bạn đang chọn vùng Singapore đâu nhé!
 
@@ -40,7 +40,7 @@ IAM (Identity and Access Management) là nơi bạn quản lý ai có thể làm
 
 ### Root Account: "Quyền năng tối thượng"
 
-Khi vừa tạo tài khoản, bạn có **Root Account**. Lời khuyên xương máu là: **Đừng bao giờ dùng Root Account cho công việc hằng ngày.** Hãy dùng nó để tạo một User admin riêng cho mình, thiết lập <Tooltip content="Multi-Factor Authentication — cơ chế xác thực yêu cầu nhiều yếu tố (ví dụ mật khẩu + mã OTP từ điện thoại) để tăng cường bảo mật">MFA</Tooltip> và cất "chiếc chìa khóa" Root này vào tủ kính.
+Khi vừa tạo tài khoản, bạn có **Root Account**. Lời khuyên xương máu là: **Đừng bao giờ dùng Root Account cho công việc hằng ngày.** Hãy dùng nó để tạo một User admin riêng cho mình, thiết lập MFA và cất "chiếc chìa khóa" Root này vào tủ kính.
 
 ### User, Group và Policies
 

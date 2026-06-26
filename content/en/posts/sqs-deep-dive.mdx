@@ -14,9 +14,9 @@ The root problem here isn't a weak database — it's **tight coupling**. The app
 
 The solution? Place a **message queue** in between. Instead of writing directly to the database, the application simply "throws" requests into the queue. On the other side, workers pull messages and write to the database at a rate the database can handle. The queue acts as a **shock absorber** — absorbing traffic spikes and releasing them gradually and steadily.
 
-This is exactly the problem that <Tooltip content="Simple Queue Service">Amazon SQS</Tooltip> solves. A **fully managed** message queue — no provisioning, no capacity planning. You send messages in, consumers pull them out. AWS handles all the availability, durability, and scaling underneath.
+This is exactly the problem that Amazon SQS solves. A **fully managed** message queue — no provisioning, no capacity planning. You send messages in, consumers pull them out. AWS handles all the availability, durability, and scaling underneath.
 
-This post will dive deep into SQS internals — from how messages are stored and replicated across distributed servers, the difference between Standard Queue and <Tooltip content="First In, First Out — messages are consumed in the exact order they were sent">FIFO</Tooltip> Queue (and why Standard Queue delivers messages out of order), visibility timeout, long polling, Dead Letter Queue, to real-world patterns like Auto Scaling Group integration and using SQS as a buffer for database writes.
+This post will dive deep into SQS internals — from how messages are stored and replicated across distributed servers, the difference between Standard Queue and FIFO Queue (and why Standard Queue delivers messages out of order), visibility timeout, long polling, Dead Letter Queue, to real-world patterns like Auto Scaling Group integration and using SQS as a buffer for database writes.
 
 <ExcalidrawDiagram src="/sqs-overview.excalidraw" alt="Producer sends messages into the queue, consumer polls them out to process" />
 
@@ -61,7 +61,7 @@ SQS is built on three main tiers:
 
 **Frontend Layer** — the request reception tier. A load balancer distributes requests to frontend servers, which handle authentication (via IAM), validation (checking message size, whether the queue exists), and routing requests down to the storage tier.
 
-**Backend Storage Layer** — the heart of SQS. This is a <Tooltip content="A distributed storage system in key-value format">distributed key-value store</Tooltip>. Messages are stored as key-value pairs, where the key is generated from the queue ID and message metadata, and the value is the message body (up to 256KB) along with its attributes. The key point: messages are **sharded** (partitioned) across multiple storage nodes based on queue ID for load balancing.
+**Backend Storage Layer** — the heart of SQS. This is a distributed key-value store. Messages are stored as key-value pairs, where the key is generated from the queue ID and message metadata, and the value is the message body (up to 256KB) along with its attributes. The key point: messages are **sharded** (partitioned) across multiple storage nodes based on queue ID for load balancing.
 
 **Coordination Layer** — the orchestration tier, using a **distributed consensus** mechanism (similar to Paxos or Raft) to ensure consistency between nodes. For Standard Queue, this layer operates minimally to prioritize throughput. For FIFO Queue, this layer operates more strictly to guarantee ordering and exactly-once delivery.
 
@@ -71,7 +71,7 @@ When a producer sends a message to SQS, here's what happens behind the scenes:
 
 1. The frontend server receives the request, authenticates, and validates.
 2. The message is **synchronously replicated** across multiple storage nodes in **different Availability Zones (AZs)**.
-3. SQS uses <Tooltip content="A write is considered successful when M of N replicas confirm they've stored it">quorum-based writes</Tooltip>. This ensures the message survives even if an entire AZ goes down.
+3. SQS uses quorum-based writes. This ensures the message survives even if an entire AZ goes down.
 4. Only after achieving quorum does SQS return a success response to the producer.
 
 Thanks to this mechanism, SQS achieves extremely high data durability — AWS claims **11 nines durability (99.999999999%)**. Your messages are virtually impossible to lose.
@@ -129,9 +129,9 @@ A message goes through the following stages:
 
 **Step 2 — Stored**: The message sits in the queue in a **visible** state — ready for any consumer to poll.
 
-**Step 3 — ReceiveMessage**: A consumer polls the message. SQS returns the message along with a <Tooltip content='A "ticket" the consumer needs to keep for further operations on the message — for example, deleting it or extending the timeout'>receipt handle</Tooltip>.
+**Step 3 — ReceiveMessage**: A consumer polls the message. SQS returns the message along with a receipt handle.
 
-**Step 4 — In-flight**: The message transitions to an **invisible** state — other consumers can no longer see this message. This is the <Tooltip content="The period during which a message is hidden from other consumers after being received, giving the current consumer a chance to process it without duplication">visibility timeout</Tooltip> in action.
+**Step 4 — In-flight**: The message transitions to an **invisible** state — other consumers can no longer see this message. This is the visibility timeout in action.
 
 **Step 5 — Resolution**: Two scenarios:
 
@@ -176,7 +176,7 @@ When a consumer calls `ReceiveMessage`, there are two ways SQS can return result
 
 **Short polling** — SQS returns results **immediately**, even if there are no messages. If the queue is empty, you get an empty response. The consumer must poll continuously at an interval to check for new messages.
 
-<Tooltip content="A polling mechanism where SQS holds the connection open and waits for messages to arrive for up to WaitTimeSeconds before returning, reducing API costs and latency">Long polling</Tooltip> — SQS **waits** for up to `WaitTimeSeconds` (maximum 20 seconds) until a message arrives, then returns it. Only if the wait time expires with no messages does it return an empty response.
+Long polling — SQS **waits** for up to `WaitTimeSeconds` (maximum 20 seconds) until a message arrives, then returns it. Only if the wait time expires with no messages does it return an empty response.
 
 If you think long polling is pointless — "just poll continuously and you'll eventually get the message anyway" — you'd be wrong. Long polling provides three important benefits:
 
@@ -364,7 +364,7 @@ The previous patterns (ASG, buffer, Lambda) all handle a single flow: producer s
 
 For example: when an order is placed, the system needs to simultaneously check for fraud (Fraud Service), handle shipping (Shipping Service), send confirmation emails (Notification Service), and update analytics. If the Buying Service sends messages directly to each service, you create **tight coupling** — every time you add a new service, you have to modify the Buying Service code.
 
-The **fan-out pattern** solves this by combining <Tooltip content="Simple Notification Service">SNS</Tooltip> — a pub/sub (publish-subscribe) service that sends a single message to multiple subscribers at once — with **SQS** to ensure each subscriber receives and processes messages reliably.
+The **fan-out pattern** solves this by combining SNS — a pub/sub (publish-subscribe) service that sends a single message to multiple subscribers at once — with **SQS** to ensure each subscriber receives and processes messages reliably.
 
 ### Architecture
 

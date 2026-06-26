@@ -14,7 +14,7 @@ Cách đơn giản nhất? Viết một consumer application tự poll data từ
 
 Đây chính là bài toán mà combo **Amazon Kinesis Data Streams** và **Amazon Data Firehose** giải quyết. Kinesis Data Streams đảm nhận phần **ingestion** — nhận và lưu trữ luồng dữ liệu real-time với khả năng scale tuyến tính. Data Firehose đảm nhận phần **delivery** — tự động transform, convert format, buffer, và ghi dữ liệu xuống storage mà bạn không cần viết một dòng consumer code nào.
 
-Bài viết này sẽ đi sâu vào cả hai service — từ kiến trúc <Tooltip content="Đơn vị song song hoá của Kinesis — mỗi shard là một log tuần tự, append-only với throughput cố định (1 MB/s write, 2 MB/s read)">shard</Tooltip> của Kinesis Data Streams (rất giống Kafka partition), các limit cố định trên mỗi shard, fan-out modes, cho đến pipeline bên trong của Data Firehose: Lambda transformation, Glue format conversion, buffering internals, và lý do kỹ thuật vì sao Firehose phải buffer data trước khi ghi.
+Bài viết này sẽ đi sâu vào cả hai service — từ kiến trúc shard của Kinesis Data Streams (rất giống Kafka partition), các limit cố định trên mỗi shard, fan-out modes, cho đến pipeline bên trong của Data Firehose: Lambda transformation, Glue format conversion, buffering internals, và lý do kỹ thuật vì sao Firehose phải buffer data trước khi ghi.
 
 <ExcalidrawDiagram src="/kinesis-firehose-overview.excalidraw" alt="Tổng quan từ producer qua shard của Kinesis đến pipeline Firehose và destination" />
 
@@ -73,7 +73,7 @@ Mỗi shard trong Kinesis Data Streams có throughput **cố định và không 
 
 <ExcalidrawDiagram src="/kinesis-shard-limits.excalidraw" alt="Limit cố định mỗi shard và định tuyến record qua partition key" />
 
-Giống Kafka, producer dùng <Tooltip content="Chuỗi do producer cung cấp, được hash để xác định record đi vào shard nào. Records cùng partition key luôn vào cùng shard, đảm bảo ordering trong shard đó">partition key</Tooltip> để xác định record đi vào shard nào: `MD5(partition_key)` tạo ra một hash value 128-bit, giá trị này được map vào **hash key range** của shard tương ứng. Mỗi shard sở hữu một dải hash key range riêng, và các dải này ghép lại phủ toàn bộ không gian hash.
+Giống Kafka, producer dùng partition key để xác định record đi vào shard nào: `MD5(partition_key)` tạo ra một hash value 128-bit, giá trị này được map vào **hash key range** của shard tương ứng. Mỗi shard sở hữu một dải hash key range riêng, và các dải này ghép lại phủ toàn bộ không gian hash.
 
 ### 3.2. Shared Fan-Out vs Enhanced Fan-Out
 
@@ -204,7 +204,7 @@ Firehose nhận data từ nhiều nguồn:
 - **Kinesis Data Streams** — đây là combo phổ biến nhất. KDS làm ingestion layer, Firehose subscribe vào KDS stream để nhận data và delivery xuống storage. Lợi ích: bạn vẫn giữ được data retention, replay, và multiple consumer capability của KDS, đồng thời có automated delivery của Firehose.
 - **Amazon CloudWatch Logs** — đẩy log subscriptions trực tiếp vào Firehose.
 - **AWS IoT** — IoT rules có thể route data thẳng vào Firehose.
-- <Tooltip content="Amazon Managed Streaming for Apache Kafka — dịch vụ Kafka managed của AWS">Amazon MSK</Tooltip> cũng có thể là source cho Firehose.
+- Amazon MSK cũng có thể là source cho Firehose.
 
 ### 6.2. Destinations — Dữ liệu đi đến đâu?
 
@@ -274,7 +274,7 @@ Nếu Lambda function bị lỗi hoặc timeout, Firehose sẽ retry tối đa *
 
 ### 7.3. Format Conversion — AWS Glue Data Catalog
 
-Sau bước Lambda transformation (hoặc ngay sau khi nhận records nếu không có Lambda), Firehose có thể **convert format** dữ liệu từ JSON/CSV sang **Apache Parquet** hoặc **Apache ORC** — hai <Tooltip content="Định dạng lưu trữ theo cột — dữ liệu cùng một column được gom lại cạnh nhau trên disk, tối ưu cho analytics query">columnar storage formats</Tooltip> được sử dụng rộng rãi trong analytics.
+Sau bước Lambda transformation (hoặc ngay sau khi nhận records nếu không có Lambda), Firehose có thể **convert format** dữ liệu từ JSON/CSV sang **Apache Parquet** hoặc **Apache ORC** — hai columnar storage formats được sử dụng rộng rãi trong analytics.
 
 **Tại sao cần columnar format?**
 

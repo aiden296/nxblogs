@@ -21,7 +21,7 @@ Many people know EC2 is a virtual machine, but not everyone understands how it a
 
 For a "virtual machine" to function and connect, AWS combines the following components:
 
-- <Tooltip content="Amazon Machine Image — a template containing the OS and pre-installed software used to launch EC2 instances">AMI</Tooltip>: A "template" containing the operating system (Linux, Windows) and pre-installed software.
+- AMI: A "template" containing the operating system (Linux, Windows) and pre-installed software.
 - Instance Types: Resource configuration (CPU, RAM, Storage, Network).
 - Key Pairs: Security keys for logging in. AWS keeps the Public Key, you keep the Private Key. Don't lose it, because you won't be able to SSH into the machine!
 - Security Groups: A virtual firewall controlling inbound/outbound traffic based on protocols and ports.
@@ -43,7 +43,7 @@ To understand storage on EC2, let's clearly distinguish between these two types:
   - Disadvantage: Data will be lost if the physical host reclaims resources (when stopped/terminated).
 
 
-- <Tooltip content="Elastic Block Store — AWS's network-attached block storage service that persists independently of the EC2 instance">EBS</Tooltip>: Think of it as a **Google Drive** or a USB connected over the network (Network Drive).
+- EBS: Think of it as a **Google Drive** or a USB connected over the network (Network Drive).
   - Advantage: Safe and durable storage. Even if you shut down the virtual machine, the data remains. You can detach this "drive" from one machine and attach it to another.
   - Disadvantage: Since it connects over the network, the speed cannot match RAM or Instance Store.
 
@@ -87,7 +87,7 @@ Depending on your workload needs, you'll choose the appropriate machine "family.
 
 - **Characteristics:** Optimized for extremely high read/write (I/O) operations on local disks.
 - **Usage:**
-  - <Tooltip content="Online Transaction Processing — workloads with many small read/write transactions where low latency matters">OLTP</Tooltip> systems.
+  - OLTP systems.
   - Distributed file systems.
   - Data Warehouses.
 

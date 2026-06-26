@@ -39,16 +39,16 @@ There is no absolute number, but for typical systems:
 The most important reason Cache exists is **speed**, so you need to monitor:
 
 - **Average Latency:** For remote cache (Redis, Memcached), typically under **1-2ms**.
-- **<Tooltip content="High-percentile latency (p90, p99) reflecting the slowest slice of requests">Tail Latency</Tooltip> (p90, p99):** Detect abnormal cases.
+- **Tail Latency (p90, p99):** Detect abnormal cases.
 
 ### 1.3. Throughput
 
-Throughput is measured in <Tooltip content="Operations per second — the number of commands executed per second">Ops/sec</Tooltip>. Monitoring this metric helps you identify system limits and make **Scale-out** decisions.
+Throughput is measured in Ops/sec. Monitoring this metric helps you identify system limits and make **Scale-out** decisions.
 
 ### 1.4. Memory
 
 - **Memory Utilization:** Memory usage ratio. Set alerts when it exceeds the **60-70%** threshold.
-- **Eviction Rate:** Number of keys forcibly deleted per second. If Eviction Rate spikes + Hit Rate drops sharply -> you may be experiencing <Tooltip content="A state where the cache constantly evicts and reloads keys, collapsing Hit Rate">Cache Thrashing</Tooltip>.
+- **Eviction Rate:** Number of keys forcibly deleted per second. If Eviction Rate spikes + Hit Rate drops sharply -> you may be experiencing Cache Thrashing.
 - **Fragmentation Ratio:**
 
 ```
@@ -85,7 +85,7 @@ Node Index = hash(key) mod N
 
 **Rebalancing problem:** When N changes (adding/removing nodes), the division changes the denominator -> nearly **all keys are mapped to wrong positions**. The proportion of keys that must migrate is approximately `N/(N+1)`.
 
-> Example: A cluster of 10 nodes, adding 1 new node -> approximately **90% of data** experiences widespread Cache Miss (<Tooltip content="A simultaneous mass cache miss that dumps all traffic onto the underlying layer">Cache Avalanche</Tooltip>), pushing the entire load onto the Database.
+> Example: A cluster of 10 nodes, adding 1 new node -> approximately **90% of data** experiences widespread Cache Miss (Cache Avalanche), pushing the entire load onto the Database.
 
 ### 2.2. Consistent Hashing
 

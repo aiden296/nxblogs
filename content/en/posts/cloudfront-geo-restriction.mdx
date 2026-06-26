@@ -8,7 +8,7 @@ enableComment: true
 
 # CloudFront Geo Restriction — Block Traffic by Country at the Edge
 
-> You have a Knowledge Base application integrated with an <Tooltip content="Large Language Model — a large-scale AI model like ChatGPT or Claude">LLM</Tooltip>. One day you notice a flood of new accounts created from Russia using temporary emails (temp mail), all burning through your free LLM credits. The reason? In Russia, LLM services are restricted, so users find workarounds through integrated apps like yours.
+> You have a Knowledge Base application integrated with an LLM. One day you notice a flood of new accounts created from Russia using temporary emails (temp mail), all burning through your free LLM credits. The reason? In Russia, LLM services are restricted, so users find workarounds through integrated apps like yours.
 
 So how do you block traffic from a specific country without writing a single line of code?
 
@@ -18,13 +18,13 @@ The answer: **CloudFront Geo Restriction**.
 
 ## 1. What is CloudFront Geo Restriction?
 
-**Amazon CloudFront** is AWS's <Tooltip content="Content Delivery Network — a globally distributed network of servers that caches and delivers content closer to users">CDN</Tooltip>, reducing latency and improving access speed through **Edge Locations** around the world.
+**Amazon CloudFront** is AWS's CDN, reducing latency and improving access speed through **Edge Locations** around the world.
 
 **Geo Restriction** (also known as Geographic Restrictions) is a built-in CloudFront feature that lets you **block or allow** access based on the viewer's country.
 
 The mechanism is straightforward:
 
-- When a request reaches CloudFront, the system looks up a <Tooltip content="A database that maps IP addresses to geographic locations">GeoIP Database</Tooltip> to determine the requester's country
+- When a request reaches CloudFront, the system looks up a GeoIP Database to determine the requester's country
 - If that country is on the block list → CloudFront returns a **403 Forbidden** response right at the Edge — the request **never** reaches your Origin Server
 - If not blocked → the request is forwarded to the Origin Server as usual
 
@@ -84,10 +84,10 @@ Where `config.json` contains the Distribution configuration with the `Restrictio
 Geo Restriction is convenient but comes with some caveats:
 
 - **Country-level only**: you cannot block by region, city, or specific IP range
-- **Can be bypassed with a VPN**: a <Tooltip content="Virtual Private Network — a service that routes traffic through servers in other countries, masking the real location">VPN</Tooltip> allows users to hide their true location and bypass Geo Restriction
+- **Can be bypassed with a VPN**: a VPN allows users to hide their true location and bypass Geo Restriction
 - **Generic error page**: CloudFront returns a default 403 page. For a custom error page, you need to configure **Custom Error Responses** in the Distribution
 
-For more granular control, consider <Tooltip content="Web Application Firewall — a service that lets you create rules to filter web traffic">AWS WAF</Tooltip>:
+For more granular control, consider AWS WAF:
 
 | | Geo Restriction | AWS WAF Geographic Match |
 |---|---|---|

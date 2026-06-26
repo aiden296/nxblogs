@@ -8,9 +8,9 @@ enableComment: true
 
 # AWS EC2 Instance Purchasing Options: The Art of Negotiating Price
 
-When getting started with EC2, many people only know about <Tooltip content="Pay per second/hour for actual usage, no commitment, highest cost">On-Demand Instances</Tooltip> — the simplest approach of "spin up a machine and pay." But in reality, AWS offers up to **6 different purchasing options**, each with its own pros and cons suited to specific scenarios.
+When getting started with EC2, many people only know about On-Demand Instances — the simplest approach of "spin up a machine and pay." But in reality, AWS offers up to **6 different purchasing options**, each with its own pros and cons suited to specific scenarios.
 
-Understanding these options not only helps you save significant costs (up to 90%) but is also essential knowledge for passing the <Tooltip content="AWS Certified Solutions Architect Associate">SAA</Tooltip> exam.
+Understanding these options not only helps you save significant costs (up to 90%) but is also essential knowledge for passing the SAA exam.
 
 Let's explore the "art of negotiating price" in the EC2 world!
 
@@ -139,13 +139,13 @@ This is about leveraging AWS's unused capacity at "clearance" prices — one of 
 ### Important Risks
 
 * **Spot Instance Interruption:** AWS can reclaim the instance at any time if:
-  * An On-Demand or <Tooltip content="Commit to a specific instance for 1-3 years for up to 72% discount">Reserved Instance</Tooltip> customer needs those resources.
+  * An On-Demand or Reserved Instance customer needs those resources.
   * The Spot price exceeds your max price.
 * **Advance notice:** AWS will warn you **2 minutes** before reclaiming the instance (Spot Instance Interruption Notice).
 
 ### Spot Fleet
 
-* **Definition:** A <Tooltip content="Set of Spot Instances optionally combined with On-Demand, auto-distributes across instance types and AZs to optimize cost">Spot Fleet</Tooltip> is a set of Spot Instances, optionally combined with On-Demand Instances.
+* **Definition:** A Spot Fleet is a set of Spot Instances, optionally combined with On-Demand Instances.
 * **Advantage:** Automatically distributes workload across multiple instance types and Availability Zones to optimize cost and reduce interruption risk.
 * **Allocation Strategies:** LowestPrice (cost optimization), Diversified (risk reduction), CapacityOptimized (capacity optimization).
 
@@ -179,7 +179,7 @@ For special hardware and security requirements.
 * **Control:**
   * Control over instance placement.
   * Deep control over the physical server.
-* **Most important feature:** Supports software licenses based on core or socket counts — <Tooltip content="Bring Your Own License">BYOL</Tooltip>.
+* **Most important feature:** Supports software licenses based on core or socket counts — BYOL.
 * **Cost:** Most expensive among all instance purchasing options.
 
 ### Dedicated Instance

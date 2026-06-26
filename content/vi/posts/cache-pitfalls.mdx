@@ -16,7 +16,7 @@ Sau khi đã nắm vững [nền tảng](/posts/cache-fundamentals) và [bài to
 
 ## 1. Cache Avalanche — "Tuyết lở" hàng loạt
 
-**Định nghĩa:** <Tooltip content="Hàng loạt key hết hạn cùng lúc gây quá tải DB">Cache Avalanche</Tooltip> xảy ra khi một lượng lớn key trong Cache **hết hạn hoặc bị xóa cùng một lúc**. Hàng loạt request bị Cache Miss và ồ ạt đổ xuống Database, khiến DB bị quá tải.
+**Định nghĩa:** Cache Avalanche xảy ra khi một lượng lớn key trong Cache **hết hạn hoặc bị xóa cùng một lúc**. Hàng loạt request bị Cache Miss và ồ ạt đổ xuống Database, khiến DB bị quá tải.
 
 **Nguyên nhân:**
 
@@ -36,7 +36,7 @@ Sau khi đã nắm vững [nền tảng](/posts/cache-fundamentals) và [bài to
 
 ## 2. Thundering Herd (Cache Stampede) — "Bầy thú giẫm đạp"
 
-**Định nghĩa:** Tương tự Cache Avalanche, nhưng chỉ xảy ra với **một <Tooltip content="Key có lượng truy cập cực cao tại một thời điểm">Hot Key</Tooltip>** (ví dụ "Kết quả xổ số lúc 18h30"). Khi Hot Key hết hạn, một lượng lớn request ồ ạt đổ xuống DB.
+**Định nghĩa:** Tương tự Cache Avalanche, nhưng chỉ xảy ra với **một Hot Key** (ví dụ "Kết quả xổ số lúc 18h30"). Khi Hot Key hết hạn, một lượng lớn request ồ ạt đổ xuống DB.
 
 Giải pháp phụ thuộc vào loại Cache:
 
@@ -126,7 +126,7 @@ def get_data_with_pee(key):
 
 ## 3. Cache Penetration — "Xuyên thủng" Cache
 
-**Định nghĩa:** <Tooltip content="Truy vấn liên tục dữ liệu không tồn tại để bypass Cache">Cache Penetration</Tooltip> xảy ra khi user (hoặc hacker) liên tục query dữ liệu **không có trong Cache và cũng không có trong Database**. Ví dụ: hacker gửi hàng triệu request tìm `user_id = -1` hoặc UUID ngẫu nhiên → DB bị DDoS.
+**Định nghĩa:** Cache Penetration xảy ra khi user (hoặc hacker) liên tục query dữ liệu **không có trong Cache và cũng không có trong Database**. Ví dụ: hacker gửi hàng triệu request tìm `user_id = -1` hoặc UUID ngẫu nhiên → DB bị DDoS.
 
 ### 3.1. Cache Null Values
 
@@ -157,10 +157,10 @@ def get_data_with_null_caching(key):
 
 ### 3.2. Bloom Filter
 
-<Tooltip content="Probabilistic Data Structure">Bloom Filter</Tooltip> là cấu trúc dữ liệu xác suất cực kỳ hiệu quả về bộ nhớ, trả lời theo kiểu:
+Bloom Filter là cấu trúc dữ liệu xác suất cực kỳ hiệu quả về bộ nhớ, trả lời theo kiểu:
 
-- <Tooltip content="Definitely No">"Chắc chắn không có"</Tooltip>
-- <Tooltip content="Possibly Yes — False Positive">"Có thể có"</Tooltip>
+- "Chắc chắn không có"
+- "Có thể có"
 
 Ta sử dụng Bloom Filter để **kiểm tra nhanh** xem key có khả năng tồn tại không trước khi cho phép truy vấn Cache/DB. Nếu Bloom Filter nói "Không" → **chặn ngay lập tức**.
 

@@ -51,7 +51,7 @@ CloudWatch is a big "umbrella" of many sub-components. Let's go through them one
 **A metric** is a time-ordered series of data points — for example, the CPU utilization of an EC2 instance measured every minute. A few concepts to know:
 
 - **Namespace** is the "folder" that groups a service's metrics. AWS-generated metrics live in namespaces like `AWS/EC2`, `AWS/RDS`, `AWS/Lambda`...
-- <Tooltip content="A name/value pair that identifies a metric, e.g. InstanceId=i-1234. It distinguishes this instance's CPU metric from another's">Dimension</Tooltip> is an attribute of a metric (instance id, environment...) that lets you filter to the right resource. A metric can have up to 30 dimensions.
+- Dimension is an attribute of a metric (instance id, environment...) that lets you filter to the right resource. A metric can have up to 30 dimensions.
 - Every data point carries a timestamp — a metric is essentially time-series data.
 - **Custom metrics**: you push your own metrics via the `PutMetricData` API — orders per minute, an app's queue length, or RAM usage itself (which CloudWatch can't see on its own — more in section 2.4).
 - From metrics you build a CloudWatch Dashboard to visualize many metrics on one screen, including metrics from multiple regions/accounts.
@@ -92,7 +92,7 @@ Common destinations:
 
 You can filter to stream only a subset of metrics instead of all of them, saving cost.
 
-**Use case:** feed metrics into a centralized analytics store (an S3 data lake, or a third-party <Tooltip content="Application Performance Monitoring — monitoring of application performance, e.g. Datadog, New Relic">APM</Tooltip> tool) in real time, instead of polling the API periodically.
+**Use case:** feed metrics into a centralized analytics store (an S3 data lake, or a third-party APM tool) in real time, instead of polling the API periodically.
 
 Keyword: "stream metrics in near-real-time to a data lake / third-party tool".
 
@@ -180,7 +180,7 @@ Two more advanced feature groups, still within SAA scope:
 
 ## 3. Amazon EventBridge — the nervous system that reacts to events
 
-**Amazon EventBridge** (formerly CloudWatch Events) is a <Tooltip content="A central bus that receives events from many sources and routes them to many destinations, without the parties needing to know about each other">serverless event bus</Tooltip> — think of it as a "switchboard" that receives events from everywhere and routes them to wherever they need to be handled. This is the most different service in the group: it doesn't measure or record, it helps the system **react**.
+**Amazon EventBridge** (formerly CloudWatch Events) is a serverless event bus — think of it as a "switchboard" that receives events from everywhere and routes them to wherever they need to be handled. This is the most different service in the group: it doesn't measure or record, it helps the system **react**.
 
 Main components:
 

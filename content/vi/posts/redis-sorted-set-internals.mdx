@@ -23,9 +23,9 @@ Nếu bạn đã đọc bài [Rate Limiting Patterns](/posts/rate-limiting-patte
 **Sorted Set** (hay **ZSet**) là một kiểu dữ liệu trong Redis, lưu trữ các cặp `(member, score)`:
 
 - **Member**: chuỗi duy nhất (không trùng lặp) — giống key trong một hash map.
-- **Score**: số thực 64-bit (<Tooltip content="Chuẩn IEEE 754 cho số dấu phẩy động chính xác kép — biểu diễn số thực bằng 64 bit (1 bit dấu, 11 bit mũ, 52 bit phần định trị)">IEEE 754 double</Tooltip>) — dùng để sắp xếp.
+- **Score**: số thực 64-bit (IEEE 754 double) — dùng để sắp xếp.
 
-Redis **tự động duy trì thứ tự** theo score (tăng dần). Nếu hai member có cùng score, chúng được sắp xếp theo thứ tự từ điển (<Tooltip content="So sánh chuỗi theo từng ký tự (hay byte) từ trái sang phải, giống cách sắp xếp từ trong từ điển">lexicographic</Tooltip>) của member name.
+Redis **tự động duy trì thứ tự** theo score (tăng dần). Nếu hai member có cùng score, chúng được sắp xếp theo thứ tự từ điển (lexicographic) của member name.
 
 <ExcalidrawDiagram src="/sorted-set-overview.excalidraw" alt="Sorted Set lưu các cặp member-score, tự sắp xếp theo score tăng dần" />
 
@@ -173,7 +173,7 @@ Redis **không luôn dùng** skiplist+hashtable cho Sorted Set. Khi dữ liệu 
 - **Operations là O(N)**: insert/search phải duyệt tuần tự. Nhưng khi N nhỏ (≤128), O(N) trên bộ nhớ liên tục thực tế **nhanh hơn** O(log N) trên skip list — vì skip list phải chase pointer qua nhiều vùng RAM khác nhau (cache miss).
 - Header chỉ 6 bytes. Integers dùng 1-8 bytes, strings có length prefix 1-5 bytes.
 
-> Trước Redis 7.0, Redis dùng <Tooltip content="Encoding nhỏ gọn cũ trong Redis lưu các entry liên tiếp trong một khối bộ nhớ liền kề, là tiền thân của listpack">ziplist</Tooltip> thay vì listpack. Ziplist có một bug: khi insert/delete ở giữa, nó có thể gây **cascading update** — thay đổi kích thước một entry làm entry kế tiếp phải re-encode, lan truyền đến cuối list. Listpack sửa lỗi này bằng cách chỉ lưu forward size + backlen suffix, loại bỏ dependency giữa các entry.
+> Trước Redis 7.0, Redis dùng ziplist thay vì listpack. Ziplist có một bug: khi insert/delete ở giữa, nó có thể gây **cascading update** — thay đổi kích thước một entry làm entry kế tiếp phải re-encode, lan truyền đến cuối list. Listpack sửa lỗi này bằng cách chỉ lưu forward size + backlen suffix, loại bỏ dependency giữa các entry.
 
 ### 4.2. Khi nào Redis chuyển sang Skiplist+Hashtable?
 

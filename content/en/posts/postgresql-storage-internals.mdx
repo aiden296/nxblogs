@@ -57,8 +57,8 @@ A table isn't just one fork — it's three. **Fork** is a term borrowed from the
 />
 
 - **Main fork** (`<relfilenode>`): the actual heap data — the tuples you've `INSERT`ed.
-- **FSM fork** (`<relfilenode>_fsm`): the <Tooltip content="A small tree-like data structure that records how many free bytes each page has left. On INSERT, PostgreSQL consults the FSM to find a page with enough room, instead of scanning sequentially.">Free Space Map</Tooltip>.
-- **VM fork** (`<relfilenode>_vm`): the <Tooltip content="2 bits per page, recording whether (a) the page contains only live tuples, and (b) the page has been frozen. Index-only scans rely on (a) to skip the heap-visibility check; VACUUM relies on it to skip pages with no dead tuples.">Visibility Map</Tooltip>.
+- **FSM fork** (`<relfilenode>_fsm`): the Free Space Map.
+- **VM fork** (`<relfilenode>_vm`): the Visibility Map.
 
 When the table grows past **1 GB**, the main fork is split into consecutive **segment files**: `<relfilenode>`, `<relfilenode>.1`, `<relfilenode>.2`, …
 
@@ -78,7 +78,7 @@ PostgreSQL never reads or writes single bytes, tuples, or rows. The fundamental 
 A page's layout, from offset 0 to 8191:
 
 1. **PageHeaderData (24 bytes)** — page-level metadata:
-   - `pd_lsn` (8 B): the <Tooltip content="A monotonically increasing number marking the position of a record in the WAL stream; used to identify how far a page has been brought up to date.">Log Sequence Number</Tooltip> of the most recent <Tooltip content="Write-Ahead Log — a sequential log that records every change before it is applied to pages, guaranteeing durability and enabling crash recovery via replay.">WAL</Tooltip> record that touched this page. Used for recovery and checkpoint coordination.
+   - `pd_lsn` (8 B): the Log Sequence Number of the most recent WAL record that touched this page. Used for recovery and checkpoint coordination.
    - `pd_checksum` (2 B): integrity checksum (when `data_checksums` is enabled).
    - `pd_flags` (2 B): flags like `PD_HAS_FREE_LINES`, `PD_PAGE_FULL`, `PD_ALL_VISIBLE`.
    - `pd_lower` (2 B), `pd_upper` (2 B): two pointers that delimit free space — `pd_lower` is the end of the line pointer array; `pd_upper` is the top of the tuple area.
@@ -111,9 +111,9 @@ Each physical tuple is a byte blob made of three parts: the **header (23 bytes +
 The header holds everything MVCC needs to decide whether the tuple is visible to a given transaction. The important fields:
 
 - **`t_xmin` (4 B)** — the **Transaction ID** that INSERTed this tuple. A fresh row has `t_xmin = current_xid`.
-- **`t_xmax` (4 B)** — the XID that DELETEd or UPDATEd this tuple. `0` means the tuple is live, not yet touched by anyone. When you `DELETE` a row, PostgreSQL only sets `t_xmax = current_xid` and leaves the tuple in place — this is the essence of <Tooltip content="Multi-Version Concurrency Control — a mechanism that lets readers and writers operate concurrently without blocking, by keeping multiple versions of each row.">MVCC</Tooltip>.
+- **`t_xmax` (4 B)** — the XID that DELETEd or UPDATEd this tuple. `0` means the tuple is live, not yet touched by anyone. When you `DELETE` a row, PostgreSQL only sets `t_xmax = current_xid` and leaves the tuple in place — this is the essence of MVCC.
 - **`t_cid` / `t_xvac` (4 B)** — Command ID within the same transaction; distinguishes statements inside one BEGIN/COMMIT.
-- **`t_ctid` (6 B = 4 B block_num + 2 B offset)** — a pointer to this tuple itself (right after INSERT) or to the latest version after UPDATE. This is the mechanism that builds the <Tooltip content="Heap-Only Tuple chain — a chain of UPDATE versions kept within the same page without needing index updates, an optimization for UPDATEs that don't change any indexed column.">HOT chain</Tooltip> discussed in section 7.
+- **`t_ctid` (6 B = 4 B block_num + 2 B offset)** — a pointer to this tuple itself (right after INSERT) or to the latest version after UPDATE. This is the mechanism that builds the HOT chain discussed in section 7.
 - **`t_infomask2` (2 B)** — attribute count plus a handful of flags (e.g. `HEAP_KEYS_UPDATED`).
 - **`t_infomask` (2 B)** — vital flags, including:
   - `HEAP_HASNULL`: the tuple has a NULL column → there's a null bitmap.
@@ -133,7 +133,7 @@ A common question: **"Why 2 KB — is that a hard-coded constant?"**
 
 The answer is **no**. PostgreSQL derives the number from the formula `TOAST_TUPLE_THRESHOLD ≈ BLCKSZ / 4`, i.e. **fit at least 4 tuples into every page**. With the default `BLCKSZ = 8 KB`, the threshold lands around 2 KB.
 
-When a tuple exceeds this threshold, <Tooltip content="The Oversized-Attribute Storage Technique — a mechanism that compresses and/or moves large columns to a separate side table.">TOAST</Tooltip> kicks in: PostgreSQL compresses variable-length columns or relocates them to a side table, leaving only an inline pointer behind.
+When a tuple exceeds this threshold, TOAST kicks in: PostgreSQL compresses variable-length columns or relocates them to a side table, leaving only an inline pointer behind.
 
 The threshold can be tuned per table via the `toast_tuple_target` storage parameter (PG 11+):
 

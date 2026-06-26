@@ -18,7 +18,7 @@ Hôm nay, hãy cùng tìm hiểu xem Placement Group là gì và làm thế nào
 
 ## 1. Placement Group là gì?
 
-Hiểu đơn giản, <Tooltip content="PG">Placement Group</Tooltip> là một cấu hình logic cho phép bạn "gợi ý" với AWS về cách sắp xếp các EC2 Instances trên phần cứng vật lý.
+Hiểu đơn giản, Placement Group là một cấu hình logic cho phép bạn "gợi ý" với AWS về cách sắp xếp các EC2 Instances trên phần cứng vật lý.
 
 Khi bạn khởi tạo một nhóm các máy chủ ảo, mặc định AWS sẽ đặt chúng một cách ngẫu nhiên để tối ưu cho AWS. Tuy nhiên, với PG, bạn có thể yêu cầu AWS:
 
@@ -41,7 +41,7 @@ Hiện tại, AWS cung cấp 3 chiến lược (strategies) chính: **Cluster**,
   - Băng thông (Throughput) cực cao giữa các node (lên đến 10-100 Gbps).
 
 - **Nhược điểm:** "Được ăn cả, ngã về không". Vì nằm chụm lại một chỗ, nếu tủ rack đó gặp sự cố về điện hoặc mạng, toàn bộ cụm instance của bạn có thể "sập" cùng lúc.
-- **Use Case:** Phù hợp cho các ứng dụng tính toán hiệu năng cao (<Tooltip content="High Performance Computing — tính toán hiệu năng cao, đòi hỏi xử lý song song khối lượng lớn">HPC</Tooltip>), render đồ họa, hoặc các ứng dụng xử lý dữ liệu lớn cần giao tiếp mạng liên tục và tức thì.
+- **Use Case:** Phù hợp cho các ứng dụng tính toán hiệu năng cao (HPC), render đồ họa, hoặc các ứng dụng xử lý dữ liệu lớn cần giao tiếp mạng liên tục và tức thì.
 
 ### B. Spread Placement Group (Phân tán)
 
@@ -66,7 +66,7 @@ Trái ngược với Cluster, đây là chiến lược "chia để trị" nhằ
 - **Ưu điểm:**
   - Cho phép scale số lượng instance lớn hơn nhiều so với Spread (vì mỗi partition có thể chứa nhiều instance).
   - Vẫn đảm bảo cô lập lỗi: Nếu rack của Partition 1 bị hỏng, Partition 2 vẫn chạy bình thường.
-- **Tính năng đặc biệt:** Instance có thể truy cập **Metadata** để biết chính xác mình đang nằm ở Partition nào, giúp ứng dụng tự điều phối data (<Tooltip content="Ứng dụng nhận biết được vị trí vật lý của các node để tối ưu việc phân bổ dữ liệu và replica">Topology-aware</Tooltip>).
+- **Tính năng đặc biệt:** Instance có thể truy cập **Metadata** để biết chính xác mình đang nằm ở Partition nào, giúp ứng dụng tự điều phối data (Topology-aware).
 
 - **Use Case:** Các hệ thống phân tán dữ liệu lớn (Big Data) như **Hadoop HDFS, Cassandra, Kafka**. (Ví dụ: Kafka sẽ biết để replicate data sang partition khác rack nhằm đảm bảo an toàn).
 

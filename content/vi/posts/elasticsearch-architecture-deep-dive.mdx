@@ -12,15 +12,15 @@ Bạn vừa nhận yêu cầu xây tính năng tìm kiếm cho 1 trang e-commerc
 
 Bạn mở PostgreSQL — vốn đang lưu toàn bộ sản phẩm — và viết câu query đầu tiên: `SELECT * FROM products WHERE name ILIKE '%samsung galaxy s24 ultra 256gb đen%'`. Kết quả: query mất 15 giây, scan toàn bộ bảng, và nếu user gõ thiếu chữ "ultra" thì không match. Bạn thử dùng `tsvector` và `ts_rank` của PostgreSQL Full-Text Search — tốt hơn một chút nhưng vẫn không hiểu typo, không stem được từ tiếng Việt, và khi index lên 50 triệu rows thì việc rebuild tốn hàng giờ.
 
-Đây không phải là bài toán mà một relational database có thể giải quyết tốt. Vấn đề cốt lõi nằm ở chỗ: search không chỉ là **so khớp chuỗi**, mà là một bài toán **phân tích ngôn ngữ + ranking + scale ngang**. Bạn cần một hệ thống biết tách "samsung galaxy s24 ultra" thành các token, hiểu rằng "đen" có thể là một thuộc tính màu, ranking documents theo <Tooltip content="Thuật toán scoring kết hợp tần suất xuất hiện của từ với độ hiếm của term để đo độ liên quan.">TF-IDF</Tooltip> hoặc <Tooltip content="Thuật toán scoring kế thừa và cải tiến TF-IDF, được Lucene và Elasticsearch dùng mặc định.">BM25</Tooltip>, và quan trọng nhất — phải scale được khi data lên hàng trăm GB hoặc TB.
+Đây không phải là bài toán mà một relational database có thể giải quyết tốt. Vấn đề cốt lõi nằm ở chỗ: search không chỉ là **so khớp chuỗi**, mà là một bài toán **phân tích ngôn ngữ + ranking + scale ngang**. Bạn cần một hệ thống biết tách "samsung galaxy s24 ultra" thành các token, hiểu rằng "đen" có thể là một thuộc tính màu, ranking documents theo TF-IDF hoặc BM25, và quan trọng nhất — phải scale được khi data lên hàng trăm GB hoặc TB.
 
-Đây chính là không gian mà **Elasticsearch** chiếm lĩnh suốt hơn một thập kỷ qua. Là một **distributed search and analytics engine** xây trên nền <Tooltip content="Thư viện inverted-index huyền thoại của Doug Cutting, là core search engine bên dưới Elasticsearch.">**Apache Lucene**</Tooltip>, Elasticsearch không chỉ đảm nhận search mà còn xử lý log aggregation (stack ELK), observability, security analytics, và là backbone của những hệ thống xử lý hàng **petabytes dữ liệu** tại Netflix, eBay, Uber, Wikipedia.
+Đây chính là không gian mà **Elasticsearch** chiếm lĩnh suốt hơn một thập kỷ qua. Là một **distributed search and analytics engine** xây trên nền **Apache Lucene**, Elasticsearch không chỉ đảm nhận search mà còn xử lý log aggregation (stack ELK), observability, security analytics, và là backbone của những hệ thống xử lý hàng **petabytes dữ liệu** tại Netflix, eBay, Uber, Wikipedia.
 
 Có một cách framing đắt tiền nhưng đúng mà bạn nên giữ trong đầu suốt bài viết: **Elasticsearch không phải database — nó là search engine có khả năng lưu trữ**. Đảo ngược thứ tự này là nguồn gốc của hầu hết hiểu nhầm về nó (vì sao không có ACID transactions, vì sao shard count immutable sau khi tạo, vì sao eventual consistency cho search là feature chứ không phải bug). Mọi đặc điểm kiến trúc bạn sắp đọc đều là **hệ quả tất yếu** của "search-first DNA" đó, không phải là design choice ngẫu nhiên.
 
 Nhưng cái làm Elasticsearch đặc biệt — và cũng là phần thường bị che giấu sau REST API trông có vẻ đơn giản — là **kiến trúc phân tán** của nó. Làm sao một cluster có thể tự cân bằng dữ liệu khi thêm node? Làm sao đảm bảo data không mất khi 1 node chết? Làm sao tránh được **split-brain** khi network bị chia cắt? Tại sao production luôn khuyến cáo phải có ít nhất 3 master-eligible nodes? Và tại sao số shards lại immutable sau khi tạo index?
 
-Bài viết này sẽ đi sâu vào những câu hỏi đó. Chúng ta sẽ bóc tách Elasticsearch từ tầng cao nhất — cluster và node — xuống đến cơ chế shard allocation, rebalancing, và cuối cùng là phần quan trọng nhất: **cluster coordination & master election** theo thuật toán <Tooltip content="Cluster coordination algorithm mặc định từ Elasticsearch 7.0+, lấy cảm hứng từ Raft consensus protocol.">Zen2</Tooltip> (Raft-inspired) mà Elasticsearch 7+ sử dụng.
+Bài viết này sẽ đi sâu vào những câu hỏi đó. Chúng ta sẽ bóc tách Elasticsearch từ tầng cao nhất — cluster và node — xuống đến cơ chế shard allocation, rebalancing, và cuối cùng là phần quan trọng nhất: **cluster coordination & master election** theo thuật toán Zen2 (Raft-inspired) mà Elasticsearch 7+ sử dụng.
 
 <ExcalidrawDiagram
   src="/elasticsearch-cluster-overview.excalidraw"
@@ -49,7 +49,7 @@ Cluster là **đơn vị logic cao nhất** — mọi index, mọi shard, mọi 
 
 ### 1.2. Node là gì?
 
-Một **node** là **một instance Elasticsearch process** (1 <Tooltip content="Java Virtual Machine — môi trường runtime chạy các ứng dụng Java như Elasticsearch.">JVM</Tooltip>) chạy trên một máy. Một máy vật lý có thể chạy nhiều node (mỗi node một port riêng), nhưng trong production thường là 1-1 — 1 máy, 1 node — để cô lập tài nguyên CPU/RAM/disk.
+Một **node** là **một instance Elasticsearch process** (1 JVM) chạy trên một máy. Một máy vật lý có thể chạy nhiều node (mỗi node một port riêng), nhưng trong production thường là 1-1 — 1 máy, 1 node — để cô lập tài nguyên CPU/RAM/disk.
 
 Mỗi node có một **`node.name`** duy nhất trong cluster, và có một hoặc nhiều **`node.roles`** xác định nhiệm vụ của nó. Đây là điểm thú vị nhất: Elasticsearch không có khái niệm "node generic" — mỗi node được khai báo rõ ràng nó đảm nhận role gì.
 
@@ -216,7 +216,7 @@ Khi bạn POST một document vào index, Elasticsearch phải quyết định *
 shard_num = hash(_routing) % number_of_primary_shards
 ```
 
-Mặc định `_routing = _id`. Tức là `hash(_id) % number_of_shards` quyết định shard. Hash dùng là `MurmurHash3` — một <Tooltip content="Hàm hash tối ưu cho tốc độ và phân tán đều, không thiết kế để chống tấn công như cryptographic hash (SHA-256, ...).">**non-cryptographic hash function**</Tooltip> nổi tiếng vì tốc độ cao và phân tán đều, không phải vì security (cryptographic hash như SHA-256 chậm hơn nhiều, mà routing không cần chống collision có chủ ý).
+Mặc định `_routing = _id`. Tức là `hash(_id) % number_of_shards` quyết định shard. Hash dùng là `MurmurHash3` — một **non-cryptographic hash function** nổi tiếng vì tốc độ cao và phân tán đều, không phải vì security (cryptographic hash như SHA-256 chậm hơn nhiều, mà routing không cần chống collision có chủ ý).
 
 <ExcalidrawDiagram
   src="/elasticsearch-document-routing.excalidraw"
@@ -403,7 +403,7 @@ node.roles: ['data_warm']
 node.roles: ['data_cold']
 ```
 
-Sau đó dùng <Tooltip content="Index Lifecycle Management — tính năng tự động chuyển index qua các tier (hot/warm/cold/frozen) hoặc xoá theo policy dựa trên tuổi/size.">**Index Lifecycle Management (ILM)**</Tooltip> để tự động migrate index theo tuổi: tạo index `logs-2026.05.25` ở hot tier, sau 1 ngày → warm, sau 7 ngày → cold, sau 30 ngày → frozen, sau 90 ngày → delete. Allocation tự xảy ra dưới capo qua filter deciders.
+Sau đó dùng **Index Lifecycle Management (ILM)** để tự động migrate index theo tuổi: tạo index `logs-2026.05.25` ở hot tier, sau 1 ngày → warm, sau 7 ngày → cold, sau 30 ngày → frozen, sau 90 ngày → delete. Allocation tự xảy ra dưới capo qua filter deciders.
 
 ### 3.4. Manual Allocation — Khi cần override
 
@@ -546,7 +546,7 @@ Peer recovery có 2 phases:
 
 **Phase 1 — File-based copy**: Source node copy toàn bộ Lucene segment files sang target node. Source node tạm thời "freeze" segments (vẫn cho write thêm, nhưng segments hiện tại không bị delete) để đảm bảo file copy nhất quán.
 
-**Phase 2 — Translog replay**: Trong lúc phase 1 chạy, primary vẫn nhận write. Những write đó được ghi vào <Tooltip content="Write-ahead log — pattern lưu mọi mutation vào file append-only trước khi apply state thực sự, để có thể replay khi crash hoặc khi cần đồng bộ lại bản sao.">**translog**</Tooltip>. Sau khi phase 1 xong, target node "replay" translog để bắt kịp với primary. Cuối cùng cluster đánh dấu shard mới là active.
+**Phase 2 — Translog replay**: Trong lúc phase 1 chạy, primary vẫn nhận write. Những write đó được ghi vào **translog**. Sau khi phase 1 xong, target node "replay" translog để bắt kịp với primary. Cuối cùng cluster đánh dấu shard mới là active.
 
 Monitor recovery:
 

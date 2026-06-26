@@ -14,7 +14,7 @@ The simplest approach? Write a consumer application that polls data from the str
 
 This is exactly the problem that the combo of **Amazon Kinesis Data Streams** and **Amazon Data Firehose** solves. Kinesis Data Streams handles the **ingestion** — receiving and storing real-time data streams with linear scalability. Data Firehose handles the **delivery** — automatically transforming, converting formats, buffering, and writing data to storage without you writing a single line of consumer code.
 
-This post will deep dive into both services — from Kinesis Data Streams' <Tooltip content="Kinesis's unit of parallelism — each shard is a sequential, append-only log with fixed throughput (1 MB/s write, 2 MB/s read)">shard</Tooltip> architecture (very similar to Kafka partitions), the fixed limits per shard, fan-out modes, to Data Firehose's internal pipeline: Lambda transformation, Glue format conversion, buffering internals, and the technical reasons why Firehose must buffer data before writing.
+This post will deep dive into both services — from Kinesis Data Streams' shard architecture (very similar to Kafka partitions), the fixed limits per shard, fan-out modes, to Data Firehose's internal pipeline: Lambda transformation, Glue format conversion, buffering internals, and the technical reasons why Firehose must buffer data before writing.
 
 <ExcalidrawDiagram src="/kinesis-firehose-overview.excalidraw" alt="Overview from producer through Kinesis shards to the Firehose pipeline and destination" />
 
@@ -73,7 +73,7 @@ This means: if your stream needs to ingest **10 MB/s** of data, you need **at le
 
 <ExcalidrawDiagram src="/kinesis-shard-limits.excalidraw" alt="Fixed limits per shard and record routing via partition key" />
 
-Like Kafka, producers use the <Tooltip content="A producer-supplied string that is hashed to decide which shard a record goes to. Records sharing the same partition key always land on the same shard, preserving ordering within that shard">partition key</Tooltip> to determine which shard a record goes to: `MD5(partition_key)` produces a 128-bit hash value, which is mapped to the corresponding shard's **hash key range**. Each shard owns a distinct range, and all ranges together cover the entire hash space.
+Like Kafka, producers use the partition key to determine which shard a record goes to: `MD5(partition_key)` produces a 128-bit hash value, which is mapped to the corresponding shard's **hash key range**. Each shard owns a distinct range, and all ranges together cover the entire hash space.
 
 ### 3.2. Shared Fan-Out vs Enhanced Fan-Out
 
@@ -204,7 +204,7 @@ Firehose receives data from multiple sources:
 - **Kinesis Data Streams** — this is the most common combo. KDS serves as the ingestion layer, Firehose subscribes to the KDS stream to receive data and deliver it to storage. Benefit: you keep KDS's data retention, replay, and multiple consumer capabilities while getting Firehose's automated delivery.
 - **Amazon CloudWatch Logs** — push log subscriptions directly into Firehose.
 - **AWS IoT** — IoT rules can route data straight into Firehose.
-- <Tooltip content="Amazon Managed Streaming for Apache Kafka — AWS's managed Kafka service">Amazon MSK</Tooltip> can also be a source for Firehose.
+- Amazon MSK can also be a source for Firehose.
 
 ### 6.2. Destinations — Where Does Data Go?
 
@@ -274,7 +274,7 @@ If the Lambda function fails or times out, Firehose retries up to **3 times**. I
 
 ### 7.3. Format Conversion — AWS Glue Data Catalog
 
-After Lambda transformation (or immediately after receiving records if no Lambda is configured), Firehose can **convert data format** from JSON/CSV to **Apache Parquet** or **Apache ORC** — two <Tooltip content="Storage formats that group values of the same column together on disk, optimized for analytics queries that read few columns across many rows">columnar storage formats</Tooltip> widely used in analytics.
+After Lambda transformation (or immediately after receiving records if no Lambda is configured), Firehose can **convert data format** from JSON/CSV to **Apache Parquet** or **Apache ORC** — two columnar storage formats widely used in analytics.
 
 **Why columnar formats?**
 

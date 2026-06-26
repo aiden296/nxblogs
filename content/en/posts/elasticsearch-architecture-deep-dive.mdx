@@ -12,15 +12,15 @@ You've just been handed a search feature for an e-commerce site with 50 million 
 
 You open PostgreSQL — where all your products already live — and write the obvious query: `SELECT * FROM products WHERE name ILIKE '%samsung galaxy s24 ultra 256gb black%'`. The result: 15 seconds, full table scan, and if the user forgets the word "ultra" it returns nothing. You try PostgreSQL Full-Text Search with `tsvector` and `ts_rank` — slightly better, but still no typo tolerance, weak stemming for non-English languages, and rebuilding the index over 50 million rows takes hours.
 
-This isn't a problem a relational database is built to solve. The fundamental issue is that **search is not just string matching** — it's a problem of **linguistic analysis + ranking + horizontal scale**. You need a system that can tokenize "samsung galaxy s24 ultra" into searchable terms, understand that "black" is likely a color attribute, rank documents by <Tooltip content="A scoring algorithm that combines term frequency with term rarity to measure relevance.">TF-IDF</Tooltip> or <Tooltip content="A successor to TF-IDF with better saturation handling; the default scoring algorithm in Lucene and Elasticsearch.">BM25</Tooltip>, and crucially — scale horizontally as data grows into hundreds of gigabytes or terabytes.
+This isn't a problem a relational database is built to solve. The fundamental issue is that **search is not just string matching** — it's a problem of **linguistic analysis + ranking + horizontal scale**. You need a system that can tokenize "samsung galaxy s24 ultra" into searchable terms, understand that "black" is likely a color attribute, rank documents by TF-IDF or BM25, and crucially — scale horizontally as data grows into hundreds of gigabytes or terabytes.
 
-This is the space **Elasticsearch** has owned for over a decade. A **distributed search and analytics engine** built on top of <Tooltip content="Doug Cutting's legendary inverted-index library — the core search engine that powers Elasticsearch underneath.">**Apache Lucene**</Tooltip>, Elasticsearch powers not only search but log aggregation (the ELK stack), observability, security analytics, and is the backbone of systems processing **petabytes of data** at Netflix, eBay, Uber, and Wikipedia.
+This is the space **Elasticsearch** has owned for over a decade. A **distributed search and analytics engine** built on top of **Apache Lucene**, Elasticsearch powers not only search but log aggregation (the ELK stack), observability, security analytics, and is the backbone of systems processing **petabytes of data** at Netflix, eBay, Uber, and Wikipedia.
 
 There's an expensive but accurate framing worth keeping in mind throughout this post: **Elasticsearch is not a database — it's a search engine that happens to store data**. Reversing that order is the source of most misunderstandings about it (why there are no ACID transactions, why shard count is immutable after creation, why eventual consistency for search is a feature rather than a bug). Every architectural property you're about to read is a **direct consequence** of that "search-first DNA," not an arbitrary design choice.
 
 But what makes Elasticsearch special — and what's usually hidden behind its deceptively simple REST API — is the **distributed architecture**. How does a cluster automatically rebalance data when you add a node? How does it guarantee data isn't lost when a node dies? How does it avoid **split-brain** when the network is partitioned? Why does production always require at least 3 master-eligible nodes? And why is the shard count immutable once you create an index?
 
-This post drills into those questions. We'll peel back Elasticsearch from the top — cluster and node — down through shard allocation, rebalancing, and finally the most subtle piece: **cluster coordination and master election** based on the <Tooltip content="The default cluster coordination algorithm from Elasticsearch 7.0+, inspired by the Raft consensus protocol.">Zen2</Tooltip> (Raft-inspired) algorithm used in Elasticsearch 7+.
+This post drills into those questions. We'll peel back Elasticsearch from the top — cluster and node — down through shard allocation, rebalancing, and finally the most subtle piece: **cluster coordination and master election** based on the Zen2 (Raft-inspired) algorithm used in Elasticsearch 7+.
 
 <ExcalidrawDiagram
   src="/elasticsearch-cluster-overview.excalidraw"
@@ -49,7 +49,7 @@ The cluster is the **highest logical unit** — every index, every shard, every 
 
 ### 1.2. What is a Node?
 
-A **node** is **a single Elasticsearch process** (one <Tooltip content="Java Virtual Machine — the runtime environment that executes Java applications like Elasticsearch.">JVM</Tooltip>) running on a machine. A physical machine can host multiple nodes (each on its own port), but in production it's usually 1-to-1 — one machine, one node — to isolate CPU, RAM, and disk resources.
+A **node** is **a single Elasticsearch process** (one JVM) running on a machine. A physical machine can host multiple nodes (each on its own port), but in production it's usually 1-to-1 — one machine, one node — to isolate CPU, RAM, and disk resources.
 
 Every node has a unique **`node.name`** within the cluster, and one or more **`node.roles`** that define its responsibilities. This is the interesting part: Elasticsearch has no concept of a "generic node" — each node is explicitly declared with the roles it takes on.
 
@@ -216,7 +216,7 @@ When you POST a document into an index, Elasticsearch must decide **which primar
 shard_num = hash(_routing) % number_of_primary_shards
 ```
 
-By default `_routing = _id`. So `hash(_id) % number_of_shards` picks the shard. The hash is `MurmurHash3` — a <Tooltip content="A hash function optimized for speed and uniform distribution, not designed to resist attacks like cryptographic hashes (SHA-256, ...).">**non-cryptographic hash function**</Tooltip> chosen for its speed and uniform distribution, not for security (cryptographic hashes like SHA-256 are much slower, and routing doesn't need protection against deliberate collisions).
+By default `_routing = _id`. So `hash(_id) % number_of_shards` picks the shard. The hash is `MurmurHash3` — a **non-cryptographic hash function** chosen for its speed and uniform distribution, not for security (cryptographic hashes like SHA-256 are much slower, and routing doesn't need protection against deliberate collisions).
 
 <ExcalidrawDiagram
   src="/elasticsearch-document-routing.excalidraw"
@@ -403,7 +403,7 @@ node.roles: ['data_warm']
 node.roles: ['data_cold']
 ```
 
-Then use <Tooltip content="Index Lifecycle Management — automatically moves indices between tiers (hot/warm/cold/frozen) or deletes them based on age/size policies.">**Index Lifecycle Management (ILM)**</Tooltip> to automatically migrate indices by age: create `logs-2026.05.25` on hot, after 1 day → warm, after 7 days → cold, after 30 days → frozen, after 90 days → delete. Allocation happens transparently underneath via the filter deciders.
+Then use **Index Lifecycle Management (ILM)** to automatically migrate indices by age: create `logs-2026.05.25` on hot, after 1 day → warm, after 7 days → cold, after 30 days → frozen, after 90 days → delete. Allocation happens transparently underneath via the filter deciders.
 
 ### 3.4. Manual Allocation — When You Need to Override
 
@@ -546,7 +546,7 @@ Peer recovery has two phases:
 
 **Phase 1 — File-based copy**: The source node copies all Lucene segment files to the target node. The source temporarily "freezes" segments (it still accepts writes, but the existing segments aren't deleted) so the file copy is consistent.
 
-**Phase 2 — Translog replay**: While phase 1 is running, the primary keeps accepting writes. Those writes are appended to the <Tooltip content="Write-ahead log — a pattern where every mutation is recorded to an append-only file before it's applied to the actual state, so it can be replayed after a crash or used to sync a replica.">**translog**</Tooltip>. After phase 1 completes, the target node "replays" the translog to catch up to the primary. Finally the cluster marks the new shard as active.
+**Phase 2 — Translog replay**: While phase 1 is running, the primary keeps accepting writes. Those writes are appended to the **translog**. After phase 1 completes, the target node "replays" the translog to catch up to the primary. Finally the cluster marks the new shard as active.
 
 Monitor recovery:
 

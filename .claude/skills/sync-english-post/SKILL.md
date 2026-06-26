@@ -62,7 +62,6 @@ So if a Vietnamese edit only added a tag (e.g. `+'Exam Prep'`), the English chan
 ### Special elements
 
 - `<ExcalidrawDiagram src="..." />` — diagram text is always English, so the `src` and the diagram itself are shared. Copy `src` verbatim. The `alt` text is English prose; if the Vietnamese `alt` changed, translate it.
-- `<Tooltip content="...">term</Tooltip>` — the `content` is Vietnamese in the Vietnamese post and English in the English post. If a tooltip's content changed, translate the new content into English. The wrapped `term` is usually a technical term and stays the same in both.
 - Code blocks — copy verbatim. Translate only comments, and recall this blog's code has no comments anyway, so code almost always copies unchanged.
 - Tables — translate cell prose; keep numbers, identifiers, and emoji as-is.
 
@@ -70,7 +69,7 @@ So if a Vietnamese edit only added a tag (e.g. `+'Exam Prep'`), the English chan
 
 - Natural translation, not word-for-word. Keep technical terms in English.
 - Emphasis is bold only, never italic — if a Vietnamese edit introduced italic, render the English as bold or plain, not italic.
-- Explain a technical term on first mention; preserve the `<Tooltip>` pattern the post already uses.
+- Explain a technical term on first mention, inline in prose (e.g. a parenthetical or em-dash aside).
 - Conversational-but-technical tone, second person ("you").
 
 ## When the English post does not exist

@@ -33,7 +33,7 @@ Operating at the **Application Layer (Layer 7)**, ALB has the ability to inspect
 ### Strengths:
 
 * **Flexible Routing:** Can route based on URL (e.g., `/api` goes to the API cluster, while `/images` goes to S3 or Storage).
-* **Application-level Security:** Deep integration with <Tooltip content="Web Application Firewall — filters HTTP-layer attacks like injection and XSS">WAF</Tooltip> to block attacks like SQL Injection or XSS.
+* **Application-level Security:** Deep integration with WAF to block attacks like SQL Injection or XSS.
 * **SSL/TLS Offloading:** Automatically handles certificate decryption, reducing compute load on backend servers.
 
 ### Weaknesses:
@@ -70,13 +70,13 @@ Many engineers have the habit of conveniently choosing ALB because of its versat
 
 ### Performance:
 
-ALB performs <Tooltip content="Terminates the client connection and creates a new connection to the backend">"Connection Termination"</Tooltip>. In contrast, NLB simply <Tooltip content="Forwards packets from one port to another without terminating the connection">"Forwards"</Tooltip> the packet. This makes NLB significantly more resilient during sudden traffic spikes (like Flash Sales).
+ALB performs "Connection Termination". In contrast, NLB simply "Forwards" the packet. This makes NLB significantly more resilient during sudden traffic spikes (like Flash Sales).
 
 ### Cost:
 
 While hourly maintenance fees are comparable, data processing fees (Capacity Units) tell a different story:
 
-* **ALB (<Tooltip content="Load Balancer Capacity Unit — AWS's pricing unit measuring connection, processing, and bandwidth usage on an ALB">LCU</Tooltip>):** Charges based on the number of routing rules, SSL processing, and bandwidth.
+* **ALB (LCU):** Charges based on the number of routing rules, SSL processing, and bandwidth.
 * **NLB (NLCU):** Primarily charges based on bandwidth and number of connections.
 
 > **Expert tip:** For data-heavy systems (Video Streaming, Big Data), switching from ALB to NLB can save you **30-50%** on your Load Balancer bill.

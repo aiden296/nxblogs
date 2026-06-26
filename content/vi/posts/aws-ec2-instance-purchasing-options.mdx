@@ -8,9 +8,9 @@ enableComment: true
 
 # AWS EC2 Instance Purchasing Options: Nghệ thuật trả giá
 
-Khi bắt đầu với EC2, nhiều người thường chỉ biết đến <Tooltip content="Trả theo giây/giờ thực tế sử dụng, không cần cam kết, chi phí cao nhất">On-Demand Instances</Tooltip> - cách đơn giản nhất là "bật máy lên và trả tiền". Nhưng thực tế, AWS cung cấp đến **6 loại hình thức mua Instance** khác nhau, mỗi loại đều có ưu nhược điểm riêng và phù hợp với từng tình huống cụ thể.
+Khi bắt đầu với EC2, nhiều người thường chỉ biết đến On-Demand Instances - cách đơn giản nhất là "bật máy lên và trả tiền". Nhưng thực tế, AWS cung cấp đến **6 loại hình thức mua Instance** khác nhau, mỗi loại đều có ưu nhược điểm riêng và phù hợp với từng tình huống cụ thể.
 
-Hiểu rõ các lựa chọn này không chỉ giúp bạn tiết kiệm chi phí đáng kể (có thể lên đến 90%) mà còn là kiến thức bắt buộc để vượt qua kỳ thi <Tooltip content="AWS Certified Solutions Architect Associate">SAA</Tooltip>.
+Hiểu rõ các lựa chọn này không chỉ giúp bạn tiết kiệm chi phí đáng kể (có thể lên đến 90%) mà còn là kiến thức bắt buộc để vượt qua kỳ thi SAA.
 
 Hãy cùng mình khám phá "nghệ thuật trả giá" trong thế giới EC2!
 
@@ -139,13 +139,13 @@ AWS cung cấp 3 phương thức thanh toán, và càng trả trước nhiều, 
 ### Rủi ro quan trọng
 
 * **Spot Instance Interruption:** AWS có thể thu hồi Instance bất cứ lúc nào nếu:
-  * Có khách hàng On-Demand hoặc <Tooltip content="Cam kết sử dụng instance cụ thể trong 1-3 năm để nhận chiết khấu lên tới 72%">Reserved Instance</Tooltip> cần dùng tài nguyên đó.
+  * Có khách hàng On-Demand hoặc Reserved Instance cần dùng tài nguyên đó.
   * Giá Spot vượt quá mức tối đa bạn đặt (max price).
 * **Thông báo trước:** AWS sẽ cảnh báo bạn **2 phút** trước khi thu hồi Instance (Spot Instance Interruption Notice).
 
 ### Spot Fleet
 
-* **Định nghĩa:** <Tooltip content="Tập hợp Spot Instances kết hợp tùy chọn với On-Demand, tự phân phối qua nhiều instance types và AZ để tối ưu chi phí">Spot Fleet</Tooltip> là một tập hợp (set) các Spot Instances, có thể kết hợp với On-Demand Instances (optional).
+* **Định nghĩa:** Spot Fleet là một tập hợp (set) các Spot Instances, có thể kết hợp với On-Demand Instances (optional).
 * **Ưu điểm:** Tự động phân phối workload trên nhiều Instance types và Availability Zones để tối ưu chi phí và giảm rủi ro gián đoạn.
 * **Allocation Strategies:** LowestPrice (tối ưu chi phí), Diversified (giảm rủi ro), CapacityOptimized (tối ưu capacity).
 
@@ -179,7 +179,7 @@ Dành cho các yêu cầu đặc biệt về phần cứng và bảo mật.
 * **Quyền kiểm soát:**
   * Kiểm soát vị trí đặt Instance (Placement control).
   * Quyền kiểm soát sâu vào server vật lý.
-* **Đặc điểm quan trọng nhất:** Hỗ trợ các loại giấy phép phần mềm (License) tính theo core hoặc socket - <Tooltip content="Bring Your Own License">BYOL</Tooltip>.
+* **Đặc điểm quan trọng nhất:** Hỗ trợ các loại giấy phép phần mềm (License) tính theo core hoặc socket - BYOL.
 * **Chi phí:** Đắt nhất trong các loại Instance purchasing options.
 
 ### Dedicated Instance

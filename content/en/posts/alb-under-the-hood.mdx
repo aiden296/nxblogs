@@ -8,7 +8,7 @@ enableComment: true
 
 # ALB Under The Hood: What Really Lies Beneath the "Smart Receptionist"?
 
-When you create an <Tooltip content="Application Load Balancer — a Layer 7 (HTTP/HTTPS) load balancer that can inspect request content and route based on path, host, headers, and more.">Application Load Balancer</Tooltip> on AWS, you get exactly **one thing**: a long DNS name like `my-alb-123456789.ap-southeast-1.elb.amazonaws.com`. No static IP. No server you can SSH into. So what's really behind that DNS name?
+When you create an Application Load Balancer on AWS, you get exactly **one thing**: a long DNS name like `my-alb-123456789.ap-southeast-1.elb.amazonaws.com`. No static IP. No server you can SSH into. So what's really behind that DNS name?
 
 This article will reveal the hidden architecture behind ALB — from the army of load balancer nodes working silently, to the scaling mechanisms, and why ALB never has a static IP.
 
@@ -41,7 +41,7 @@ Each node consumes **1 IP address** in the subnet. Therefore, AWS requires:
 
 ## 2. Why Does ALB Only Have a DNS Name, No Static IP?
 
-This is a classic question: <Tooltip content="Network Load Balancer — a Layer 4 (TCP/UDP) load balancer that forwards packets without inspecting content and supports static IPs via Elastic IP.">NLB</Tooltip> can attach Elastic IPs (static), so why can't ALB?
+This is a classic question: NLB can attach Elastic IPs (static), so why can't ALB?
 
 The answer lies in the very scaling mechanism described above:
 
@@ -64,7 +64,7 @@ When a client resolves the ALB's DNS name:
 
 NLB operates at Layer 4 — it only forwards TCP/UDP packets without inspecting content. NLB's architecture is much simpler:
 
-- NLB creates **1 fixed <Tooltip content="Elastic Network Interface — a virtual network interface in AWS VPC that can hold its own IP (including an Elastic IP) and move between instances.">ENI</Tooltip>** per AZ
+- NLB creates **1 fixed ENI** per AZ
 - Each ENI can be assigned **1 Elastic IP** (static)
 - Internally, AWS uses **Hyperplane** technology to scale capacity without adding more ENIs
 
@@ -90,7 +90,7 @@ ALB scaling has an interesting characteristic: **it's asymmetric**.
 
 ### LCU Reservation — "Pre-booking" for Traffic Spikes
 
-Previously, if you knew a large traffic event was coming (Black Friday, Flash Sale), you had to contact AWS Support to "pre-warm" ALB. Now, AWS provides the <Tooltip content="Load Balancer Capacity Unit Reservation — lets you pre-book ALB capacity before a large traffic event so the ALB doesn't lag behind a sudden spike.">**LCU Reservation**</Tooltip> feature — allowing you to pre-book capacity yourself.
+Previously, if you knew a large traffic event was coming (Black Friday, Flash Sale), you had to contact AWS Support to "pre-warm" ALB. Now, AWS provides the **LCU Reservation** feature — allowing you to pre-book capacity yourself.
 
 **How it works:**
 
@@ -125,7 +125,7 @@ With cross-zone load balancing **enabled** (default), each ALB node distributes 
 
 ### When should you disable cross-zone?
 
-You can disable cross-zone at the <Tooltip content="Target group — a logical group of backend targets (EC2 instances, IPs, Lambda...) that ALB forwards traffic to. Routing rules, health checks, and load balancing algorithms are all configured at this level.">**target group level**</Tooltip> in certain cases:
+You can disable cross-zone at the **target group level** in certain cases:
 
 - Want to keep traffic within the same AZ to reduce latency
 - Using **zonal shift** (AZ evacuation) for disaster recovery

@@ -165,7 +165,7 @@ Ideal for applications requiring minimal latency, such as:
 
 S3 Express One Zone can be integrated with AWS services like Amazon EMR, Amazon SageMaker, and Amazon Athena to support analytics and AI/ML workloads.
 
-For optimal performance, specify an AWS Region and Availability Zone local to your compute instances (e.g., Amazon EC2, Amazon EKS, or Amazon ECS). You can access S3 Express One Zone directory buckets from a <Tooltip content="Virtual Private Cloud — an isolated virtual network in AWS where you run resources with full control over IP addressing, subnets, routing, and security.">VPC</Tooltip> using a gateway VPC endpoint, avoiding the need for an internet gateway or NAT device.
+For optimal performance, specify an AWS Region and Availability Zone local to your compute instances (e.g., Amazon EC2, Amazon EKS, or Amazon ECS). You can access S3 Express One Zone directory buckets from a VPC using a gateway VPC endpoint, avoiding the need for an internet gateway or NAT device.
 
 ### **Appending data to objects in directory buckets**
 
@@ -394,7 +394,7 @@ When you send a request to initiate a multipart upload, make sure to specify a *
 
 When uploading a part, you must specify a part number in addition to the upload ID. You can choose any part number between 1 and 10,000. A part number uniquely identifies a part and its position in the object you are uploading. The part number that you choose doesn’t need to be in a consecutive sequence (for example, it can be 1, 5, and 14). Be aware that if you upload a new part using the same part number as a previously uploaded part, the previously uploaded part gets overwritten.
 
-When you upload a part, Amazon S3 returns the **checksum algorithm type with the checksum value for each part as a header in the response.** For each part upload, you must record the part number and the <Tooltip content="Entity tag — an identifier string (typically an MD5 hash) that S3 returns after upload, used to verify data integrity and as a precondition for conditional operations.">ETag</Tooltip> value. You must include these values in the subsequent request to complete the multipart upload. Each part will have its own ETag at the time of upload. However, once the multipart upload is complete and all parts are consolidated, all parts belong to one ETag as a checksum of checksums.
+When you upload a part, Amazon S3 returns the **checksum algorithm type with the checksum value for each part as a header in the response.** For each part upload, you must record the part number and the ETag value. You must include these values in the subsequent request to complete the multipart upload. Each part will have its own ETag at the time of upload. However, once the multipart upload is complete and all parts are consolidated, all parts belong to one ETag as a checksum of checksums.
 
 ![Each part returns its own ETag, combined into a checksum of checksums](https://miro.medium.com/v2/resize:fit:1080/format:webp/1*lBdDkQAmiP6ESbI_OvUtTQ.png)
 
@@ -711,7 +711,7 @@ If you want to use a **customer managed key** for SSE-KMS, create a symmetric en
 In this method, AWS delegates the “root/master key” to AWS “KMS key” allowing to have a more flexible solution in terms of overcoming some of the shortcomings which were discussed before.
 
 *   AWS “KMS key” can generate a unique “Data Key” to encrypt each object that is uploaded to S3. This is quite similar to SSE-S3 method but it basically replaces the SSE-S3 “root/master key” with the AWS “KMS key”.
-*   With the AWS “KMS Key” approach, you have the ability to create your own “KMS Key”, which is known as the “Customer Managed <Tooltip content="Customer Master Key — the top-level customer-managed encryption key in AWS KMS, used to encrypt the data keys that protect actual data.">CMK</Tooltip>”. That will basically enable you to apply permissions, rotate keys and have robust role separation.
+*   With the AWS “KMS Key” approach, you have the ability to create your own “KMS Key”, which is known as the “Customer Managed CMK”. That will basically enable you to apply permissions, rotate keys and have robust role separation.
 *   The role separation for the AWS “KMS Key” can be done by limiting the AWS administrator role for the assigned AWS “KMS Key”.
 
 **S3 Bucket Keys**
@@ -759,7 +759,7 @@ In addition to the resilience offered by the AWS global infrastructure, Amazon S
 *   **S3 Replication:** You can use live replication to enable automatic, asynchronous copying of objects across Amazon S3 buckets.
 *   **Multi-Region Access Points and failover controls:** Amazon S3 Multi-Region Access Points provide a global endpoint that applications can use to fulfill requests from S3 buckets that are located in multiple AWS Regions.
 *   **S3 Versioning:** Versioning is a means of keeping multiple variants of an object in the same bucket. You can use versioning to preserve, retrieve, and restore every version of every object stored in your Amazon S3 bucket.
-*   **S3 Object Lock:** You can use S3 Object Lock to store objects using a <Tooltip content="Write Once, Read Many — once written, an object can't be modified or deleted for the defined retention period; used for compliance and regulatory data.">WORM</Tooltip> model. Using S3 Object Lock, you can prevent an object from being deleted or overwritten for a fixed amount of time or indefinitely.
+*   **S3 Object Lock:** You can use S3 Object Lock to store objects using a WORM model. Using S3 Object Lock, you can prevent an object from being deleted or overwritten for a fixed amount of time or indefinitely.
 *   **AWS Backup:** Amazon S3 is natively integrated with AWS Backup, a fully managed, policy-based service that you can use to centrally define backup policies to protect your data in Amazon S3
 
 **Replicating objects within and across Regions**

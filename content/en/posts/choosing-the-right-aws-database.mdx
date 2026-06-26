@@ -18,17 +18,17 @@ You get roughly 90 seconds per question, so recognition has to be nearly reflexi
 
 ## 1. Amazon RDS — Managed Relational Database
 
-A relational database organizes data into tables with a fixed schema, links tables via foreign keys, queries with SQL, and guarantees <Tooltip content="Atomicity, Consistency, Isolation, Durability — the set of properties ensuring a transaction either runs completely or not at all, keeping data consistent">ACID</Tooltip> transactions. RDS is AWS's managed offering for the popular relational engines, so you don't install and operate them yourself.
+A relational database organizes data into tables with a fixed schema, links tables via foreign keys, queries with SQL, and guarantees ACID transactions. RDS is AWS's managed offering for the popular relational engines, so you don't install and operate them yourself.
 
 - Manages 6 engines: PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, IBM DB2.
 - Runs on an instance + EBS volume you size yourself; the EBS volume **auto-scales** as it fills up.
-- <Tooltip content="Multi Availability Zone — a synchronous copy in another AZ that auto-fails-over when the primary dies, used for high availability">Multi-AZ</Tooltip> for high availability, and Read Replicas for read scaling (asynchronous copies).
+- Multi-AZ for high availability, and Read Replicas for read scaling (asynchronous copies).
 - Security: IAM, Security Groups, KMS, SSL/TLS; supports IAM authentication and Secrets Manager integration.
-- Automated backups + <Tooltip content="Point-in-time Restore — restore data to any moment in the past, here up to 35 days back">PITR</Tooltip> up to 35 days, or manual snapshots for long-term retention.
+- Automated backups + PITR up to 35 days, or manual snapshots for long-term retention.
 - Managed, scheduled maintenance (with downtime).
 - RDS Custom gives OS-level access to the underlying instance (Oracle & SQL Server).
 
-**Use case:** Store relational data, run SQL queries and transactions — the classic <Tooltip content="Online Transaction Processing — handling many small transactions with continuous real-time reads/writes, e.g. orders, payments">OLTP</Tooltip> workload.
+**Use case:** Store relational data, run SQL queries and transactions — the classic OLTP workload.
 
 **Keywords:** `relational`, `SQL`, `transaction`, `ACID`, `join`, or a specific engine name (MySQL / PostgreSQL / Oracle / SQL Server).
 
@@ -41,7 +41,7 @@ Aurora is also a relational database and is **API-compatible** with PostgreSQL/M
 - PostgreSQL/MySQL-compatible; higher performance than standard RDS (AWS claims ~5x MySQL, ~3x PostgreSQL).
 - Storage is replicated into **6 copies across 3 AZs**, self-healing, and auto-scaling (up to 128 TB) — no need to provision capacity up front.
 - The cluster exposes a **writer endpoint** and a **reader endpoint** (load-balanced across up to **15 read replicas**).
-- <Tooltip content="Aurora Serverless — automatically scales compute up and down with load, no need to estimate capacity in advance, ideal for unpredictable traffic">Aurora Serverless</Tooltip> for unpredictable workloads, no capacity planning.
+- Aurora Serverless for unpredictable workloads, no capacity planning.
 - **Aurora Global Database**: replicates to another region with **< 1 second** lag — serve global users and solve disaster recovery. Up to 16 read replicas per region, except the primary region (which gives up one slot to the master instance).
 - Database Cloning (a near-instant new cluster), Backtrack (rewind in time).
 
@@ -53,7 +53,7 @@ Aurora is also a relational database and is **API-compatible** with PostgreSQL/M
 
 ## 3. Amazon ElastiCache — In-Memory Cache
 
-An <Tooltip content="In-memory data store — keeps data in RAM instead of on disk, so access is extremely fast but more expensive and less durable">in-memory data store</Tooltip> keeps data in RAM instead of on disk, so reads/writes are extremely fast (sub-millisecond) but capacity is expensive and not as durable as disk. ElastiCache is the managed service for Redis and Memcached.
+An in-memory data store keeps data in RAM instead of on disk, so reads/writes are extremely fast (sub-millisecond) but capacity is expensive and not as durable as disk. ElastiCache is the managed service for Redis and Memcached.
 
 - Managed Redis / Memcached, **sub-millisecond** latency.
 - Redis supports clustering, Multi-AZ, read replicas (sharding).
@@ -69,7 +69,7 @@ An <Tooltip content="In-memory data store — keeps data in RAM instead of on di
 
 ## 4. Amazon DynamoDB — Serverless NoSQL Key-Value
 
-A <Tooltip content="NoSQL — a family of databases that don't follow the relational table model, usually trading complex joins/transactions for horizontal scalability and high performance">NoSQL</Tooltip> key-value store keeps data as key–value pairs with no fixed schema, trading complex joins for near-unlimited horizontal scale. DynamoDB is AWS's proprietary NoSQL database, fully **serverless**.
+A NoSQL key-value store keeps data as key–value pairs with no fixed schema, trading complex joins for near-unlimited horizontal scale. DynamoDB is AWS's proprietary NoSQL database, fully **serverless**.
 
 - Serverless.
 - **Single-digit millisecond** latency at any data scale.
@@ -77,7 +77,7 @@ A <Tooltip content="NoSQL — a family of databases that don't follow the relati
 - Multi-AZ by default.
 - Supports transactions.
 - Reads and writes are decoupled.
-- <Tooltip content="DynamoDB Accelerator — an in-memory cache layer in front of DynamoDB that drops read latency to the microsecond range">DAX</Tooltip> — an in-memory cache that drops read latency to **microseconds**.
+- DAX — an in-memory cache that drops read latency to **microseconds**.
 - DynamoDB Streams (trigger Lambda / Kinesis), a natural CDC.
 - Global Tables (active-active, multi-region).
 - **TTL** auto-deletes expired items.
@@ -92,7 +92,7 @@ A <Tooltip content="NoSQL — a family of databases that don't follow the relati
 
 ## 5. Amazon S3 — Object Storage
 
-<Tooltip content="Object storage — stores each file as an object made of data + metadata, identified by a key and accessed over an API/HTTP, unlike block storage or file storage">Object storage</Tooltip> stores each file as an "object" (data + metadata) identified by a key, accessed over an API/HTTP. S3 scales virtually infinitely.
+Object storage stores each file as an "object" (data + metadata) identified by a key, accessed over an API/HTTP. S3 scales virtually infinitely.
 
 - A key/value store for objects (the "folder" concept is just a visualization).
 - **Eleven 9s** of durability (99.999999999%).
@@ -114,7 +114,7 @@ A <Tooltip content="NoSQL — a family of databases that don't follow the relati
 
 ## 6. Amazon DocumentDB — Document Database (MongoDB-Compatible)
 
-A <Tooltip content="Document database — stores data as flexible JSON-like documents that can be nested and need no fixed schema, well suited to semi-structured data">document database</Tooltip> stores data as flexible JSON-like documents (nested, no fixed schema) — ideal for semi-structured data. DocumentDB is AWS's managed, **MongoDB-compatible** service, with an Aurora-style storage architecture.
+A document database stores data as flexible JSON-like documents (nested, no fixed schema) — ideal for semi-structured data. DocumentDB is AWS's managed, **MongoDB-compatible** service, with an Aurora-style storage architecture.
 
 - MongoDB-compatible (run your existing MongoDB apps/drivers).
 - Storage replicates 6 copies across 3 AZs, auto-scaling in 10 GB increments up to 64 TB.
@@ -129,9 +129,9 @@ A <Tooltip content="Document database — stores data as flexible JSON-like docu
 
 ## 7. Amazon Neptune — Graph Database
 
-A <Tooltip content="Graph database — stores data as nodes (entities) and edges (relationships), optimized for traversing highly connected data where the relationships themselves are what you query">graph database</Tooltip> stores data as **nodes** (entities) and **edges** (relationships), optimized for traversing highly connected data — where the "relationships" are exactly what you need to query fast. Neptune is AWS's managed graph database.
+A graph database stores data as **nodes** (entities) and **edges** (relationships), optimized for traversing highly connected data — where the "relationships" are exactly what you need to query fast. Neptune is AWS's managed graph database.
 
-- Supports Property Graph (queried with <Tooltip content="Gremlin / openCypher — graph query languages used to traverse nodes and edges along their relationships">Gremlin / openCypher</Tooltip>) and RDF (queried with SPARQL).
+- Supports Property Graph (queried with Gremlin / openCypher) and RDF (queried with SPARQL).
 - Storage 6 copies across 3 AZs, up to 15 read replicas; highly available.
 - Stores up to **billions of relationships** and queries the graph with **millisecond** latency.
 - Fully managed.
@@ -144,9 +144,9 @@ A <Tooltip content="Graph database — stores data as nodes (entities) and edges
 
 ## 8. Amazon Keyspaces — Wide-Column (Cassandra-Compatible)
 
-A <Tooltip content="Wide-column store — organizes data into tables with rows and dynamic columns (column families), designed for very high write throughput and horizontal scale">wide-column store</Tooltip> organizes data into tables with rows and dynamic columns (column families), designed for very high write throughput and horizontal scale. Keyspaces is AWS's managed, **Apache Cassandra-compatible** service.
+A wide-column store organizes data into tables with rows and dynamic columns (column families), designed for very high write throughput and horizontal scale. Keyspaces is AWS's managed, **Apache Cassandra-compatible** service.
 
-- Apache Cassandra-compatible, queried with <Tooltip content="Cassandra Query Language — Cassandra's query language, SQL-like syntax but for the wide-column model">CQL</Tooltip>.
+- Apache Cassandra-compatible, queried with CQL.
 - Serverless, auto-scaling; 3-AZ replication; on-demand or provisioned.
 - **Single-digit millisecond** latency at any scale, thousands of requests per second.
 - PITR; fully managed (no Cassandra cluster to operate yourself).
@@ -159,7 +159,7 @@ A <Tooltip content="Wide-column store — organizes data into tables with rows a
 
 ## 9. Amazon Timestream — Time-Series Database
 
-A <Tooltip content="Time-series database — optimized for time-stamped data (values measured over time), with very fast appends and efficient range queries over time">time-series database</Tooltip> is optimized for time-stamped data (values measured over time) — extremely fast appends, efficient time-range queries, and downsampling. Timestream is AWS's serverless time-series database.
+A time-series database is optimized for time-stamped data (values measured over time) — extremely fast appends, efficient time-range queries, and downsampling. Timestream is AWS's serverless time-series database.
 
 - Serverless, auto-scaling; ingests trillions of events per day.
 - Roughly **1000x faster** and **~1/10th the cost** of relational databases.

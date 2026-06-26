@@ -12,7 +12,7 @@ You're running an e-commerce system on AWS. Your DevOps team discovers a suspici
 
 The problem: Security Groups only have **Allow** rules, no **Deny**. You simply cannot write a rule that says "block IP 1.2.3.4".
 
-This is where <Tooltip content="Network Access Control List">NACL</Tooltip> comes in. NACL lets you write **Deny** rules to stop traffic right at the <Tooltip content="A logical subdivision of a VPC's IP address range, used to group resources">subnet</Tooltip> gateway — before it ever reaches any instance inside.
+This is where NACL comes in. NACL lets you write **Deny** rules to stop traffic right at the subnet gateway — before it ever reaches any instance inside.
 
 This post will explain what NACL is, how it differs from Security Groups, and a critical concept that many newcomers overlook: **Ephemeral Ports**.
 
@@ -25,7 +25,7 @@ This post will explain what NACL is, how it differs from Security Groups, and a 
 
 ## 1. What is NACL?
 
-<Tooltip content="Network Access Control List">NACL</Tooltip> is a virtual firewall that operates at the **subnet** level. If you think of a [VPC](/en/posts/vpc-overview) as a city district and subnets as neighborhoods, then NACL is the **fence** surrounding each neighborhood — controlling who can enter (Inbound) and who can leave (Outbound).
+NACL is a virtual firewall that operates at the **subnet** level. If you think of a [VPC](/en/posts/vpc-overview) as a city district and subnets as neighborhoods, then NACL is the **fence** surrounding each neighborhood — controlling who can enter (Inbound) and who can leave (Outbound).
 
 Key characteristics:
 
@@ -82,7 +82,7 @@ Many people wonder: [Security Groups (SG)](/en/posts/learn-security-group) alrea
 | Feature               | Security Group (SG)                  | Network ACL (NACL)                      |
 | --------------------- | ------------------------------------ | --------------------------------------- |
 | **Level**             | Instance Level (attached to ENI)     | Subnet Level (attached to subnet)       |
-| **State**             | <Tooltip content="Tracks connections — responses to an allowed request pass automatically">Stateful</Tooltip> — auto-allows response  | <Tooltip content="Each packet evaluated independently — inbound and outbound rules must be opened separately">Stateless</Tooltip> — must allow both directions |
+| **State**             | Stateful — auto-allows response  | Stateless — must allow both directions |
 | **Rule types**        | **Allow** only                       | Both **Allow** and **Deny**             |
 | **Rule evaluation**   | All rules merged together            | Evaluated by **rule number** (first match) |
 | **Default behavior**  | Deny all inbound, Allow all outbound | Default NACL: Allow all                 |
@@ -118,7 +118,7 @@ This is the part that many AWS beginners overlook, but it is critical when confi
   alt="Client sends request from ephemeral port 50105 to server port 443, server responds to port 50105"
 />
 
-When two devices communicate over a network, they need to use **ports**. For example, when you access an HTTPS website, your browser connects to **port 443** (a defined port) on the web server. But the browser also needs a port on the client side to **receive the response** — this port is randomly chosen by the operating system from a temporary range called <Tooltip content="Short-lived ports assigned by the OS to the client side of a connection to receive responses">Ephemeral Ports</Tooltip>.
+When two devices communicate over a network, they need to use **ports**. For example, when you access an HTTPS website, your browser connects to **port 443** (a defined port) on the web server. But the browser also needs a port on the client side to **receive the response** — this port is randomly chosen by the operating system from a temporary range called Ephemeral Ports.
 
 Ephemeral port ranges differ by operating system:
 

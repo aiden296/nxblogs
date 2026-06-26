@@ -24,11 +24,11 @@ The core power of Global Accelerator comes from three components:
 
 ### 1.1. AWS Backbone Network
 
-<Tooltip content="AWS's private internal network connecting all Regions and Edge Locations">AWS Backbone Network</Tooltip> is AWS's private internal network, connecting all Regions and Edge Locations. This network is completely separate from the public internet — built and operated by AWS with dedicated fiber optic cables.
+AWS Backbone Network is AWS's private internal network, connecting all Regions and Edge Locations. This network is completely separate from the public internet — built and operated by AWS with dedicated fiber optic cables.
 
 When traffic travels on the backbone:
 
-- **Faster** — optimized routing, no need to hop through multiple intermediate <Tooltip content="Internet Service Providers — companies that provide internet access">ISPs</Tooltip>
+- **Faster** — optimized routing, no need to hop through multiple intermediate ISPs
 - **More stable** — unaffected by congestion on the public internet
 - **More consistent** — latency varies less between requests
 
@@ -36,7 +36,7 @@ This is core strength number one: **a private highway, not shared with the publi
 
 ### 1.2. Edge Locations
 
-AWS has over **100 <Tooltip content="Points of presence — regional facilities that serve traffic close to users">Edge Locations</Tooltip>** spread across the globe. When a user sends a request, traffic is received at the nearest Edge Location, then enters the backbone network.
+AWS has over **100 Edge Locations** spread across the globe. When a user sends a request, traffic is received at the nearest Edge Location, then enters the backbone network.
 
 This means: most of the traffic's journey happens on AWS's "private highway" rather than wandering through the public internet. A user in Frankfurt only needs to travel a short distance on the public internet to the Frankfurt Edge Location, then the entire journey from Frankfurt to Singapore travels on the backbone.
 
@@ -44,9 +44,9 @@ This is core strength number two: **minimizing the distance traveled on the publ
 
 ### 1.3. Anycast IP
 
-Normally, each IP address is <Tooltip content="One IP bound to a single server at a specific location">Unicast</Tooltip> — meaning one IP is bound to a single server at a specific location. When you connect to that IP, traffic always goes to that exact server, regardless of where you are.
+Normally, each IP address is Unicast — meaning one IP is bound to a single server at a specific location. When you connect to that IP, traffic always goes to that exact server, regardless of where you are.
 
-<Tooltip content="Same IP advertised from many locations worldwide, with routing automatically sending traffic to the nearest point">Anycast</Tooltip> is the opposite: the same IP is advertised from **multiple locations worldwide** simultaneously. When a client connects to this IP, internet routing automatically sends traffic to the nearest point — completely automatic, no complex DNS routing needed.
+Anycast is the opposite: the same IP is advertised from **multiple locations worldwide** simultaneously. When a client connects to this IP, internet routing automatically sends traffic to the nearest point — completely automatic, no complex DNS routing needed.
 
 Global Accelerator gives you **2 static Anycast IPs**, advertised from all Edge Locations. No matter where users are, they always connect to the nearest Edge simply by accessing the same IP.
 
@@ -76,7 +76,7 @@ For example, say you're in Vietnam and your call goes to a server in `us-east-1`
 
 <ExcalidrawDiagram src="/public-internet-vn-to-us-path.excalidraw" alt="Public internet path from Vietnam to the US, many hops through ISPs and peering points" />
 
-Over the **AWS Backbone Network**, traffic enters AWS at the nearest Edge Location (HCMC or Singapore) and travels directly over AWS-owned fiber to the destination Region. A single operator (AWS) owns and runs the entire path — no peering, no <Tooltip content="Border Gateway Protocol — routing protocol used between autonomous networks on the internet">BGP</Tooltip> dependency, minimal jitter.
+Over the **AWS Backbone Network**, traffic enters AWS at the nearest Edge Location (HCMC or Singapore) and travels directly over AWS-owned fiber to the destination Region. A single operator (AWS) owns and runs the entire path — no peering, no BGP dependency, minimal jitter.
 
 <ExcalidrawDiagram src="/aws-backbone-vn-to-us-path.excalidraw" alt="AWS backbone network path to the us-east-1 region, few hops and a deterministic route" />
 
@@ -84,13 +84,13 @@ Over the **AWS Backbone Network**, traffic enters AWS at the nearest Edge Locati
 
 When you change the backend endpoint (e.g., switch from one ALB to another, or failover to a different Region), Global Accelerator's 2 Anycast IPs **don't change**. Clients still connect to the same IP.
 
-Compare with DNS-based failover (e.g., Route 53): when you change a DNS record, you must wait for the <Tooltip content="Time to Live — DNS cache duration">TTL</Tooltip> to expire. During that time, some clients still connect to the old endpoint. With Global Accelerator, the switch is instant because the IP never changes.
+Compare with DNS-based failover (e.g., Route 53): when you change a DNS record, you must wait for the TTL to expire. During that time, some clients still connect to the old endpoint. With Global Accelerator, the switch is instant because the IP never changes.
 
 ### 2.3. Instant health-based failover
 
 Global Accelerator continuously health-checks endpoints. When it detects an unhealthy endpoint, traffic is automatically shifted to a healthy one **within seconds**.
 
-Much faster than DNS failover (which depends on TTL, typically 60-300 seconds). For applications requiring <Tooltip content="System stays operational with minimal downtime">high availability</Tooltip>, seconds versus minutes is a significant difference.
+Much faster than DNS failover (which depends on TTL, typically 60-300 seconds). For applications requiring high availability, seconds versus minutes is a significant difference.
 
 ### 2.4. Multi-Region with traffic weights
 
@@ -102,11 +102,11 @@ Global Accelerator lets you distribute traffic across multiple Regions by ratio 
 
 ### 2.5. Faster connection setup — TCP termination at the Edge
 
-A TCP connection can only send its first byte of data after the client and endpoint finish the <Tooltip content="Three-way handshake — SYN, SYN-ACK, ACK to establish a TCP connection">three-way handshake</Tooltip>. If the endpoint sits in a distant Region, every handshake step has to make a full round trip over the public internet, so the connection-setup phase alone is slow before any data even moves. This is why far-away users often feel the initial connection takes forever, even when the data transfer afterward is fine.
+A TCP connection can only send its first byte of data after the client and endpoint finish the three-way handshake. If the endpoint sits in a distant Region, every handshake step has to make a full round trip over the public internet, so the connection-setup phase alone is slow before any data even moves. This is why far-away users often feel the initial connection takes forever, even when the data transfer afterward is fine.
 
 Global Accelerator solves this with **TCP termination at the Edge**: the client completes its TCP handshake with the nearest Edge Location, and almost concurrently Global Accelerator opens a second TCP connection from the Edge to the endpoint, running over the backbone. The client gets its response from the Edge right next to it instead of waiting for a full round trip to the Region, so connection-setup time drops substantially.
 
-AWS measured at <Tooltip content="90th percentile — 90% of measurements fall below this value">p90</Tooltip> with real-user monitoring tools: <Tooltip content="First byte latency — the round-trip time for a packet to go from client to endpoint and back">first byte latency</Tooltip> down by up to 49%, jitter down by up to 58%, and throughput up by up to 60%. For applications that are sensitive during session setup, such as video conferencing or real-time APIs, this is a difference users feel immediately.
+AWS measured at p90 with real-user monitoring tools: first byte latency down by up to 49%, jitter down by up to 58%, and throughput up by up to 60%. For applications that are sensitive during session setup, such as video conferencing or real-time APIs, this is a difference users feel immediately.
 
 This is also where **Route 53 latency-based routing** falls short. Latency routing only picks the lowest-latency Region at the DNS layer: it returns the IP of the nearest endpoint, but the packets then still travel the public internet on their own to reach that Region. It does not shorten the handshake, does not move traffic onto the backbone, and still inherits DNS's weaknesses of caching, TTL, and slow failover. Global Accelerator both picks the nearest healthy endpoint and accelerates the data path itself, so for a scenario like reducing global latency for TCP/UDP while keeping the existing NLB/EC2 infrastructure, Global Accelerator is the right choice and latency routing is the trap.
 
@@ -116,7 +116,7 @@ This is also where **Route 53 latency-based routing** falls short. Latency routi
 
 ### Gaming and real-time applications
 
-Global Accelerator supports both **TCP and UDP**. For online games, every millisecond of latency matters. Routing traffic through the backbone instead of the public internet reduces latency and <Tooltip content="Latency variation — inconsistency in time between packets">jitter</Tooltip>.
+Global Accelerator supports both **TCP and UDP**. For online games, every millisecond of latency matters. Routing traffic through the backbone instead of the public internet reduces latency and jitter.
 
 ### Financial / trading platforms
 
@@ -150,7 +150,7 @@ This is where many people get confused: both use AWS Edge Locations, but they ar
 
 ### 4.1. Different by nature
 
-**CloudFront** is a <Tooltip content="Content Delivery Network — distributes content via edge locations close to users">CDN</Tooltip>. Its job is to **cache and deliver content** closer to users. It operates at **Layer 7** (application layer) — reading HTTP requests, processing headers, caching responses.
+**CloudFront** is a CDN. Its job is to **cache and deliver content** closer to users. It operates at **Layer 7** (application layer) — reading HTTP requests, processing headers, caching responses.
 
 **Global Accelerator** is a **network accelerator**. Its job is to **carry traffic to the origin faster** via AWS backbone, **without touching the request**. It operates at **Layer 3/4** (network/transport layer) — only concerned with transporting packets, not their contents.
 

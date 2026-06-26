@@ -26,7 +26,7 @@ Compared to the popular Certbot tool, `acme.sh` has some outstanding advantages 
 
 ## 2. Prerequisites
 
-To use the <Tooltip content="Domain validation method that uses a TXT record on DNS — required for wildcard certificates">DNS-01 Challenge</Tooltip> method (required for Wildcard SSL), you need:
+To use the DNS-01 Challenge method (required for Wildcard SSL), you need:
 
 1. **Namecheap account:** Must have API access enabled.
 > **Note:** Namecheap requires a minimum account balance of $50 or a certain spending history to unlock this feature.
@@ -60,7 +60,7 @@ export NAMECHEAP_SOURCEIP="your_server_ip"
 
 ### Step 2: Issue the Wildcard SSL Certificate
 
-Run the following command to start the validation and issuance process. Here I'm using Let's Encrypt as the <Tooltip content="Certificate Authority — the trusted organization that issues and vouches for SSL/TLS certificates">CA</Tooltip>.
+Run the following command to start the validation and issuance process. Here I'm using Let's Encrypt as the CA.
 
 ```bash
 acme.sh --issue \

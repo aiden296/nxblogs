@@ -25,9 +25,9 @@ NAT Instance — nghe quen thuộc nhưng bạn chưa bao giờ setup. Nó cũng
 
 ## 1. NAT là gì? (Recap nhanh)
 
-Trong VPC, resource ở <Tooltip content="Mạng con riêng — không có route trực tiếp ra internet">private subnet</Tooltip> chỉ có private IP. Internet không biết cách route đến private IP (thuộc dải RFC 1918 — dải địa chỉ IP dành riêng cho mạng nội bộ), nên các resource này **không thể giao tiếp trực tiếp với internet**.
+Trong VPC, resource ở private subnet chỉ có private IP. Internet không biết cách route đến private IP (thuộc dải RFC 1918 — dải địa chỉ IP dành riêng cho mạng nội bộ), nên các resource này **không thể giao tiếp trực tiếp với internet**.
 
-<Tooltip content="Network Address Translation — dịch địa chỉ mạng">NAT</Tooltip> giải quyết vấn đề này bằng cách đặt một "đại diện" ở **public subnet**: khi EC2 trong private subnet muốn gọi ra internet, packet được gửi đến NAT, NAT thay source IP bằng IP public của mình rồi forward ra internet. Response quay về NAT, NAT tra bảng mapping rồi chuyển về đúng EC2 ban đầu.
+NAT giải quyết vấn đề này bằng cách đặt một "đại diện" ở **public subnet**: khi EC2 trong private subnet muốn gọi ra internet, packet được gửi đến NAT, NAT thay source IP bằng IP public của mình rồi forward ra internet. Response quay về NAT, NAT tra bảng mapping rồi chuyển về đúng EC2 ban đầu.
 
 AWS cung cấp 2 cách để làm NAT:
 
@@ -42,14 +42,14 @@ Bài viết này tập trung vào NAT Instance — cách nó hoạt động bên
 
 ### 2.1. Bản chất: Một EC2 đóng vai NAT
 
-NAT Instance thực chất là một **EC2 instance** chạy <Tooltip content="Amazon Machine Image — bản mẫu hệ điều hành">AMI</Tooltip> có cấu hình sẵn <Tooltip content="Cho phép OS chuyển tiếp packet giữa các network interface thay vì chỉ xử lý packet gửi đến chính nó">IP forwarding</Tooltip> và <Tooltip content="Công cụ quản lý firewall và NAT trên Linux">iptables</Tooltip>. Khi packet đến, thay vì xử lý ở tầng application, OS của EC2 này sẽ **thay đổi source IP** rồi **forward packet** ra interface khác — đúng như một router NAT truyền thống.
+NAT Instance thực chất là một **EC2 instance** chạy AMI có cấu hình sẵn IP forwarding và iptables. Khi packet đến, thay vì xử lý ở tầng application, OS của EC2 này sẽ **thay đổi source IP** rồi **forward packet** ra interface khác — đúng như một router NAT truyền thống.
 
 Để hoạt động, NAT Instance cần đáp ứng 4 điều kiện:
 
 1. **Đặt trong public subnet** — vì nó cần route ra internet qua Internet Gateway (IGW)
-2. **Gắn <Tooltip content="Elastic IP — địa chỉ IP tĩnh public do AWS cung cấp">Elastic IP</Tooltip>** — để internet có thể gửi response về
+2. **Gắn Elastic IP** — để internet có thể gửi response về
 3. **Disable Source/Destination Check** — chi tiết ở phần tiếp theo
-4. **Cấu hình route table** — private subnet phải có route `0.0.0.0/0 → eni-xxx` trỏ đến <Tooltip content="Elastic Network Interface — card mạng ảo gắn vào EC2 instance trong VPC">ENI</Tooltip> của NAT Instance
+4. **Cấu hình route table** — private subnet phải có route `0.0.0.0/0 → eni-xxx` trỏ đến ENI của NAT Instance
 
 AWS từng cung cấp **pre-configured Amazon Linux AMI** cho NAT Instance, nhưng AMI này đã hết standard support từ **31/12/2020**. Hiện tại nếu muốn dùng NAT Instance, bạn có 2 lựa chọn: tìm **alternative AMI trên AWS Marketplace** (nhiều community AMI đã cấu hình sẵn NAT, ví dụ fck-nat — một open-source alternative được tối ưu chi phí), hoặc tự cấu hình từ AMI Linux thông thường — enable IP forwarding trong kernel (`net.ipv4.ip_forward = 1`) và thiết lập iptables NAT rules.
 
@@ -63,11 +63,11 @@ Mặc định, AWS bật **Source/Destination Check** trên mọi EC2 instance. 
 
 #### Tại sao AWS bật mặc định?
 
-Đây là một cơ chế <Tooltip content="Defense in depth — bảo mật nhiều lớp, mỗi lớp độc lập nhau để giảm thiểu rủi ro khi một lớp bị xuyên thủng">bảo mật nhiều lớp</Tooltip>, hoạt động độc lập với Security Group và NACL — nghĩa là ngay cả khi SG hoặc NACL bị cấu hình sai, lớp bảo vệ này vẫn ngăn chặn được các hành vi nguy hiểm:
+Đây là một cơ chế bảo mật nhiều lớp, hoạt động độc lập với Security Group và NACL — nghĩa là ngay cả khi SG hoặc NACL bị cấu hình sai, lớp bảo vệ này vẫn ngăn chặn được các hành vi nguy hiểm:
 
-**1. Chống IP Spoofing** — <Tooltip content="Giả mạo địa chỉ IP">IP Spoofing</Tooltip> là kỹ thuật giả mạo source IP trong gói tin để đánh lừa hệ thống đích. Kẻ tấn công có thể dùng kỹ thuật này trong **DDoS reflection attack** (giả IP nạn nhân để server trả response về nạn nhân), hoặc bypass firewall bằng cách giả IP trusted. Source/Dest Check đảm bảo gói tin gửi đi **phải có source IP đúng là của instance**, ngăn mọi hình thức giả mạo.
+**1. Chống IP Spoofing** — IP Spoofing là kỹ thuật giả mạo source IP trong gói tin để đánh lừa hệ thống đích. Kẻ tấn công có thể dùng kỹ thuật này trong **DDoS reflection attack** (giả IP nạn nhân để server trả response về nạn nhân), hoặc bypass firewall bằng cách giả IP trusted. Source/Dest Check đảm bảo gói tin gửi đi **phải có source IP đúng là của instance**, ngăn mọi hình thức giả mạo.
 
-**2. Ngăn Traffic Forwarding trái phép** — Nếu không có cơ chế này, một EC2 bị xâm nhập có thể trở thành **proxy** để forward traffic độc hại đến các instance khác trong VPC, hoặc thực hiện <Tooltip content="Di chuyển ngang — kỹ thuật di chuyển từ instance đã bị xâm nhập sang các instance khác trong cùng mạng">lateral movement</Tooltip>. Bằng cách drop mọi gói tin không thuộc về instance, AWS chặn hành vi này ở tầng hạ tầng.
+**2. Ngăn Traffic Forwarding trái phép** — Nếu không có cơ chế này, một EC2 bị xâm nhập có thể trở thành **proxy** để forward traffic độc hại đến các instance khác trong VPC, hoặc thực hiện lateral movement. Bằng cách drop mọi gói tin không thuộc về instance, AWS chặn hành vi này ở tầng hạ tầng.
 
 **3. Đảm bảo routing nhất quán** — Trong môi trường cloud nhiều tenant, AWS cần đảm bảo traffic đi đúng theo route table đã định nghĩa. Nếu cho phép instance tự ý forward traffic, một instance có thể "tự biến thành router" và phá vỡ topology mạng, khiến việc troubleshoot và audit network trở nên cực kỳ phức tạp.
 
@@ -141,7 +141,7 @@ Giống NAT Gateway, có **2 lần NAT** trên đường đi:
 
 ### 2.4. Security Group cho NAT Instance
 
-Vì NAT Instance là EC2, bạn có thể (và phải) gắn <Tooltip content="Nhóm bảo mật — tường lửa ảo ở tầng instance, stateful">Security Group</Tooltip>. Đây vừa là **ưu điểm** (kiểm soát chi tiết traffic) vừa là **trách nhiệm** (cấu hình sai = mất kết nối).
+Vì NAT Instance là EC2, bạn có thể (và phải) gắn Security Group. Đây vừa là **ưu điểm** (kiểm soát chi tiết traffic) vừa là **trách nhiệm** (cấu hình sai = mất kết nối).
 
 Security Group tối thiểu cho NAT Instance:
 
@@ -160,7 +160,7 @@ Security Group tối thiểu cho NAT Instance:
 | HTTP  | 80   | `0.0.0.0/0`  | Forward traffic HTTP ra internet    |
 | HTTPS | 443  | `0.0.0.0/0`  | Forward traffic HTTPS ra internet   |
 
-> So sánh: NAT Gateway **không hỗ trợ Security Group** — bạn chỉ có thể kiểm soát traffic qua <Tooltip content="Network Access Control List — tường lửa ở tầng subnet, stateless">NACL</Tooltip>. Với NAT Instance, bạn có cả hai lớp bảo vệ: Security Group (stateful, ở tầng instance) + NACL (stateless, ở tầng subnet).
+> So sánh: NAT Gateway **không hỗ trợ Security Group** — bạn chỉ có thể kiểm soát traffic qua NACL. Với NAT Instance, bạn có cả hai lớp bảo vệ: Security Group (stateful, ở tầng instance) + NACL (stateless, ở tầng subnet).
 
 ---
 
@@ -194,11 +194,11 @@ Tháng 11/2025, AWS công bố **regional availability mode** cho NAT Gateway. V
 
 **1. Không cần Public Subnet**
 
-Theo truyền thống, NAT Gateway yêu cầu public subnet (subnet có route trực tiếp ra internet qua IGW) để truy cập internet. Khách hàng quan tâm bảo mật phải đảm bảo không ai tạo tài nguyên khác trong public subnet đó. Với Regional NAT Gateway, VPC **không cần public subnet** — đây là cải thiện bảo mật rất lớn vì VPC giờ có thể hoàn toàn private mà vẫn có <Tooltip content="Kết nối đi ra internet từ tài nguyên bên trong VPC">internet egress</Tooltip>.
+Theo truyền thống, NAT Gateway yêu cầu public subnet (subnet có route trực tiếp ra internet qua IGW) để truy cập internet. Khách hàng quan tâm bảo mật phải đảm bảo không ai tạo tài nguyên khác trong public subnet đó. Với Regional NAT Gateway, VPC **không cần public subnet** — đây là cải thiện bảo mật rất lớn vì VPC giờ có thể hoàn toàn private mà vẫn có internet egress.
 
 **2. Tự động mở rộng theo AZ**
 
-Regional NAT Gateway hoạt động ở cấp VPC. Khi bạn mở rộng workload sang AZ mới, bạn có thể tái sử dụng cùng một Regional NAT Gateway ID. Regional NAT Gateway tự động mở rộng và duy trì <Tooltip content="Ưu tiên xử lý traffic trong cùng AZ">zonal affinity</Tooltip> để đảm bảo high availability.
+Regional NAT Gateway hoạt động ở cấp VPC. Khi bạn mở rộng workload sang AZ mới, bạn có thể tái sử dụng cùng một Regional NAT Gateway ID. Regional NAT Gateway tự động mở rộng và duy trì zonal affinity để đảm bảo high availability.
 
 **3. Routing đơn giản hơn**
 
@@ -262,7 +262,7 @@ AWS đề xuất chuyển sang Regional NAT Gateway cho **tất cả các use ca
 
 - Muốn **tiết kiệm chi phí** cho môi trường dev/test — một `t3.micro` chỉ tốn ~$7–8/tháng so với ~$32/tháng cho NAT Gateway (chưa tính data processing)
 - Cần **port forwarding** — ví dụ forward port 3306 từ internet đến RDS trong private subnet (NAT Gateway không hỗ trợ)
-- Muốn dùng luôn làm <Tooltip content="Jump server — máy chủ trung gian để SSH vào các instance trong private subnet">bastion host</Tooltip>
+- Muốn dùng luôn làm bastion host
 - Cần kiểm soát traffic chi tiết qua **Security Group** thay vì chỉ dùng NACL
 - Lưu lượng truy cập internet **thấp và không đột biến**
 

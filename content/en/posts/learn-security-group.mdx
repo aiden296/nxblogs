@@ -14,7 +14,7 @@ This article will dive deep into how it works, its critical characteristics, and
 
 ## 1. What is a Security Group?
 
-Essentially, a **Security Group is a <Tooltip content="A firewall implemented in software within a cloud environment, controlling inbound/outbound network traffic without requiring physical hardware">virtual firewall</Tooltip>** that operates at the Instance level. It controls network traffic (Inbound and Outbound) for AWS resources, most commonly EC2 servers.
+Essentially, a **Security Group is a virtual firewall** that operates at the Instance level. It controls network traffic (Inbound and Outbound) for AWS resources, most commonly EC2 servers.
 
 ### Core Operating Principles:
 
@@ -28,7 +28,7 @@ Essentially, a **Security Group is a <Tooltip content="A firewall implemented in
 
 To pass the SAA exam and operate effectively in practice, you need to know these characteristics by heart:
 
-1. **Operates at Instance Level:** SGs are attached directly to the <Tooltip content="Elastic Network Interface — the virtual network card of an EC2 instance, holding network attributes like IP, MAC address, and Security Groups">network card (ENI)</Tooltip> of the instance, not at the Subnet level. This provides maximum flexibility for each individual server.
+1. **Operates at Instance Level:** SGs are attached directly to the network card (ENI) of the instance, not at the Subnet level. This provides maximum flexibility for each individual server.
 2. **Stateful:** This is the most important characteristic. If you allow a request to come in (Inbound), the system will automatically open the path for the response to go out without needing to check the Outbound rules, and vice versa.
 3. **Allow Only, No Deny:** You cannot write a rule to "block a specific IP." You can only "allow what is trusted," and everything else is blocked by default.
 4. **Immediate Effect:** All rule changes take effect immediately without requiring a server reboot.
@@ -36,7 +36,7 @@ To pass the SAA exam and operate effectively in practice, you need to know these
 
 ---
 
-## 3. Distinguishing SG from <Tooltip content="Network Access Control List — a firewall layer that operates at the Subnet level within a VPC, is stateless, and supports both Allow and Deny rules">Network ACL (NACL)</Tooltip>
+## 3. Distinguishing SG from Network ACL (NACL)
 
 Many people confuse these two concepts. Remember this quick comparison table:
 

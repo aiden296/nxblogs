@@ -33,7 +33,7 @@ The whole "sequential is faster than random" story — the thing that drives the
 
 ![Physical anatomy of an HDD with platter, track, sector, actuator arm and read/write head](/hdd-disk.svg)
 
-An HDD consists of **platters** (magnetic disks) stacked on a <Tooltip content="The rotating shaft that holds and spins the whole stack of platters at a fixed speed">spindle</Tooltip>, spinning at a fixed speed measured in **RPM** (revolutions per minute — commonly 7,200 or 15,000). Each platter surface is divided into **tracks** (concentric rings), and each track into <Tooltip content="The smallest physical unit a disk reads or writes — 512 bytes on older drives, 4 KB on modern ones. You can't read half a sector">sectors</Tooltip>. The set of the same track across every platter is called a <Tooltip content="The same track across every platter surface; reading a whole cylinder needs no head movement">cylinder</Tooltip>. And to read data, an **actuator arm** carries the **read/write heads** — all heads fixed to the same arm and moving together.
+An HDD consists of **platters** (magnetic disks) stacked on a spindle, spinning at a fixed speed measured in **RPM** (revolutions per minute — commonly 7,200 or 15,000). Each platter surface is divided into **tracks** (concentric rings), and each track into sectors. The set of the same track across every platter is called a cylinder. And to read data, an **actuator arm** carries the **read/write heads** — all heads fixed to the same arm and moving together.
 
 The cost of **one** read has three components:
 
@@ -55,7 +55,7 @@ Most of us picture a table from the **logical** angle: from [Storage Internals](
 
 Between "a page in the heap file" and "a sector on the platter" sit **two mapping layers**:
 
-1. **Heap file → <Tooltip content="A contiguous run of physical blocks the filesystem allocates to a file; a less-fragmented file is made of fewer, larger extents">filesystem extent</Tooltip> → <Tooltip content="Logical Block Address — the linear block address the disk exposes to the OS; consecutive LBAs map to nearly-adjacent sectors">LBA</Tooltip>.** The heap file is really a file on the filesystem. The filesystem places the file's byte ranges into physical blocks, grouped into extents. On a fresh or freshly-defragmented filesystem, the whole file fits in one large extent → consecutive pages get consecutive LBAs. But as the table grows and free space fragments, the file is torn into many extents scattered far apart.
+1. **Heap file → filesystem extent → LBA.** The heap file is really a file on the filesystem. The filesystem places the file's byte ranges into physical blocks, grouped into extents. On a fresh or freshly-defragmented filesystem, the whole file fits in one large extent → consecutive pages get consecutive LBAs. But as the table grows and free space fragments, the file is torn into many extents scattered far apart.
 2. **LBA → physical address.** The disk's firmware maps each LBA to a concrete location (cylinder, track, sector). Consecutive LBAs ≈ adjacent sectors.
 
 This is the **hinge of the whole article**:
@@ -90,7 +90,7 @@ Laid over the mechanics of section 1, the difference is stark:
 
 This is where the most easily-confused conceptual knot gets untangled, and it's the direct answer to the question from the introduction:
 
-- A **Seq Scan** in a query plan is an <Tooltip content="How the query executor accesses a table: scanning all of it, or going through an index">access method</Tooltip> at the **executor** layer — it says what to read, and by what method.
+- A **Seq Scan** in a query plan is an access method at the **executor** layer — it says what to read, and by what method.
 - A **sequential read** is an **I/O pattern** at the **storage** layer — it says in what order the disk is accessed.
 
 A Seq Scan is **usually realized as** a sequential read — which is exactly why a Seq Scan beats an Index Scan when a query needs to read most of the table. But the two concepts **don't always coincide**: a fragmented heap file turns a Seq Scan into physical random reads (section 6), and sequential reads also occur **outside** a Seq Scan — for example, an index range scan reading adjacent B-tree leaf pages is also a sequential read.
@@ -116,7 +116,7 @@ ssize_t read(int fd, void *buf, size_t count);
 
 `read()` reads **at most** `count` bytes. `count` is decided by the application — there's no "one page per call" constraint at all. If the database passes a `count` equal to the size of 16 pages, a single `read()` requests 16 pages. This is exactly **multi-block read**. So "one page per `read()`" is a **design choice**, not a law.
 
-**How much the OS actually touches the disk.** This is the most important separation: **the bytes `read()` requests ≠ the bytes the OS reads from disk.** You `read()` 1 page, but if read-ahead (section 5) is running, the OS may load 16 pages into the <Tooltip content="The kernel's RAM area that caches disk blocks, shared across all processes">page cache</Tooltip>. Or you `read()` 1 page but that page is already in the page cache → the OS **never touches the disk**, just copies from cache into your buffer. `read()` describes the application's intent; how much the disk is actually accessed is decided by the kernel's cache + read-ahead.
+**How much the OS actually touches the disk.** This is the most important separation: **the bytes `read()` requests ≠ the bytes the OS reads from disk.** You `read()` 1 page, but if read-ahead (section 5) is running, the OS may load 16 pages into the page cache. Or you `read()` 1 page but that page is already in the page cache → the OS **never touches the disk**, just copies from cache into your buffer. `read()` describes the application's intent; how much the disk is actually accessed is decided by the kernel's cache + read-ahead.
 
 **The physical I/O unit.** At the bottom, the disk and kernel work in **blocks** (typically 4 KB) or **sectors** (512 B). The OS always reads in multiples of a block — it can't read half a block. An 8 KB database page corresponds to two 4 KB blocks. When you `read()` 100 bytes, the kernel still loads the whole block containing those 100 bytes.
 
@@ -124,7 +124,7 @@ These three numbers are independent of one another, and conflating them is the r
 
 ### What PostgreSQL does
 
-PostgreSQL reads heap and index data in units of **8 KB blocks**. Classically, it issued one block at a time via <Tooltip content="Like read() but reads at a given offset without moving the file pointer, allowing concurrent reads on the same file descriptor">`pread()`</Tooltip>, and **relied on the OS's read-ahead** to turn that stream of discrete 8 KB reads into efficient I/O during a sequential scan. For many years, that really was the whole story — "Postgres always reads exactly one 8 KB block, even during a seq scan".
+PostgreSQL reads heap and index data in units of **8 KB blocks**. Classically, it issued one block at a time via `pread()`, and **relied on the OS's read-ahead** to turn that stream of discrete 8 KB reads into efficient I/O during a sequential scan. For many years, that really was the whole story — "Postgres always reads exactly one 8 KB block, even during a seq scan".
 
 That has changed. **PostgreSQL 17** added the **read stream API** and the **`io_combine_limit`** parameter: for sequential scans (and `ANALYZE`, plus a few others), Postgres now **coalesces** several adjacent 8 KB blocks into one larger read — up to **128 KB** by default instead of 8 KB. This is exactly the multi-block read concept above, implemented inside the database:
 
@@ -151,7 +151,7 @@ Read-ahead (prefetch at the OS layer) is the mechanism by which the kernel **pro
 
 **The adaptive window.** The kernel maintains a read-ahead "window" of dynamically changing size: when it first suspects sequential access, it prefetches a small amount; each time its prediction is **correct** (the application really does read into the pre-loaded blocks), the kernel **grows** the window — reading further ahead next time; when the pattern breaks, the window shrinks or resets to 0. The more clearly sequential the workload, the harder the kernel prefetches; a random workload makes read-ahead nearly disappear.
 
-Linux implements this with the idea of a <Tooltip content="A flagged block in the window; when the application reads it, the kernel launches the next prefetch batch asynchronously">readahead marker</Tooltip>. When the application reads **into** the marked block, that's the signal for the kernel to launch the next prefetch batch — **asynchronously**, running in parallel while the application is still processing the data it already has. This way, loading from disk and the application's computation overlap:
+Linux implements this with the idea of a readahead marker. When the application reads **into** the marked block, that's the signal for the kernel to launch the next prefetch batch — **asynchronously**, running in parallel while the application is still processing the data it already has. This way, loading from disk and the application's computation overlap:
 
 1. The application `read()`s block 0; it's a cache miss, so the kernel reads block 0, **simultaneously** prefetches blocks 1–15 into the page cache, and marks block 12.
 2. The application reads blocks 1, 2, 3...; these were already prefetched and are sitting in the OS page cache, so they return immediately, with no trip to disk.

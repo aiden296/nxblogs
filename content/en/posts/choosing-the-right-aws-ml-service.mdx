@@ -35,10 +35,10 @@ Rekognition is a pre-trained computer vision service (computer vision — lettin
 
 ## 2. Amazon Transcribe — Speech to Text
 
-Transcribe uses <Tooltip content="Automatic Speech Recognition — automatically recognizing speech and converting spoken audio into text">ASR</Tooltip> to convert spoken audio into text.
+Transcribe uses ASR to convert spoken audio into text.
 
 - Automatic speech recognition with high accuracy.
-- Automatically redacts sensitive <Tooltip content="Personally Identifiable Information — personal data such as names, emails, phone numbers, or ID numbers">PII</Tooltip> from the transcript.
+- Automatically redacts sensitive PII from the transcript.
 - Automatic language identification, multi-language support.
 - Custom vocabulary (a dictionary for domain-specific terms) and speaker diarization (who said what).
 
@@ -50,10 +50,10 @@ Transcribe uses <Tooltip content="Automatic Speech Recognition — automatically
 
 ## 3. Amazon Polly — Text to Speech
 
-Polly does the reverse of Transcribe: it uses <Tooltip content="Text-to-Speech — speech synthesis that converts written text into spoken audio">TTS</Tooltip> to turn text into lifelike speech.
+Polly does the reverse of Transcribe: it uses TTS to turn text into lifelike speech.
 
 - Many natural-sounding voices (neural voices) across languages.
-- Control delivery with <Tooltip content="Speech Synthesis Markup Language — a markup language that controls how text is spoken: pauses, emphasis, speed, pronunciation">SSML</Tooltip> (pauses, emphasis, speed).
+- Control delivery with SSML (pauses, emphasis, speed).
 - Lexicons (custom pronunciation dictionaries) and Speech Marks (sync text with audio for lip-sync/highlight effects).
 
 **Use case:** Give apps a voice, turn articles into audio, support the visually impaired, voice a virtual assistant.
@@ -78,17 +78,17 @@ Translate is neural machine translation (translating in the context of the whole
 
 ## 5. Amazon Lex + Amazon Connect — Chatbots and Cloud Contact Center
 
-Lex is the service for building conversational chatbots, using the same <Tooltip content="Automatic Speech Recognition — automatically recognizing speech and converting it into text">ASR</Tooltip> + <Tooltip content="Natural Language Understanding — understanding natural language, grasping the intent and meaning behind what a user says">NLU</Tooltip> technology as Alexa. Connect is a cloud-based customer contact center that can use Lex to power voice/chat bots.
+Lex is the service for building conversational chatbots, using the same ASR + NLU technology as Alexa. Connect is a cloud-based customer contact center that can use Lex to power voice/chat bots.
 
 - Lex: understands users via **intents** (what they want) and **slots** (the information to collect), calling Lambda for business logic.
 - Connect: a virtual contact center with no upfront infrastructure, integrating Lex to automate calls.
-- Lex + Connect together build an intelligent <Tooltip content="Interactive Voice Response — an automated phone system that guides callers through menus by voice or keypad">IVR</Tooltip>.
+- Lex + Connect together build an intelligent IVR.
 
 **Typical flow — booking an appointment by phone:**
 
 <ExcalidrawDiagram src="/lex-connect-appointment-flow.excalidraw" alt="Phone appointment-booking flow from Connect to Lex, Lambda then written into the CRM" />
 
-A customer dials Connect's virtual contact-center number (**call**). Connect streams the call audio to Lex (**stream**); Lex recognizes the speech and identifies the "book an appointment" **intent** along with the slots it needs (date, time). Once the intent is clear, Lex calls a Lambda function (**invoke**) to run the business logic — check availability and write the booking into the <Tooltip content="Customer Relationship Management — a system for managing customer relationships and data">CRM</Tooltip> system (**schedule**). The whole thing runs automatically, with no human agent.
+A customer dials Connect's virtual contact-center number (**call**). Connect streams the call audio to Lex (**stream**); Lex recognizes the speech and identifies the "book an appointment" **intent** along with the slots it needs (date, time). Once the intent is clear, Lex calls a Lambda function (**invoke**) to run the business logic — check availability and write the booking into the CRM system (**schedule**). The whole thing runs automatically, with no human agent.
 
 **Use case:** Customer-support chatbots, conversational booking/ordering assistants, automated phone lines.
 
@@ -98,11 +98,11 @@ A customer dials Connect's virtual contact-center number (**call**). Connect str
 
 ## 6. Amazon Comprehend — Text Analysis (NLP)
 
-Comprehend is a pre-trained <Tooltip content="Natural Language Processing — a family of techniques for machines to read, understand, and analyze text">NLP</Tooltip> service that reads and extracts information from free-form text.
+Comprehend is a pre-trained NLP service that reads and extracts information from free-form text.
 
 - Sentiment analysis (positive/negative/neutral).
 - Entity and key-phrase extraction.
-- Language detection, <Tooltip content="Personally Identifiable Information — personal data such as names, emails, phone numbers">PII</Tooltip> detection.
+- Language detection, PII detection.
 - Topic modeling — automatically groups documents by topic.
 
 **Use case:** Analyze customer feedback, auto-classify/label documents by topic, measure sentiment on social media.
@@ -115,7 +115,7 @@ Comprehend is a pre-trained <Tooltip content="Natural Language Processing — a 
 
 Comprehend Medical is a version of Comprehend specialized for clinical text, understanding medical terminology that plain Comprehend often handles poorly.
 
-- Detects <Tooltip content="Protected Health Information — personally identifiable health data that must comply with regulations such as HIPAA">PHI</Tooltip> in records.
+- Detects PHI in records.
 - Extracts medical entities: conditions, medications, dosages, symptoms.
 - Links to standard medical coding systems (ICD-10-CM for diagnoses, RxNorm for medications).
 
@@ -123,7 +123,7 @@ Comprehend Medical is a version of Comprehend specialized for clinical text, und
 
 <ExcalidrawDiagram src="/comprehend-medical-flow.excalidraw" alt="Three ingestion paths from S3, Kinesis Data Firehose and Transcribe into Comprehend Medical" />
 
-Comprehend Medical has three common ingestion paths. Clinical documents are kept in the Amazon S3 object store and submitted for batch analysis (**documents**). Continuously generated data is streamed through <Tooltip content="Amazon Data Firehose / Kinesis Data Firehose — a fully managed streaming-data delivery pipeline that lands data at its destination in near real time">Kinesis Data Firehose</Tooltip> for near-real-time processing (**real-time**). And spoken input — a doctor dictating notes, or a patient conversation — is first run through Amazon Transcribe to turn it into text (**text**). All three converge on Comprehend Medical, which extracts the medical entities and PHI (**extract**).
+Comprehend Medical has three common ingestion paths. Clinical documents are kept in the Amazon S3 object store and submitted for batch analysis (**documents**). Continuously generated data is streamed through Kinesis Data Firehose for near-real-time processing (**real-time**). And spoken input — a doctor dictating notes, or a patient conversation — is first run through Amazon Transcribe to turn it into text (**text**). All three converge on Comprehend Medical, which extracts the medical entities and PHI (**extract**).
 
 **Use case:** Extract structured information from doctor's notes, patient records, and prescriptions.
 
@@ -137,7 +137,7 @@ SageMaker is a fully managed platform for you to **build, train, and deploy your
 
 - Notebooks for data exploration, plus a library of built-in algorithms.
 - Training jobs and hyperparameter tuning.
-- Deploy a model as an endpoint for real-time <Tooltip content="Inference — feeding new data into a trained model to get a prediction/result">inference</Tooltip>, or batch transform for bulk processing.
+- Deploy a model as an endpoint for real-time inference, or batch transform for bulk processing.
 - Ground Truth for data labeling.
 
 **Use case:** A data science team building a custom model for a problem no pre-trained service can solve — this is the **only** "build it yourself" service in the group.
@@ -176,7 +176,7 @@ Personalize is a recommendation engine using the same technology as Amazon.com, 
 
 ## 11. Amazon Textract — Extract Data from Documents
 
-Textract uses advanced <Tooltip content="Optical Character Recognition — recognizing characters optically, turning text in images/scanned documents into machine-readable text">OCR</Tooltip> to extract not just text but **structured data** (key-value pairs in forms, tables, handwriting) from scanned documents, PDFs, and images.
+Textract uses advanced OCR to extract not just text but **structured data** (key-value pairs in forms, tables, handwriting) from scanned documents, PDFs, and images.
 
 - Reads text, forms (key-value), and tables from documents.
 - Recognizes handwriting too.

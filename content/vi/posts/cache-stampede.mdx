@@ -10,7 +10,7 @@ enableComment: true
 
 Hình dung bạn đang vận hành một sàn thương mại điện tử. 23h59, flash sale bắt đầu. 50,000 users đồng loạt truy cập trang sản phẩm hot nhất. Cache key cho sản phẩm đó vừa expire đúng lúc đó. Kết quả? 50,000 requests **cùng lúc** đổ thẳng xuống Database — DB quá tải, timeout lan truyền, toàn bộ hệ thống sập trong vài giây.
 
-Đây chính là **Cache Stampede** — hay còn gọi là <Tooltip content="Hiện tượng nhiều client cùng lúc tranh nhau truy cập một resource sau khi nó vừa khả dụng (ví dụ: cache vừa expire), gây quá tải hệ thống backend.">Thundering Herd Problem</Tooltip> hoặc <Tooltip content="Tên gọi khác của thundering herd — nhiều requests 'chồng đống' lên nhau cùng tấn công một origin sau khi cache miss.">Dog-piling Effect</Tooltip>. Một trong những failure mode nguy hiểm nhất khi làm việc với caching.
+Đây chính là **Cache Stampede** — hay còn gọi là Thundering Herd Problem hoặc Dog-piling Effect. Một trong những failure mode nguy hiểm nhất khi làm việc với caching.
 
 Trong bài [Cache Pitfalls](/posts/cache-pitfalls), chúng ta đã điểm qua vấn đề này ở mức tổng quan. Bài viết này sẽ đi sâu vào **5 giải pháp** với production code, diagrams, và decision framework để bạn có thể áp dụng ngay.
 
@@ -213,7 +213,7 @@ async function getProductDistributed(productID: string): Promise<Product> {
 
 **2. Owner verification**: Trong production, nên dùng unique value (UUID) khi SETNX và chỉ DEL nếu value match — tránh trường hợp instance A release lock của instance B.
 
-**3. Retry thundering**: Nếu 1000 requests đều retry sau 50ms, chúng sẽ đồng thời check cache. Thêm <Tooltip content="Thêm độ ngẫu nhiên (random offset) vào một giá trị thời gian để tránh nhiều client đồng bộ hành động tại cùng một thời điểm.">jitter</Tooltip> vào sleep time:
+**3. Retry thundering**: Nếu 1000 requests đều retry sau 50ms, chúng sẽ đồng thời check cache. Thêm jitter vào sleep time:
 
 ```ts
 await sleep(50 + Math.random() * 30) // 50-80ms với jitter
@@ -455,7 +455,7 @@ Không có silver bullet. Production systems nên kết hợp nhiều layers:
 1. **Layer 1 — Prevention**: TTL Jitter + Cache Warming (ngăn stampede xảy ra)
 2. **Layer 2 — Proactive**: XFetch (refresh cache trước khi expire)
 3. **Layer 3 — Reactive**: Singleflight + Distributed Lock (nếu stampede vẫn xảy ra)
-4. **Layer 4 — Protection**: <Tooltip content="Pattern tự động 'ngắt mạch' khi downstream service liên tục lỗi — chặn các request mới trong một khoảng thời gian để cho hệ thống phục hồi, thay vì tiếp tục dồn tải.">Circuit Breaker</Tooltip> + Rate Limiting ở DB layer (bảo vệ DB khi mọi thứ fail)
+4. **Layer 4 — Protection**: Circuit Breaker + Rate Limiting ở DB layer (bảo vệ DB khi mọi thứ fail)
 
 ### Edge cases cần lưu ý
 

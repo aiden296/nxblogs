@@ -27,7 +27,7 @@ This post will dive deep into Kafka's internal architecture — from how data is
 
 ## 1. What is Kafka?
 
-**Apache Kafka** is a <Tooltip content="A system for processing event streams in a distributed fashion">distributed event streaming platform</Tooltip>. In simple terms, Kafka is a middleware that allows applications to **publish** and **subscribe** to events in real time, while also **storing** those events durably.
+**Apache Kafka** is a distributed event streaming platform. In simple terms, Kafka is a middleware that allows applications to **publish** and **subscribe** to events in real time, while also **storing** those events durably.
 
 Kafka was developed at LinkedIn starting in 2011 to solve the challenge of processing billions of events per day — activity tracking, metrics, logs — when traditional message queues couldn't keep up. Today, LinkedIn processes over **7 trillion messages per day** through Kafka.
 
@@ -125,7 +125,7 @@ The consequences are:
 
 Therefore, Kafka splits each partition into smaller pieces called segments.
 
-The segment file name is the <Tooltip content="The offset of the first message in that segment">base offset</Tooltip>. When a segment reaches its size limit (default 1GB) or time limit, Kafka creates a new segment:
+The segment file name is the base offset. When a segment reaches its size limit (default 1GB) or time limit, Kafka creates a new segment:
 
 ```
 /var/kafka-logs/orders-0/
@@ -168,7 +168,7 @@ With the `delete` policy, Kafka evaluates each closed segment against two criter
 
 These two criteria operate **independently** — if either condition is met, the closed segment is deleted.
 
-With the `compact` policy, Kafka runs a background thread called the **log cleaner**. This thread reads through closed segments, builds an offset map for each key, and retains only the record with the highest offset (the latest value) per key — older records are discarded. When you want to mark a key as "deleted", you send a message with that key but a `null` value — called a <Tooltip content="A marker record signaling deletion of the given key">tombstone record</Tooltip>. Tombstones are retained for a configurable period (`delete.retention.ms`, default 24 hours) so downstream consumers have time to observe the deletion, then they are permanently removed.
+With the `compact` policy, Kafka runs a background thread called the **log cleaner**. This thread reads through closed segments, builds an offset map for each key, and retains only the record with the highest offset (the latest value) per key — older records are discarded. When you want to mark a key as "deleted", you send a message with that key but a `null` value — called a tombstone record. Tombstones are retained for a configurable period (`delete.retention.ms`, default 24 hours) so downstream consumers have time to observe the deletion, then they are permanently removed.
 
 ```
 Before compaction:
@@ -198,7 +198,7 @@ Within each cluster, **one broker** is elected as the **controller** — serving
 
 ### 3.4. From ZooKeeper to KRaft — The Journey to Remove an External Dependency
 
-In the original architecture, Kafka used <Tooltip content="An external distributed service">Apache ZooKeeper</Tooltip> for two things:
+In the original architecture, Kafka used Apache ZooKeeper for two things:
 
 1. **Metadata store** — storing all cluster metadata: broker list, topics, partition assignments, configurations.
 2. **Controller election** — electing the controller from the list of brokers through ZooKeeper's **ephemeral node** mechanism.
@@ -207,9 +207,9 @@ The problem was that ZooKeeper is a **completely separate system** that you had 
 
 <ExcalidrawDiagram src="/kafka-zookeeper-vs-kraft.excalidraw" alt="ZooKeeper vs KRaft architecture for cluster metadata management" />
 
-Starting with version 3.3+, Kafka introduced <Tooltip content="Kafka Raft">KRaft</Tooltip> — a consensus protocol integrated directly into Kafka, completely eliminating the dependency on ZooKeeper:
+Starting with version 3.3+, Kafka introduced KRaft — a consensus protocol integrated directly into Kafka, completely eliminating the dependency on ZooKeeper:
 
-- **Controller election** now uses the <Tooltip content="A distributed consensus algorithm designed to ensure a group of nodes always agrees on who is the leader, even when nodes fail">Raft consensus protocol</Tooltip> instead of ZooKeeper's ephemeral nodes.
+- **Controller election** now uses the Raft consensus protocol instead of ZooKeeper's ephemeral nodes.
 - **Metadata** is stored in a special **internal topic**: `__cluster_metadata`. Each metadata change is an event in this topic, replicated just like any other topic.
 - **Simpler architecture** — you only need to manage the Kafka cluster, no separate ZooKeeper ensemble required.
 
@@ -316,7 +316,7 @@ If **Broker 2 goes down**, the cluster only loses the leader for `orders-1`. The
 
 ### 5.2. In-Sync Replicas (ISR) — The Synchronization Mechanism Between Replicas
 
-Not all followers are reliable at all times. A follower might lag due to slow network, disk bottleneck, or being in the middle of a restart. Kafka maintains a list called <Tooltip content="In-Sync Replicas — the set of replicas (including the leader) that have synced data up to the most recent point">ISR</Tooltip>.
+Not all followers are reliable at all times. A follower might lag due to slow network, disk bottleneck, or being in the middle of a restart. Kafka maintains a list called ISR.
 
 A follower is removed from the ISR when it **falls too far behind** the leader (configured by `replica.lag.time.max.ms`, default 30 seconds). When the follower catches up, it's added back to the ISR.
 
@@ -352,7 +352,7 @@ This entire process happens within **a few seconds**. If the ISR is empty (all f
 
 ### 6.1. What is an Offset?
 
-Each message in a partition is assigned an <Tooltip content="A monotonically increasing integer starting from 0">offset</Tooltip>. The offset is essentially the consumer's "read position" in the partition log, like a bookmark marking the page you're reading in a book.
+Each message in a partition is assigned an offset. The offset is essentially the consumer's "read position" in the partition log, like a bookmark marking the page you're reading in a book.
 
 ```
 Partition 0:
@@ -376,11 +376,11 @@ The solution: Kafka moved offset storage into a special **internal topic**: `__c
 Consumers decide **when** to commit offsets, and this is a critical design choice:
 
 - **Auto-commit** (`enable.auto.commit=true`): Kafka automatically commits offsets at intervals (default 5 seconds). Simple but risky: if the consumer crashes after auto-commit but before finishing message processing, the message is "lost" (won't be reprocessed).
-- **Manual commit**: The consumer commits after processing is complete. Safer, but if it crashes after processing but before committing, the message gets processed again (duplicate). This is <Tooltip content="Each message is guaranteed to be processed at least once — may be reprocessed if the consumer crashes after processing but before committing the offset">at-least-once delivery</Tooltip> — the most common strategy in production.
+- **Manual commit**: The consumer commits after processing is complete. Safer, but if it crashes after processing but before committing, the message gets processed again (duplicate). This is at-least-once delivery — the most common strategy in production.
 
 When a consumer dies and restarts, the **consumer rebalance protocol** is triggered, and Kafka looks up `__consumer_offsets` to find the last committed offset, then starts reading from the next position. The consumer doesn't need to remember anything — Kafka remembers for it.
 
-> **Consumer rebalance protocol** is the mechanism for redistributing partitions among consumers within the same consumer group in a balanced way, triggered by the <Tooltip content="A designated broker that manages a consumer group — tracking membership, heartbeats, and orchestrating rebalances">Group coordinator</Tooltip>.
+> **Consumer rebalance protocol** is the mechanism for redistributing partitions among consumers within the same consumer group in a balanced way, triggered by the Group coordinator.
 > It occurs when a consumer joins or leaves the group, when a consumer's heartbeat is not received, when the number of partitions changes, or when a consumer is overloaded and processing too slowly.
 
 Consumers are also completely flexible in how they query data: they can store offsets separately in memory, a database, or anywhere that fits their use case — as long as the offset is committed back to Kafka so the cluster knows the last position for recovery purposes.
@@ -420,7 +420,7 @@ When a consumer requests data, Kafka needs to read from disk and send it over th
 
 Kafka uses the **`sendfile()` system call** (on Linux) to completely bypass the user space copy
 
-The result: **~60% reduction in CPU usage** for data transfer. This is why a Kafka broker can serve gigabytes of data per second while the CPU remains mostly idle — because it barely "touches" the data. Kafka doesn't serialize/deserialize messages at the broker level — it receives bytes from the producer and sends those exact bytes to the consumer. The broker treats messages as <Tooltip content="The broker doesn't understand the content inside">opaque bytes</Tooltip>, only storing and forwarding them.
+The result: **~60% reduction in CPU usage** for data transfer. This is why a Kafka broker can serve gigabytes of data per second while the CPU remains mostly idle — because it barely "touches" the data. Kafka doesn't serialize/deserialize messages at the broker level — it receives bytes from the producer and sends those exact bytes to the consumer. The broker treats messages as opaque bytes, only storing and forwarding them.
 
 This is something that message brokers like RabbitMQ cannot do, because RabbitMQ uses the smart broker model — data needs to be serialized at the broker in order to route it to the appropriate consumer.
 

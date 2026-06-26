@@ -59,8 +59,8 @@ In coding theory (the branch of mathematics that studies reliable data transmiss
 
 ### Brief History
 
-- **1950s**: Richard Hamming developed <Tooltip content="The first error-correcting codes, capable of detecting and correcting single-bit errors.">Hamming codes</Tooltip>.
-- **1960**: Irving Reed and Gustave Solomon published <Tooltip content="The most powerful and widely used erasure coding algorithm to this day.">Reed-Solomon codes</Tooltip>. Originally designed for satellite communications.
+- **1950s**: Richard Hamming developed Hamming codes.
+- **1960**: Irving Reed and Gustave Solomon published Reed-Solomon codes. Originally designed for satellite communications.
 - **1982+**: Reed-Solomon was applied to **CDs** to recover data from scratches. Each scratch on a CD is an "erasure" — you know which area is damaged, you just need to reconstruct the data there.
 - **2000s+**: Distributed storage systems like Google File System, HDFS, Azure, and S3 began applying erasure coding at exabyte scale.
 
@@ -78,7 +78,7 @@ The question: how do you protect data against this reality?
 
 ### Solution 1: RAID (1987)
 
-<Tooltip content="Redundant Array of Independent Disks">RAID</Tooltip> was one of the earliest solutions:
+RAID was one of the earliest solutions:
 
 | RAID Level | Mechanism | Overhead | Tolerates |
 |---|---|---|---|
@@ -92,7 +92,7 @@ RAID 5 and RAID 6 are actually **erasure coding** — they use mathematical oper
 
 When moving to distributed systems, the simplest solution was **replication**: copy all data 3 times and place it on 3 different servers (or even 3 different data centers).
 
-**Google File System** (2003) and <Tooltip content="Hadoop Distributed File System">HDFS</Tooltip> defaulted to 3 replicas. The advantages are clear:
+**Google File System** (2003) and HDFS defaulted to 3 replicas. The advantages are clear:
 
 - **Simple**: no complex computation — just copy.
 - **Fast reads**: read from the nearest copy.
@@ -165,7 +165,7 @@ This is the power of Reed-Solomon: it **mathematically guarantees** that any k o
 
 ### 4.3. Encoding Matrix
 
-In practice, Reed-Solomon encoding is implemented using <Tooltip content="The operation of multiplying two arrays of numbers row-by-column to produce a new array.">matrix multiplication</Tooltip>.
+In practice, Reed-Solomon encoding is implemented using matrix multiplication.
 
 The formula:
 
@@ -178,8 +178,8 @@ Where:
 
 The encoding matrix has a special structure:
 
-- The **top k rows** form an <Tooltip content="A matrix with 1s on the diagonal and 0s elsewhere.">identity matrix</Tooltip>. This ensures the first k elements of the output are the original data (unchanged).
-- The **bottom m rows** contain the parity coefficients, typically constructed from a <Tooltip content="A matrix where each row consists of powers of a distinct value.">Vandermonde matrix</Tooltip>.
+- The **top k rows** form an identity matrix. This ensures the first k elements of the output are the original data (unchanged).
+- The **bottom m rows** contain the parity coefficients, typically constructed from a Vandermonde matrix.
 
 <ExcalidrawDiagram src="/erasure-coding-encoding-matrix.excalidraw" alt="Encoding matrix with identity matrix on top and parity coefficients below" />
 
@@ -198,7 +198,7 @@ The last two rows produce 2 parities with **different formulas** — this is exa
 
 ### 4.4. Galois Field GF(2⁸) — Why Not Use Regular Numbers?
 
-In section 4.1, addition was presented as a simple abstraction. In practice, the arithmetic doesn't use regular integers or floating-point numbers — it operates in a <Tooltip content="A finite number system named after mathematician Évariste Galois.">Galois Field</Tooltip>.
+In section 4.1, addition was presented as a simple abstraction. In practice, the arithmetic doesn't use regular integers or floating-point numbers — it operates in a Galois Field.
 
 Why?
 
@@ -271,7 +271,7 @@ Erasure coding is not a silver bullet. Here are the cases it **can't** solve or 
 
 Encoding requires matrix multiplication in Galois Field arithmetic for **every byte** of data. Decoding adds the additional step of matrix inversion. This consumes significantly more CPU compared to replication (which only needs `memcpy`).
 
-Modern CPUs mitigate this with <Tooltip content="Single Instruction Multiple Data">SIMD instructions</Tooltip>. Intel's ISA-L (Intelligent Storage Acceleration Library) achieves encoding throughput of 2-10 GB/s — fast enough for most workloads, but still notably slower than raw memory copy speeds (20+ GB/s).
+Modern CPUs mitigate this with SIMD instructions. Intel's ISA-L (Intelligent Storage Acceleration Library) achieves encoding throughput of 2-10 GB/s — fast enough for most workloads, but still notably slower than raw memory copy speeds (20+ GB/s).
 
 ### 6.2. Repair Amplification — "Fix One Brick, Tear Down the Wall"
 
@@ -281,9 +281,9 @@ This is called **repair amplification** — and it's especially painful at large
 
 ### 6.3. Not Suited for Mutable Workloads
 
-Erasure coding operates on <Tooltip content="Data blocks that never change in place.">immutable chunks</Tooltip>. If you need to modify a single byte, the entire <Tooltip content="A group of k data shards plus m parity shards, encoded and distributed together.">stripe</Tooltip> (k data shards + m parity shards) must be **re-encoded** — because parity depends on all data shards.
+Erasure coding operates on immutable chunks. If you need to modify a single byte, the entire stripe (k data shards + m parity shards) must be **re-encoded** — because parity depends on all data shards.
 
-This is why erasure coding is used for <Tooltip content="Write-once, read-many storage.">object storage</Tooltip> like S3, not for **block storage** or **databases** — where data changes constantly.
+This is why erasure coding is used for object storage like S3, not for **block storage** or **databases** — where data changes constantly.
 
 ### 6.4. Tail Latency — As Slow as the Slowest Shard
 

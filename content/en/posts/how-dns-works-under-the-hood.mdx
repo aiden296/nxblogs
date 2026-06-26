@@ -22,7 +22,7 @@ This article will peel back that layer: who holds the phone book, who looks thin
 
 ## 1. What is DNS and why do we need it?
 
-<Tooltip content="Domain Name System">DNS</Tooltip> is a distributed system responsible for **translating domain names into IP addresses** that computers can understand. It works like an Internet phone book: the domain name is the "person's name", the IP is the "phone number".
+DNS is a distributed system responsible for **translating domain names into IP addresses** that computers can understand. It works like an Internet phone book: the domain name is the "person's name", the IP is the "phone number".
 
 Why not just type the IP directly?
 
@@ -56,7 +56,7 @@ The stub resolver has its own cache, and more importantly, it reads the `hosts` 
 
 ### 2.3. Recursive Resolver
 
-OS cache miss, the stub resolver sends the query out to a <Tooltip content="A DNS server that answers on a client's behalf: it takes one question, walks through root/TLD/authoritative servers itself, and returns the final IP.">**recursive resolver**</Tooltip> — this is the central character of the DNS system.
+OS cache miss, the stub resolver sends the query out to a **recursive resolver** — this is the central character of the DNS system.
 
 A recursive resolver is like an **intermediary** you ask to look up the phone book for you. You don't personally go knocking on each tier of servers; you just ask the resolver one question: "What's the IP of example.com?" — and the resolver handles everything behind the scenes.
 
@@ -78,12 +78,12 @@ Root servers **don't directly answer** the IP of `example.com`. They only do one
 
 ### 2.5. TLD Servers
 
-<Tooltip content="Top-Level Domain">TLD</Tooltip> is the tail part of a domain. TLD servers manage the list of all domains under a specific extension — and specifically know **where each domain's <Tooltip content="The DNS server that holds the official zone file for a domain — the ultimate source of truth for that domain's records.">authoritative server</Tooltip>** is located.
+TLD is the tail part of a domain. TLD servers manage the list of all domains under a specific extension — and specifically know **where each domain's authoritative server** is located.
 
 Some examples of TLD operators:
 
 - **Verisign** — manages `.com` and `.net` (the largest in the world, nearly 200 million domains).
-- <Tooltip content="Public Interest Registry">PIR</Tooltip> — manages `.org`.
+- PIR — manages `.org`.
 - **VNNIC** — manages `.vn`.
 - **Afilias / Identity Digital** — manages many new gTLDs like `.io`, `.info`...
 
@@ -227,7 +227,7 @@ This means: only Let's Encrypt is allowed to issue certificates for `example.com
 
 The entire DNS system handles **trillions of queries every day**. If every query had to go from root to authoritative, root servers would have collapsed long ago. The secret to DNS scaling lies in **multi-layer caching** — and the soul of caching is **TTL**.
 
-<Tooltip content="Time-To-Live">TTL</Tooltip> is the number of seconds a resolver is allowed to keep a result in its cache before it must re-query. TTL is declared by the authoritative server, attached to each record.
+TTL is the number of seconds a resolver is allowed to keep a result in its cache before it must re-query. TTL is declared by the authoritative server, attached to each record.
 
 Choosing a TTL is a balancing act:
 
@@ -264,7 +264,7 @@ The authoritative server **returns different IPs based on the location of the qu
 - **Compliance** — EU users are given servers in the EU so data doesn't leave the region.
 - **Latency optimization** — game servers return the nearest region.
 
-Mechanism: the authoritative reads the resolver's source IP (or <Tooltip content="An extension that lets the resolver include the client's subnet in the query, so the authoritative can pick an IP close to the actual client rather than the resolver.">EDNS Client Subnet</Tooltip>) → looks up a GeoIP database → selects the appropriate IP.
+Mechanism: the authoritative reads the resolver's source IP (or EDNS Client Subnet) → looks up a GeoIP database → selects the appropriate IP.
 
 ### Load balancing via DNS
 
@@ -294,17 +294,17 @@ DNS was designed in the 1980s, when the Internet was small and everyone trusted 
 
 Three main technologies address these two problems:
 
-### <Tooltip content="DNS over HTTPS">DoH</Tooltip>
+### DoH
 
 DNS queries are encapsulated in standard HTTPS requests to the resolver. From the outside, it looks like regular HTTPS traffic, indistinguishable from web browsing. Widely supported: Firefox, Chrome, iOS, Android can all enable DoH.
 
-### <Tooltip content="DNS over TLS">DoT</Tooltip>
+### DoT
 
 DNS queries travel over a dedicated TLS connection (port 853). The separate port makes DoT easier to filter at the enterprise level than DoH (which is why enterprises often prefer DoT, while end-users tend to prefer DoH).
 
 Both DoH and DoT only solve **privacy between client and resolver**. From the resolver out to the Internet, it's still plain DNS (which may change in the future).
 
-### <Tooltip content="Domain Name System Security Extensions">DNSSEC</Tooltip>
+### DNSSEC
 
 This is the solution for the **authentication** problem. DNSSEC adds **digital signatures** to each record. The resolver can verify that the answer genuinely came from the authoritative server through a chain of trust:
 

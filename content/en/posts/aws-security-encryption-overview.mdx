@@ -49,7 +49,7 @@ Keep this framework in mind, and let's walk through each group.
 
 Before talking about services, you need the fundamentals: data can be attacked at two moments — while it is in transit over the network, and while it is at rest on disk. There are three corresponding types of encryption, each answering the question "who holds the key, who does the encrypting."
 
-**Encryption in flight** protects data on the wire between client and server. Data is encrypted before it leaves the sender and only decrypted after it reaches the receiver, so an eavesdropper in the middle (a <Tooltip content="Man-in-the-middle — an attacker who sits between two communicating parties to eavesdrop on or tamper with data">MITM</Tooltip> attack) only sees meaningless bytes. This is exactly <Tooltip content="Transport Layer Security — the protocol that encrypts the transport channel and is the foundation of HTTPS; SSL is the older name">TLS/SSL</Tooltip>, the thing behind HTTPS. The key lives in the TLS certificate — and this is where ACM comes in (section 6).
+**Encryption in flight** protects data on the wire between client and server. Data is encrypted before it leaves the sender and only decrypted after it reaches the receiver, so an eavesdropper in the middle (a MITM attack) only sees meaningless bytes. This is exactly TLS/SSL, the thing behind HTTPS. The key lives in the TLS certificate — and this is where ACM comes in (section 6).
 
 **Server-side encryption at rest** protects data sitting on disk. The server receives the raw data, encrypts it itself before writing to disk, and decrypts it before returning it to the client. The key is managed by the server — on AWS that's usually KMS. This is the mechanism behind SSE-S3, SSE-KMS, EBS volume encryption, and RDS encryption. The crucial point: the server **does** see the raw data at processing time.
 
@@ -115,7 +115,7 @@ So why separate the master key from the data key at all? It's a deliberate desig
 
 A subtle and frequently asked point: why does old data still decrypt after a key is rotated?
 
-When KMS rotates a key, it generates new cryptographic material (a new <Tooltip content="The actual cryptographic material inside a KMS key — what performs the encryption/decryption. A single KMS key can have multiple backing key versions across rotations">backing key</Tooltip>) but keeps all the old backing keys around. Most importantly: the key ID and ARN **do not change**. Every ciphertext (or every encrypted data key) carries metadata recording which backing key version encrypted it. On decryption, KMS reads that metadata and automatically picks the matching backing key:
+When KMS rotates a key, it generates new cryptographic material (a new backing key) but keeps all the old backing keys around. Most importantly: the key ID and ARN **do not change**. Every ciphertext (or every encrypted data key) carries metadata recording which backing key version encrypted it. On decryption, KMS reads that metadata and automatically picks the matching backing key:
 
 - **Old** data: KMS reuses the old backing key (still retained) to decrypt it.
 - **New** data: encrypted with the new backing key.
@@ -169,7 +169,7 @@ The gotcha: you cannot share an AMI encrypted with the default AWS Managed Key �
 
 With KMS, AWS manages the software that generates and stores keys (even though you control the policy). But some organizations (banks, governments) have stricter compliance requirements: the keys must live in dedicated hardware that AWS cannot touch. That's why **AWS CloudHSM** exists.
 
-CloudHSM provides single-tenant <Tooltip content="Hardware Security Module — a dedicated physical device for generating, storing, and processing encryption keys, with tamper resistance">HSMs</Tooltip> (reserved for you, not shared), meeting the **FIPS 140-2 Level 3** standard. AWS only provisions and maintains the hardware; you manage the keys and users yourself — AWS has no access to your keys.
+CloudHSM provides single-tenant HSMs (reserved for you, not shared), meeting the **FIPS 140-2 Level 3** standard. AWS only provisions and maintains the hardware; you manage the keys and users yourself — AWS has no access to your keys.
 
 Things to remember:
 
@@ -259,7 +259,7 @@ The third question — blocking web exploits and DDoS — belongs to three servi
 
 ### 7.1. AWS WAF — application-layer firewall (Layer 7)
 
-**AWS WAF (Web Application Firewall)** filters HTTP/HTTPS traffic at Layer 7 to block common web exploits: SQL injection, <Tooltip content="Cross-Site Scripting — injecting malicious scripts into a web page to run in the victim's browser">XSS</Tooltip>, and bad bots.
+**AWS WAF (Web Application Firewall)** filters HTTP/HTTPS traffic at Layer 7 to block common web exploits: SQL injection, XSS, and bad bots.
 
 You attach WAF to: Application Load Balancer, API Gateway, CloudFront, AppSync (GraphQL), Cognito User Pool, App Runner.
 
@@ -283,7 +283,7 @@ DDoS is an attack that overwhelms a system with a massive flood of traffic from 
 
 - **Shield Standard:** free, automatically on for every AWS customer. Protects against common Layer 3/4 attacks (SYN flood, UDP flood, reflection). Nothing to do.
 - **Shield Advanced:** paid, $3,000/month per organization (plus data transfer). Advanced protection for EC2, ELB, CloudFront, Global Accelerator, and Route 53, plus:
-  - **24/7 DDoS response team** (<Tooltip content="Shield Response Team — AWS experts who assist you directly during a large-scale DDoS attack">SRT</Tooltip>).
+  - **24/7 DDoS response team** (SRT).
   - **DDoS cost protection:** refunds the cost spikes caused by your system auto-scaling to absorb an attack.
   - **Automatic application-layer DDoS mitigation:** auto-creates WAF rules (WAF is included free for protected resources).
   - Real-time metrics and visibility.
@@ -347,7 +347,7 @@ Memory hook: see "analyze VPC Flow Logs / DNS logs / CloudTrail to detect anomal
 
 **Amazon Inspector** automates vulnerability management — scanning your workloads for known security vulnerabilities. It works with only three resource types:
 
-- **EC2 instances:** scans for software vulnerabilities (matching the <Tooltip content="Common Vulnerabilities and Exposures — a public catalog of known security vulnerabilities, each with a unique identifier">CVE</Tooltip> database) and network reachability, via the SSM agent.
+- **EC2 instances:** scans for software vulnerabilities (matching the CVE database) and network reachability, via the SSM agent.
 - **Container images in ECR:** scanned when the image is pushed.
 - **Lambda functions:** scans for vulnerabilities in code and dependencies.
 
@@ -359,7 +359,7 @@ Memory hook: see "CVE," "software vulnerability," "scan container images," "vuln
 
 ### 8.3. Amazon Macie — protecting sensitive data
 
-**Amazon Macie** is a data security and privacy service that uses machine learning and pattern matching to discover and protect sensitive data in S3. Specifically, it scans your S3 buckets and flags PII — <Tooltip content="Personally Identifiable Information — data such as names, ID/SSN numbers, credit card numbers, email">personally identifiable information</Tooltip> — then alerts via EventBridge.
+**Amazon Macie** is a data security and privacy service that uses machine learning and pattern matching to discover and protect sensitive data in S3. Specifically, it scans your S3 buckets and flags PII — personally identifiable information — then alerts via EventBridge.
 
 Use case: complying with privacy regulations (GDPR, PCI-DSS, etc.), answering the question "which buckets is my customers' PII scattered across?".
 

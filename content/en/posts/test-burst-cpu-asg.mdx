@@ -8,7 +8,7 @@ enableComment: true
 
 # How to Test Side Effect of Burst CPU on AWS Auto Scaling
 
-When deploying an <Tooltip content="ASG — a group of EC2 instances that scale in/out automatically based on a policy">Auto Scaling Group</Tooltip> on AWS, I always have a question in mind: **"Will the scaling policy actually work when CPU exceeds the threshold?"** Instead of waiting until production gets overwhelmed to find out, I decided to stress test it myself to witness ASG spinning up additional instances.
+When deploying an Auto Scaling Group on AWS, I always have a question in mind: **"Will the scaling policy actually work when CPU exceeds the threshold?"** Instead of waiting until production gets overwhelmed to find out, I decided to stress test it myself to witness ASG spinning up additional instances.
 
 This article shares how I SSH into an EC2 instance, use the `stress` tool to push CPU high, and observe everything happening on CloudWatch.
 
@@ -24,7 +24,7 @@ You've configured ASG with a scaling policy -- for example, scale out when avera
 
 **Use case 2: Verify CloudWatch Alarm & Notification**
 
-Beyond auto scaling, you also need to ensure that **CloudWatch Alarm sends notifications at the right time** -- via email, SMS, or Slack through an <Tooltip content="Simple Notification Service — AWS pub/sub service that fans out messages to email, SMS, Lambda, HTTPS endpoints, and more">SNS</Tooltip> topic. When the system is overloaded, your team needs to be notified **immediately** so they can intervene in time. Stress testing helps you verify the entire pipeline: CPU spikes -> Alarm triggers -> Notification reaches the right people.
+Beyond auto scaling, you also need to ensure that **CloudWatch Alarm sends notifications at the right time** -- via email, SMS, or Slack through an SNS topic. When the system is overloaded, your team needs to be notified **immediately** so they can intervene in time. Stress testing helps you verify the entire pipeline: CPU spikes -> Alarm triggers -> Notification reaches the right people.
 
 ---
 

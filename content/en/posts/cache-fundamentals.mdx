@@ -26,7 +26,7 @@ Imagine your Database as a **massive library located in the suburbs** (Disk/SSD)
 
 ## 2. The Pareto Principle and Data Locality
 
-Storing the entire Database in RAM is cost-prohibitive for most systems. However, user data access patterns typically follow the <Tooltip content="Zipfian Distribution">Pareto Principle</Tooltip> and <Tooltip content="Recently accessed data tends to be accessed again in the near future">Temporal Locality</Tooltip>:
+Storing the entire Database in RAM is cost-prohibitive for most systems. However, user data access patterns typically follow the Pareto Principle and Temporal Locality:
 
 - **Temporal Locality:** Recently accessed data tends to be accessed again in the near future.
 - **Zipfian Distribution:** About **80% of traffic** in a system typically concentrates on just **20% of "hot" data** (Hot Keys).
@@ -74,10 +74,10 @@ Data is stored centrally on a separate cluster of servers (e.g., **Redis**, **Me
 This is the most common model. The App Server acts as the intermediary coordinator:
 
 1. App Server reads data from Cache.
-2. If <Tooltip content="Requested data is not present in Cache, forcing a fallback query to the source">Cache Miss</Tooltip> -> App Server reads data from DB.
+2. If Cache Miss -> App Server reads data from DB.
 3. App Server updates Cache with data from DB.
 
-**Inline Cache (Read-Through / <Tooltip content="Write policy that synchronously writes to both Cache and DB at the same time">Write-Through</Tooltip>)**
+**Inline Cache (Read-Through / Write-Through)**
 
 The App Server treats Cache as the "primary data source" and **never interacts directly with DB**. The Cache Server handles reading/writing data from/to DB.
 
@@ -87,7 +87,7 @@ The App Server treats Cache as the "primary data source" and **never interacts d
 
 ### 5.1. The AMAT Formula
 
-Cache efficiency is measured by <Tooltip content="Average Memory Access Time">AMAT</Tooltip>. This is the foundational formula for evaluating the average latency of a system:
+Cache efficiency is measured by AMAT. This is the foundational formula for evaluating the average latency of a system:
 
 ```
 AMAT = Hit Time + (Miss Rate x Miss Penalty)

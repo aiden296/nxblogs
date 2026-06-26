@@ -20,7 +20,7 @@ Nếu bạn chưa quen với các S3 storage class và trade-offs của chúng, 
 
 ## Lifecycle Rules hoạt động như thế nào
 
-Một <Tooltip content="Quy tắc cấu hình ở cấp bucket, tự động transition hoặc expire objects theo tuổi và filter">lifecycle rule</Tooltip> bao gồm:
+Một lifecycle rule bao gồm:
 
 - **Filter**: rule áp dụng cho objects nào (theo prefix, tag, hoặc cả hai)
 - **Transitions**: khi nào chuyển objects sang storage class rẻ hơn
@@ -35,7 +35,7 @@ Các ràng buộc quan trọng:
 
 <ExcalidrawDiagram src="/s3-storage-class-transitions.excalidraw" alt="Object chỉ transition một chiều xuống các storage class rẻ hơn" />
 
-> Nếu bạn cần objects tự động di chuyển **hai chiều** (xuống khi không truy cập, lên lại khi được truy cập), hãy dùng <Tooltip content="Storage class tự động di chuyển objects giữa các tier dựa trên access pattern, không cần lifecycle rules">Intelligent-Tiering</Tooltip> thay vì lifecycle rules. Lifecycle rules phù hợp nhất khi access pattern có thể dự đoán và giảm dần theo thời gian.
+> Nếu bạn cần objects tự động di chuyển **hai chiều** (xuống khi không truy cập, lên lại khi được truy cập), hãy dùng Intelligent-Tiering thay vì lifecycle rules. Lifecycle rules phù hợp nhất khi access pattern có thể dự đoán và giảm dần theo thời gian.
 
 ---
 

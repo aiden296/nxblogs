@@ -10,7 +10,7 @@ enableComment: true
 
 You run a SaaS. Your biggest customer just sent over a security requirement: they want to call your internal API with **traffic that never touches the internet**, even with TLS in place.
 
-The first option everyone reaches for is <Tooltip content="VPC Peering — a peer connection between two VPCs so they route to each other over private IPs as if on the same network">VPC Peering</Tooltip>. It works with one customer. Then the second, the tenth, the fiftieth show up. Suddenly you're drowning: two VPCs with overlapping <Tooltip content="Classless Inter-Domain Routing — a way to express a range of IP addresses, e.g. 10.0.0.0/16 covers 65,536 addresses">CIDR</Tooltip> ranges can't peer; every peering means editing route tables on both sides; and worst of all, peering opens a **two-way** road — in theory the customer could initiate connections back into your network too. With 50 customers you have a tangled, fragile mesh that is far wider than it needs to be.
+The first option everyone reaches for is VPC Peering. It works with one customer. Then the second, the tenth, the fiftieth show up. Suddenly you're drowning: two VPCs with overlapping CIDR ranges can't peer; every peering means editing route tables on both sides; and worst of all, peering opens a **two-way** road — in theory the customer could initiate connections back into your network too. With 50 customers you have a tangled, fragile mesh that is far wider than it needs to be.
 
 The root of the problem: peering is a **network-to-network** model. But what you actually need is much smaller and narrower — just to **expose one service** for many parties to call, one-way, without caring whose CIDR overlaps, without touching the customer's route table. That is exactly the problem **AWS PrivateLink** was born to solve.
 
@@ -137,11 +137,11 @@ This name always points to the ENI in that exact AZ. Whenever you need to "pin" 
 
 If you had to rewrite all your code to call the `vpce-0a1b2c3d...` name, PrivateLink wouldn't be nearly this convenient. This is where the **private DNS** feature comes in.
 
-When you enable the **private DNS name** feature, AWS builds you a hidden, AWS-managed <Tooltip content="Private Hosted Zone — a DNS zone that only resolves inside the VPCs attached to it, managed by AWS and hidden from your account">private hosted zone</Tooltip>. Inside it is a record for **the service's exact public hostname**, pointing to the private IPs of the endpoint ENIs in your VPC.
+When you enable the **private DNS name** feature, AWS builds you a hidden, AWS-managed private hosted zone. Inside it is a record for **the service's exact public hostname**, pointing to the private IPs of the endpoint ENIs in your VPC.
 
 Resolution works like this:
 
-- The application asks the <Tooltip content="Route 53 Resolver — the DNS server AWS provides in every VPC, always at the VPC base address plus two, e.g. 10.0.0.2">Route 53 Resolver</Tooltip> (the VPC's default DNS server, always at the `.2` address) for `monitoring.us-east-2.amazonaws.com`.
+- The application asks the Route 53 Resolver (the VPC's default DNS server, always at the `.2` address) for `monitoring.us-east-2.amazonaws.com`.
 - The Resolver sees a private hosted zone covering that name, and **the private hosted zone always beats public DNS**. It returns the endpoint ENI's private IP.
 
 Your code doesn't change a single line — the request automatically goes through the endpoint.
@@ -189,7 +189,7 @@ The consequence runs deep: **no single box "owns" your connection**. If a node d
 
 Hyperplane is **multi-tenant** infrastructure: many customers share the fleet of nodes. The perennial multi-tenant problem is the "noisy neighbour" — one customer under attack or a sudden traffic spike can slow down others on the same node.
 
-Hyperplane's answer is <Tooltip content="Shuffle sharding — assigning each customer a randomly chosen subset of nodes so that two customers rarely share the entire subset, so one customer's trouble rarely takes down another in full">shuffle sharding</Tooltip>: each endpoint is assigned a randomly chosen subset of nodes. Two different endpoints almost never land on the exact same subset. If one endpoint "catches fire" and overwhelms the nodes in its subset, another endpoint overlaps on only a small part — so most of it stays healthy. This is how Hyperplane limits the blast radius of an incident without dedicating hardware to each customer.
+Hyperplane's answer is shuffle sharding: each endpoint is assigned a randomly chosen subset of nodes. Two different endpoints almost never land on the exact same subset. If one endpoint "catches fire" and overwhelms the nodes in its subset, another endpoint overlaps on only a small part — so most of it stays healthy. This is how Hyperplane limits the blast radius of an incident without dedicating hardware to each customer.
 
 On scale: each Hyperplane resource starts around 5 Gbit/s and scales in 5 Gbit/s increments up to Terabits, with sub-millisecond latency, handling hundreds of millions of concurrent connections and millions of new connections per second. That's why you've never had to think about the "capacity" of an interface endpoint.
 
@@ -216,7 +216,7 @@ The consequence of step 5 explains every property of PrivateLink:
 
 ### 6.1. Recovering The Client's Real IP
 
-"But I need to know which customer is calling, to rate-limit and log them." Since SNAT has hidden the original IP, you need another channel to carry that information across. That's <Tooltip content="Proxy Protocol v2 — a binary header the NLB prepends before the TCP data, carrying the client's original IP/port plus extras like the VPC endpoint ID">Proxy Protocol v2</Tooltip> (PPv2).
+"But I need to know which customer is calling, to rate-limit and log them." Since SNAT has hidden the original IP, you need another channel to carry that information across. That's Proxy Protocol v2 (PPv2).
 
 Enable PPv2 on the target group, and the NLB prepends a binary header right before the TCP payload. This header carries the client's original IP/port, and on AWS it also has an extension field (TLV) containing the consumer's **VPC endpoint ID** — extremely useful for knowing which endpoint a connection came from.
 

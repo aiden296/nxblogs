@@ -37,17 +37,17 @@ With self-hosted MySQL, you have to handle version updates yourself, run your ow
 
 With DynamoDB, all of that disappears.
 
-<Tooltip content="A model where you don't manage or even see any server — there are no machines to turn on/off; you only pay for the reads/writes and storage you actually use">Serverless</Tooltip> is a consequence of the above: there are no "instances" or "clusters" for you to pick CPU/RAM configurations for. A DynamoDB table scales itself
+Serverless is a consequence of the above: there are no "instances" or "clusters" for you to pick CPU/RAM configurations for. A DynamoDB table scales itself
 according to demand.
 
 **NoSQL** (Not Only SQL) is a family of databases that are **not relational** — no tables joined together by foreign keys, no `JOIN` statements, no requirement that every row share the same column structure. In exchange, NoSQL is designed to **scale horizontally** with ease and to read/write extremely fast by key. DynamoDB is a **key-value** store combined with **document** capabilities: you look up data primarily through a key, and each record can contain nested structures like a JSON file.
 
 ### 1.1. What makes DynamoDB stand out
 
-- **Distributed by default, highly available**: data is automatically replicated (**replication**) across multiple <Tooltip content="Availability Zone — one or more independent data centers within the same AWS region, with their own power and networking so that when one AZ fails, the others keep running">AZ</Tooltip>s within a region. If one data center has an incident, your data is still safe and accessible.
+- **Distributed by default, highly available**: data is automatically replicated (**replication**) across multiple AZs within a region. If one data center has an incident, your data is still safe and accessible.
 - **Consistent single-digit millisecond performance**: whether the table has 1,000 or 1 billion records, the response time for a key lookup is almost unchanged.
 - **Massive scale**: serves millions of requests per second, trillions of records, hundreds of TB of data.
-- **Built-in security**: access control via <Tooltip content="Identity and Access Management — AWS's service for managing who (user, service) is allowed to do what on which resources">IAM</Tooltip>, encryption of data by default.
+- **Built-in security**: access control via IAM, encryption of data by default.
 - **No maintenance, always available**: there's no "maintenance window" that interrupts your service.
 
 In short, DynamoDB is a good fit when you need a **fast, consistent, self-scaling** database and you don't want to spend people's time operating it.
@@ -101,8 +101,8 @@ One important limit to remember: **the maximum size of an item is 400KB** (count
 
 The Capacity Mode determines how you **manage and pay for the throughput** (reads/writes per second) of a table. First you need to understand two units of measurement:
 
-- **RCU** (<Tooltip content="Read Capacity Unit — the unit for measuring read capacity">Read Capacity Unit</Tooltip>): 1 RCU = 1 **strongly consistent** read per second for an item up to 4KB. If you accept **eventually consistent** reads, then 1 RCU gives you **2 reads/second**.
-- **WCU** (<Tooltip content="Write Capacity Unit — the unit for measuring write capacity">Write Capacity Unit</Tooltip>): 1 WCU = 1 write per second for an item up to 1KB.
+- **RCU** (Read Capacity Unit): 1 RCU = 1 **strongly consistent** read per second for an item up to 4KB. If you accept **eventually consistent** reads, then 1 RCU gives you **2 reads/second**.
+- **WCU** (Write Capacity Unit): 1 WCU = 1 write per second for an item up to 1KB.
 
 You just saw the terms "strongly consistent" and "eventually consistent" in the definition of RCU. This is where newcomers get confused the most, so let's pull it out and explain it separately.
 
@@ -139,7 +139,7 @@ You **declare in advance** the number of RCUs and WCUs the table needs per secon
 
 ### 3.3. On-Demand Mode
 
-You **declare nothing**. DynamoDB scales itself with the load, and you **pay per request** (in units of <Tooltip content="Read Request Unit and Write Request Unit — the per-request billing units in On-Demand mode">RRU/WRU</Tooltip>).
+You **declare nothing**. DynamoDB scales itself with the load, and you **pay per request** (in units of RRU/WRU).
 
 - No capacity planning needed.
 - Absorbs sudden **spikes** instantly.
@@ -154,12 +154,12 @@ Start with On-Demand mode for most cases; once you know your traffic and spike p
 
 Beyond the core, DynamoDB comes with an ecosystem of features that make it far more powerful than an ordinary key-value store.
 
-- **DAX** (<Tooltip content="DynamoDB Accelerator — an in-memory cache layer placed in front of DynamoDB to speed up reads">DynamoDB Accelerator</Tooltip>): an in-memory cache layer placed in front of the table, dropping read latency from milliseconds to **microseconds** for frequently read data. A good fit for "read a lot, write a little" situations.
+- **DAX** (DynamoDB Accelerator): an in-memory cache layer placed in front of the table, dropping read latency from milliseconds to **microseconds** for frequently read data. A good fit for "read a lot, write a little" situations.
 - **Global Tables**: replicates a table in an **active-active** fashion across multiple regions. Users in the US and in Europe both read/write to the copy nearest them, and the data syncs automatically between regions — ideal for global applications. One important note: to enable Global Tables you **must turn on DynamoDB Streams first**. The reason lies in the underlying mechanism — Global Tables uses the very changelog that Streams records (see the next item) to **replicate** every change to the replica tables in other regions. Without Streams, the regions have no way to know what just changed in order to stay in sync.
-- **DynamoDB Streams**: records **every change** (adding/updating/deleting an item) into a time-ordered stream of events. This is built-in <Tooltip content="Change Data Capture — a technique for capturing and emitting every data change so other systems can react in real time">CDC</Tooltip>. It's commonly wired up to **AWS Lambda** to trigger automatic logic: for example, every time there's a new order, send an email, update a stats table, or push to a search system.
-- **TTL** (<Tooltip content="Time To Live — the expiration time of an item, after which DynamoDB automatically deletes it">Time To Live</Tooltip>): you set a timestamp-type attribute on an item; when that time arrives, DynamoDB **automatically deletes** the item **without consuming your write throughput**. Extremely handy for cleaning up expired sessions, abandoned carts, and temporary data.
-- **Secondary Indexes**: by default you can only query by the Primary Key. A secondary index lets you query by another attribute. There are two types: <Tooltip content="Global Secondary Index — an index with a partition/sort key entirely different from the base table, queried across the whole table">GSI</Tooltip> (flexible, can be created at any time) and <Tooltip content="Local Secondary Index — an index that shares the base table's partition key but has a different sort key, and must be created at table creation time">LSI</Tooltip>.
-- **Table Class**: DynamoDB has two table classes. **Standard** is the default, optimized for frequently accessed data. **Standard-IA** (<Tooltip content="Infrequent Access — a table class for data that is rarely accessed">Infrequent Access</Tooltip>) has **cheaper storage cost** but **more expensive cost per read/write operation** — a fit for data you need to keep for a long time but rarely touch (old logs, order history).
+- **DynamoDB Streams**: records **every change** (adding/updating/deleting an item) into a time-ordered stream of events. This is built-in CDC. It's commonly wired up to **AWS Lambda** to trigger automatic logic: for example, every time there's a new order, send an email, update a stats table, or push to a search system.
+- **TTL** (Time To Live): you set a timestamp-type attribute on an item; when that time arrives, DynamoDB **automatically deletes** the item **without consuming your write throughput**. Extremely handy for cleaning up expired sessions, abandoned carts, and temporary data.
+- **Secondary Indexes**: by default you can only query by the Primary Key. A secondary index lets you query by another attribute. There are two types: GSI (flexible, can be created at any time) and LSI.
+- **Table Class**: DynamoDB has two table classes. **Standard** is the default, optimized for frequently accessed data. **Standard-IA** (Infrequent Access) has **cheaper storage cost** but **more expensive cost per read/write operation** — a fit for data you need to keep for a long time but rarely touch (old logs, order history).
 - **Security & backup**: integrates with IAM for fine-grained permissions, encryption at rest, and continuous backups with the ability to restore to any point in time (point-in-time recovery).
 
 ---

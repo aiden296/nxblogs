@@ -10,7 +10,7 @@ enableComment: true
 
 Imagine you are running an e-commerce platform. 11:59 PM, a flash sale begins. 50,000 users simultaneously access the hottest product page. The cache key for that product just expired at that exact moment. Result? 50,000 requests **simultaneously** hit the Database — DB overloads, timeouts cascade, the entire system crashes within seconds.
 
-This is **Cache Stampede** — also known as the <Tooltip content="A phenomenon where many clients simultaneously race to access a resource once it becomes available again (e.g., right after cache expiry), overloading the backend.">Thundering Herd Problem</Tooltip> or <Tooltip content="Another name for thundering herd — many requests 'pile on' the same origin after a cache miss.">Dog-piling Effect</Tooltip>. One of the most dangerous failure modes when working with caching.
+This is **Cache Stampede** — also known as the Thundering Herd Problem or Dog-piling Effect. One of the most dangerous failure modes when working with caching.
 
 In the [Cache Pitfalls](/posts/cache-pitfalls) article, we briefly covered this issue at a high level. This article will dive deep into **5 solutions** with production code, diagrams, and a decision framework you can apply immediately.
 
@@ -213,7 +213,7 @@ async function getProductDistributed(productID: string): Promise<Product> {
 
 **2. Owner verification**: In production, use a unique value (UUID) when calling SETNX and only DEL if the value matches — preventing instance A from releasing instance B's lock.
 
-**3. Retry thundering**: If 1000 requests all retry after 50ms, they will simultaneously check cache. Add <Tooltip content="Adding randomness (a random offset) to a timing value so that many clients don't act in lockstep at the same instant.">jitter</Tooltip> to the sleep time:
+**3. Retry thundering**: If 1000 requests all retry after 50ms, they will simultaneously check cache. Add jitter to the sleep time:
 
 ```ts
 await sleep(50 + Math.random() * 30) // 50-80ms with jitter
@@ -455,7 +455,7 @@ There is no silver bullet. Production systems should combine multiple layers:
 1. **Layer 1 — Prevention**: TTL Jitter + Cache Warming (prevent stampede from occurring)
 2. **Layer 2 — Proactive**: XFetch (refresh cache before it expires)
 3. **Layer 3 — Reactive**: Singleflight + Distributed Lock (if stampede still occurs)
-4. **Layer 4 — Protection**: <Tooltip content="A pattern that automatically 'trips' when a downstream service keeps failing — blocking new requests for a cooldown window so the system can recover, instead of piling on more load.">Circuit Breaker</Tooltip> + Rate Limiting at the DB layer (protect DB when everything fails)
+4. **Layer 4 — Protection**: Circuit Breaker + Rate Limiting at the DB layer (protect DB when everything fails)
 
 ### Edge Cases to Watch
 

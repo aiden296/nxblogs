@@ -37,7 +37,7 @@ The core difference:
 
 This means Route 53 can't do what ALB does (path-based routing, SSL termination, sticky sessions). But conversely, there are problems that Route 53 solves **more simply, cheaply, and at a global scope** — something a single ALB cannot.
 
-Every <Tooltip content="A Route 53 container holding the DNS records for a single domain; one managed domain corresponds to one hosted zone">Hosted Zone</Tooltip> on Route 53 is already a Load Balancer waiting to be configured. You just need to choose the right **routing policy**.
+Every Hosted Zone on Route 53 is already a Load Balancer waiting to be configured. You just need to choose the right **routing policy**.
 
 ---
 
@@ -60,7 +60,7 @@ Let's dive deep into each policy:
 
 This is the default mode when you create a record on Route 53. One domain points to one (or multiple) IPs. If there are multiple IPs, Route 53 returns them all in random order — similar to DNS round-robin.
 
-**Limitation:** No <Tooltip content="A periodic probe that verifies an endpoint is alive, used to remove failed servers from the traffic pool">health checks</Tooltip>. If a server dies, Route 53 will happily continue returning that IP.
+**Limitation:** No health checks. If a server dies, Route 53 will happily continue returning that IP.
 
 **Configuration on AWS Console:**
 
@@ -246,7 +246,7 @@ Blue/Green is simpler than canary: two environments, instant switch.
 
 ### 3.3 Multi-Region DR with Failover + Latency
 
-An advanced scenario: combining **two routing policies** using <Tooltip content="A Route 53-specific record that points to an AWS resource (ALB, CloudFront, S3) or another Route 53 record, with no query fee and support for apex domains">Alias records</Tooltip>.
+An advanced scenario: combining **two routing policies** using Alias records.
 
 **Layer 1 — Latency routing** for `internal.example.com` (selects the nearest region):
 
@@ -334,9 +334,9 @@ This is the model that most large-scale production systems use — and the Route
 
 By now you might think Route 53 is all about distributing traffic. But it plays another role, less talked about yet very common on the SAA exam: resolving DNS in a **hybrid** environment — when part of your system lives on AWS and the rest lives in your own data center.
 
-Every VPC ships with a **Route 53 Resolver** — an internal DNS resolver that always sits at the <Tooltip content="The default resolver IP in every VPC, equal to the VPC's base network address plus 2. For a 10.0.0.0/16 VPC the resolver is at 10.0.0.2. It's also reachable via the link-local address 169.254.169.253">VPC+2 address</Tooltip>. It resolves domain names for every resource inside the VPC: from records in a <Tooltip content="A Route 53 hosted zone that only resolves from inside the VPCs you associate with it, used for internal domain names not exposed to the Internet">Private Hosted Zone</Tooltip> (e.g. `aws.private`) to the internal DNS names of EC2 instances.
+Every VPC ships with a **Route 53 Resolver** — an internal DNS resolver that always sits at the VPC+2 address. It resolves domain names for every resource inside the VPC: from records in a Private Hosted Zone (e.g. `aws.private`) to the internal DNS names of EC2 instances.
 
-Your data center also has its own DNS system, serving internal names like `onpremise.private`. The two sides are linked over VPN or <Tooltip content="A dedicated private link connecting your data center straight into AWS, bypassing the public Internet">Direct Connect</Tooltip>.
+Your data center also has its own DNS system, serving internal names like `onpremise.private`. The two sides are linked over VPN or Direct Connect.
 
 ### 7.1 The Problem: Two DNS "Worlds" That Don't Talk to Each Other
 
@@ -362,7 +362,7 @@ The path of an `app.aws.private?` query originating on-premises:
 3. The Inbound Endpoint hands the query to the Route 53 Resolver.
 4. The Resolver looks it up in the Private Hosted Zone, finds the record, and returns the IP back to on-premises.
 
-An Inbound Endpoint is really a set of <Tooltip content="Elastic Network Interface — a virtual network card attached to a subnet in your VPC, each with its own IP address. A resolver endpoint is really a set of these ENIs">ENIs</Tooltip> in your subnets, each with a fixed IP for on-premises DNS to point at:
+An Inbound Endpoint is really a set of ENIs in your subnets, each with a fixed IP for on-premises DNS to point at:
 
 | Property | Example value |
 | --- | --- |
@@ -379,7 +379,7 @@ An Outbound Endpoint is the reverse direction: it lets the Route 53 Resolver for
 
 <ExcalidrawDiagram src="/route53-resolver-outbound.excalidraw" alt="Outbound endpoint lets AWS resources resolve on-premises private records" />
 
-The key difference from inbound: the outbound direction needs a <Tooltip content="A Route 53 Resolver forwarding rule: it matches on a domain name (e.g. onpremise.private) and forwards that DNS query to a list of DNS server IPs you specify">Resolver rule</Tooltip> to know which domain goes where. Without a rule, the Resolver still processes the query the default way (public DNS) and won't find `onpremise.private`.
+The key difference from inbound: the outbound direction needs a Resolver rule to know which domain goes where. Without a rule, the Resolver still processes the query the default way (public DNS) and won't find `onpremise.private`.
 
 The path of a `web.onpremise.private?` query originating from EC2:
 
@@ -405,9 +405,9 @@ Configuring a forwarding rule for the on-premises zone:
 
 ### 7.4 High Availability & Cross-Account Sharing (AWS RAM)
 
-Because an endpoint is built from ENIs in your subnets, its availability depends on how many <Tooltip content="Availability Zone — an isolated set of data centers within a region with independent power and networking. Spreading resources across AZs lets them survive the failure of one AZ">Availability Zones</Tooltip> you spread it across. AWS requires each endpoint to have at least two IP addresses in **two different AZs**. If one AZ fails, the ENI in the other keeps resolving DNS — don't put both IPs in a single AZ.
+Because an endpoint is built from ENIs in your subnets, its availability depends on how many Availability Zones you spread it across. AWS requires each endpoint to have at least two IP addresses in **two different AZs**. If one AZ fails, the ENI in the other keeps resolving DNS — don't put both IPs in a single AZ.
 
-In a multi-account organization, you don't need a separate endpoint and rules for each account. Forwarding rules can be shared via <Tooltip content="AWS Resource Access Manager — a service for sharing resources across AWS accounts in the same organization; here, sharing Resolver rules">AWS RAM</Tooltip>: a central networking account owns the Outbound Endpoint and the rules, then shares the rules out to the application accounts. Each account just associates a rule with its own VPC to use it — the familiar hub-and-spoke model, applied to DNS.
+In a multi-account organization, you don't need a separate endpoint and rules for each account. Forwarding rules can be shared via AWS RAM: a central networking account owns the Outbound Endpoint and the rules, then shares the rules out to the application accounts. Each account just associates a rule with its own VPC to use it — the familiar hub-and-spoke model, applied to DNS.
 
 ### 7.5 On the SAA Exam
 
