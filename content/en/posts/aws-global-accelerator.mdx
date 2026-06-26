@@ -100,6 +100,16 @@ Global Accelerator lets you distribute traffic across multiple Regions by ratio 
 - **Gradual migration**: slowly shifting traffic from old Region to new Region
 - **Blue-green deployment**: switching traffic between two versions by adjusting weights
 
+### 2.5. Faster connection setup — TCP termination at the Edge
+
+A TCP connection can only send its first byte of data after the client and endpoint finish the <Tooltip content="Three-way handshake — SYN, SYN-ACK, ACK to establish a TCP connection">three-way handshake</Tooltip>. If the endpoint sits in a distant Region, every handshake step has to make a full round trip over the public internet, so the connection-setup phase alone is slow before any data even moves. This is why far-away users often feel the initial connection takes forever, even when the data transfer afterward is fine.
+
+Global Accelerator solves this with **TCP termination at the Edge**: the client completes its TCP handshake with the nearest Edge Location, and almost concurrently Global Accelerator opens a second TCP connection from the Edge to the endpoint, running over the backbone. The client gets its response from the Edge right next to it instead of waiting for a full round trip to the Region, so connection-setup time drops substantially.
+
+AWS measured at <Tooltip content="90th percentile — 90% of measurements fall below this value">p90</Tooltip> with real-user monitoring tools: <Tooltip content="First byte latency — the round-trip time for a packet to go from client to endpoint and back">first byte latency</Tooltip> down by up to 49%, jitter down by up to 58%, and throughput up by up to 60%. For applications that are sensitive during session setup, such as video conferencing or real-time APIs, this is a difference users feel immediately.
+
+This is also where **Route 53 latency-based routing** falls short. Latency routing only picks the lowest-latency Region at the DNS layer: it returns the IP of the nearest endpoint, but the packets then still travel the public internet on their own to reach that Region. It does not shorten the handshake, does not move traffic onto the backbone, and still inherits DNS's weaknesses of caching, TTL, and slow failover. Global Accelerator both picks the nearest healthy endpoint and accelerates the data path itself, so for a scenario like reducing global latency for TCP/UDP while keeping the existing NLB/EC2 infrastructure, Global Accelerator is the right choice and latency routing is the trap.
+
 ---
 
 ## 3. Real-world use cases
@@ -192,7 +202,19 @@ When you put CloudFront in front of an ALB for a dynamic API that doesn't need c
 
 ---
 
-## 5. Conclusion
+## 5. Two accelerator types: Standard and Custom Routing
+
+Global Accelerator comes in two types, and the SAA exam often says "standard accelerator" explicitly so you don't confuse it with the other one.
+
+**Standard accelerator** is the default — it's what this entire post describes. Endpoints are NLB, ALB, EC2, or Elastic IP. Global Accelerator routes each client to the optimal endpoint based on the user's location, endpoint health checks, and the weights you configure; when an endpoint becomes unhealthy, traffic shifts to a healthy one within seconds. This is the type you reach for in most "reduce global latency" and "multi-Region failover" scenarios.
+
+**Custom Routing accelerator** solves a different problem: it pins a single client to one specific EC2 instance and port inside a VPC subnet, based on the Anycast IP and listener port the client connects to. Here the endpoints are VPC subnets containing EC2 instances, not load balancers. The key thing to remember: Custom Routing does no health checks and no failover — routing is deterministic, so traffic always reaches the mapped instance whether or not it's healthy. It fits applications that need to decide that this user must land on that exact server — for example VoIP assigning multiple callers to one media server, or real-time games assigning multiple players to the same session on one game server.
+
+**Exam tip**: if the question says "global routing, lower latency, failover to NLB/ALB/EC2," pick the Standard accelerator; only when it emphasizes assigning a client to one specific instance/port for a gaming session or VoIP is it Custom Routing.
+
+---
+
+## 6. Conclusion
 
 **Global Accelerator** is the right tool when you need to **bring traffic to the origin faster** without interfering with the request. It's transparent, preserves client IP, no caching, no parsing, no timeout.
 

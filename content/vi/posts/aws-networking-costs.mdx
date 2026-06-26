@@ -1,0 +1,212 @@
+---
+title: 'AWS Networking Costs: Cùng Một Byte, Chỗ Miễn Phí Chỗ Tính Tiền — Bản Đồ Chi Phí Cho Kỳ Thi SAA'
+date: '2026-06-25'
+tags: ['Devops', 'AWS', 'SAA', 'Exam Prep']
+description: 'Tổng quan chi phí networking trên AWS cho kỳ thi SAA — quy luật data transfer theo chiều và khoảng cách (ingress/egress, same-AZ, cross-AZ, cross-region), internet egress, NAT Gateway và Gateway Endpoint, S3 và CloudFront, cùng phí của Transit Gateway, Direct Connect, PrivateLink, Global Accelerator và public IPv4. Nhớ thứ tự đắt-rẻ và các đòn tối ưu kinh điển.'
+enableComment: true
+---
+
+# AWS Networking Costs: Cùng Một Byte, Chỗ Miễn Phí Chỗ Tính Tiền — Bản Đồ Chi Phí Cho Kỳ Thi SAA
+
+Cuối tháng, hóa đơn AWS về. Tiền compute, tiền storage thì bạn đoán được. Nhưng có hai dòng phình to ngoài dự kiến: **Data Transfer** và **NAT Gateway** — dù tuần qua bạn không bật thêm một server nào.
+
+Bạn mở Cost Explorer ra và bắt đầu thấy khó hiểu. Hai service nói chuyện với nhau suốt ngày, sao cái cặp này tính tiền còn cái cặp kia thì không? Một con EC2 kéo dữ liệu từ S3 — lúc thì $0.00, lúc thì vài cent mỗi GB. Cùng là "chuyển một GB", nhưng hóa đơn lại rất khác nhau.
+
+Gốc rễ nằm ở chỗ: trên AWS, **cái byte đi đường nào quan trọng hơn cái byte to bao nhiêu**. Cùng một gigabyte, nếu nó ở yên trong một <Tooltip content="Availability Zone — một (hoặc vài) trung tâm dữ liệu độc lập trong cùng một region, có nguồn điện và mạng riêng">Availability Zone</Tooltip> và dùng IP nội bộ thì miễn phí; nếu nó nhảy sang AZ khác thì tốn một ít; còn nếu nó rời AWS đi ra internet thì đó là chiều đắt nhất. Không nắm "bản đồ" này, bạn vừa đốt tiền vô tình, vừa mất điểm ở nhóm câu hỏi tối ưu chi phí — một nhóm ra rất đều trong đề SAA.
+
+Bài viết này là tấm bản đồ đó. Ta sẽ đi từ quy luật nền tảng của data transfer (chiều và khoảng cách), tới internet egress, tới hai cặp kinh điển hay được hỏi (NAT Gateway và Gateway Endpoint; S3 và CloudFront), rồi tổng kết phí của toàn bộ các "hộp" networking khác. Mục tiêu không phải nhớ con số chính xác — giá đổi theo region và theo thời gian — mà là nhớ **thứ tự đắt-rẻ** và các nguyên tắc để suy ra đáp án trong phòng thi.
+
+<ExcalidrawDiagram
+  src="/aws-networking-costs-overview.excalidraw"
+  alt="Bản đồ chi phí mạng AWS theo từng GB: traffic vào miễn phí, cùng AZ dùng private IP miễn phí, khác AZ khoảng 0.01 đến 0.02 đô mỗi GB, khác region khoảng 0.02 đô, ra internet khoảng 0.09 đô."
+/>
+
+> **Lưu ý:** Đây là góc nhìn overview để xây mental model và phản xạ nhanh trong phòng thi. Bài này tập trung vào networking; nếu bạn muốn bức tranh rộng hơn về các công cụ theo dõi và tối ưu hóa đơn (Cost Explorer, Budgets, Savings Plans...), đọc [AWS Cost Management: Bản đồ đầy đủ các service theo dõi, kiểm soát và tối ưu chi phí](/vi/posts/aws-cost-management-overview). Còn bản chất các dịch vụ kết nối (VPN, Direct Connect, Transit Gateway, Endpoint) nằm ở [AWS VPC Networking](/vi/posts/aws-vpc-networking-overview).
+
+---
+
+## 1. Hai loại phí: di chuyển dữ liệu và vận hành "cái hộp"
+
+Mọi chi phí networking trên AWS rơi vào đúng hai nhóm:
+
+1. **Data transfer (tính theo GB):** tiền cho bản thân việc **di chuyển** dữ liệu từ điểm A tới điểm B. Đắt hay rẻ phụ thuộc vào A và B nằm ở đâu so với nhau (cùng AZ, khác AZ, khác region, hay ra ngoài internet).
+2. **Phí hạ tầng networking (tính theo giờ, cộng thêm theo GB xử lý):** tiền cho việc **vận hành** các "cái hộp" mạng mà bạn dựng lên — NAT Gateway, Interface Endpoint, Transit Gateway, VPN, Direct Connect, Global Accelerator. Mỗi hộp này thường có một khoản phí thuê cố định mỗi giờ (provisioned là tính tiền, dù có lưu lượng hay không), cộng thêm một khoản xử lý mỗi GB đi qua nó.
+
+Một hóa đơn networking cao gần như luôn là tổng của hai nhóm này.
+
+Và cái bẫy là: nhiều khi bạn trả tiền cho **cả hai** mà không nhận ra — ví dụ kéo dữ liệu S3 qua NAT Gateway thì vừa trả phí xử lý của NAT (nhóm 2), vừa trả data transfer (nhóm 1), trong khi có cách đi khác miễn phí cả hai. Ta sẽ gặp lại đúng tình huống này ở mục 5.
+
+Xuyên suốt cả hai nhóm là một quy luật vàng, đáng thuộc lòng:
+
+- **Lưu lượng đi vào (ingress)** — từ internet vào AWS — gần như luôn **miễn phí**.
+- **Lưu lượng đi ra (egress)** — từ AWS ra internet — là chiều **đắt nhất**.
+
+Hai từ <Tooltip content="Ingress = lưu lượng đi vào trong AWS; egress = lưu lượng đi ra khỏi AWS. Đây là cách gọi theo góc nhìn của AWS, không phải của ứng dụng">ingress và egress</Tooltip> sẽ xuất hiện liên tục trong phần còn lại của bài. Nhớ: dễ vào, khó ra. AWS gần như không thu tiền để dữ liệu chảy vào, nhưng thu tiền khi nó chảy ra — và đó là lý do mọi đòn tối ưu chi phí networking đều xoay quanh việc **giảm lưu lượng egress**.
+
+---
+
+## 2. Quy luật nền tảng: chi phí theo chiều và khoảng cách
+
+Đây là trái tim của nhóm câu hỏi networking cost trong đề SAA. Chi phí mỗi GB của data transfer phụ thuộc vào hai chiều đo:
+
+- **Chiều (direction):** đi vào hay đi ra.
+- **Khoảng cách / phạm vi (scope):** hai đầu cách nhau bao xa — cùng AZ, khác AZ trong cùng region, khác region, hay ra hẳn internet.
+
+Ghép hai chiều đo lại, ta được một "bậc thang chi phí" từ rẻ nhất tới đắt nhất.
+
+| Lưu lượng                                      | Chi phí mỗi GB (xấp xỉ) | Ghi nhớ                                     |
+| ---------------------------------------------- | ----------------------- | ------------------------------------------- |
+| Đi vào từ internet (ingress)                   | **$0.00**               | Luôn miễn phí                               |
+| Cùng AZ, dùng **private IP**                   | **$0.00**               | Rẻ nhất — nên tận dụng                      |
+| Khác AZ trong cùng region, dùng **private IP** | **~$0.01** mỗi chiều    | Có phí nhỏ cả chiều vào lẫn chiều ra        |
+| Khác AZ, hoặc đi qua **public / Elastic IP**   | **~$0.02**              | Dùng public IP cho lưu lượng nội bộ bị phạt |
+| Khác region (inter-region)                     | **~$0.02**              | Tùy cặp region                              |
+| Đi ra internet (egress)                        | **~$0.09**              | Đắt nhất, và có bậc giảm dần theo lượng     |
+
+Hai điều quan trọng đọc ra được từ bảng này:
+
+**Private IP gần như luôn rẻ hơn public IP.** Khi hai EC2 trong cùng một VPC nói chuyện với nhau, nếu bạn dùng địa chỉ <Tooltip content="Địa chỉ IP nội bộ của VPC, ví dụ 10.0.x.x — chỉ định tuyến được bên trong AWS">private IP</Tooltip> thì lưu lượng đi theo đường nội bộ của AWS; nếu bạn (lỡ) dùng public IP hoặc <Tooltip content="Elastic IP — một địa chỉ IPv4 public tĩnh mà bạn giữ cố định và gán cho tài nguyên">Elastic IP</Tooltip>, lưu lượng bị đẩy ra tới biên của mạng rồi vòng lại, và bị tính giá cao hơn, lại còn chậm hơn.
+
+**Cùng AZ là rẻ nhất, nhưng đánh đổi với tính sẵn sàng.** Dồn hết vào một AZ nghĩa là khi AZ đó chết thì toàn bộ chết theo — bạn mất tính <Tooltip content="High Availability — khả năng chịu lỗi để hệ thống vẫn chạy khi một thành phần hỏng">HA</Tooltip>. Đây chính là sự đánh đổi mà đề hay gài: "tối ưu chi phí" thì gom về một AZ, "tối ưu độ sẵn sàng" thì trải nhiều AZ và chấp nhận phí cross-AZ. Hầu hết kiến trúc thực tế chọn multi-AZ và coi phí cross-AZ là cái giá của HA.
+
+Một lưu ý mà thí sinh hay quên: phí cross-AZ được tính ở **cả hai chiều**. Nếu tài liệu nói "$0.01/GB cho data transfer in" và "$0.01/GB cho data transfer out" giữa hai AZ, thì một vòng đi-về tốn khoảng $0.02/GB chứ không phải $0.01.
+
+---
+
+## 3. Internet egress: chiều đắt nhất và vì sao nó hay gây sốc
+
+Egress ra internet là khoản đắt nhất, nên đáng nhìn kỹ hơn. Ba điều cần nhớ:
+
+**Giá có bậc, giảm dần theo lượng.** Khoảng $0.09/GB cho 10 TB đầu mỗi tháng, rồi rẻ dần ($0.085/GB ở mức 10–50 TB, xuống còn quanh $0.05–0.07/GB ở mức hàng trăm TB). Bạn không cần nhớ từng mốc; chỉ cần biết nó là **bậc thang giảm dần**, càng đẩy nhiều ra càng rẻ trên mỗi GB — nhưng tổng tiền vẫn lớn.
+
+**Có 100 GB miễn phí mỗi tháng.** AWS tặng 100 GB egress ra internet mỗi tháng, gộp chung trên hầu hết các service và region (từ cuối 2021, thay cho mức 1 GB lẻ tẻ theo từng service trước kia). Với hệ thống nhỏ thì khoản này che gần hết hóa đơn data transfer; với hệ thống lớn thì nó chỉ là hạt cát.
+
+**Vào thì miễn phí, ra thì tốn tiền.** Sự bất đối xứng này không phải ngẫu nhiên. Nó tạo ra cái gọi là <Tooltip content="Data gravity — dữ liệu càng lớn càng 'hút' compute và dịch vụ về gần nó, và càng khó/đắt để dời đi nơi khác">data gravity</Tooltip>: đưa dữ liệu vào AWS thì dễ và rẻ, nhưng kéo nó ra (hoặc sang cloud khác) thì tốn. Với người làm kiến trúc, hệ quả thực dụng là: **giữ lưu lượng càng nhiều trong phạm vi AWS càng tốt**, và chỉ để phần nhỏ nhất thật sự cần thiết chảy ra ngoài.
+
+Nguyên tắc cuối cùng dẫn tới một đòn tối ưu quan trọng — đặt compute ngay cạnh dữ liệu của nó:
+
+<ExcalidrawDiagram
+  src="/aws-networking-costs-egress-minimization.excalidraw"
+  alt="So sánh hai kiến trúc: khi ứng dụng nằm on-premises, truy vấn 100 MB phải rời AWS nên egress cao; khi ứng dụng nằm trong AWS cạnh database, chỉ 50 KB kết quả rời AWS nên egress được tối thiểu hóa."
+/>
+
+Hãy tưởng tượng một ứng dụng cần truy vấn một database 100 MB rồi trả về cho người dùng một kết quả 50 KB. Nếu ứng dụng nằm **ngoài** AWS (ví dụ ở data center của công ty), thì cả 100 MB của truy vấn phải rời AWS để tới ứng dụng — egress khổng lồ. Nếu ứng dụng nằm **trong** AWS, ngay cạnh database, thì 100 MB chỉ chạy nội bộ (rẻ hoặc miễn phí), và chỉ có 50 KB kết quả là thực sự rời AWS. Cùng một nghiệp vụ, nhưng lượng egress chênh nhau 2000 lần. Đây là lý do nguyên tắc "đặt xử lý gần dữ liệu" vừa nhanh hơn (latency) vừa rẻ hơn (egress).
+
+---
+
+## 4. S3 và CloudFront: phục vụ nội dung ra internet sao cho rẻ
+
+Vì egress là chiều đắt nhất, mà phục vụ nội dung tĩnh (ảnh, video, file tải về) ra internet lại chính là một bài toán egress thuần túy, nên cặp **S3 và CloudFront** xuất hiện rất nhiều trong đề. Đây là các con số minh họa cho region Mỹ:
+
+<ExcalidrawDiagram
+  src="/aws-networking-costs-s3-data-transfer.excalidraw"
+  alt="Giá data transfer của S3: vào S3 miễn phí, S3 ra internet 0.09 đô mỗi GB, S3 sang CloudFront 0.00 đô, CloudFront ra internet 0.085 đô, Transfer Acceleration cộng thêm 0.04 đến 0.08 đô, Cross-Region Replication 0.02 đô mỗi GB."
+/>
+
+- **Đưa dữ liệu vào S3 (ingress): miễn phí.** Đúng quy luật vàng.
+- **S3 ra thẳng internet: ~$0.09/GB.** Bằng giá egress chuẩn.
+- **S3 sang CloudFront: $0.00/GB.** Đây là điểm mấu chốt. <Tooltip content="Amazon CloudFront — mạng phân phối nội dung (CDN) của AWS, cache nội dung tại hàng trăm edge location gần người dùng">CloudFront</Tooltip> kéo dữ liệu gốc từ S3 (gọi là <Tooltip content="Origin fetch / origin pull — lần CloudFront đi lấy bản gốc từ origin khi cache chưa có">origin fetch</Tooltip>) hoàn toàn miễn phí. Bạn không trả đồng nào cho chặng từ S3 tới CloudFront.
+- **CloudFront ra internet: ~$0.085/GB.** Nhỉnh hơn rẻ một chút so với S3 ra thẳng, lại có 1 TB egress miễn phí mỗi tháng ở gói thông thường.
+
+Cộng dồn lại, phục vụ qua CloudFront thắng S3-trực-tiếp ở cả ba mặt: chặng origin miễn phí, giá egress rẻ hơn, và nhờ **cache tại edge** nên phần lớn request không chạm tới S3 nữa — vừa giảm latency, vừa cắt luôn chi phí request của S3 (CloudFront rẻ hơn nhiều lần ở khoản số lượng request). Vì vậy, hễ đề hỏi "phục vụ nội dung tĩnh ra toàn cầu sao cho rẻ và nhanh", đáp án gần như luôn là **đặt CloudFront trước S3**.
+
+Hai khoản còn lại trên hình cũng hay bị hỏi:
+
+- **S3 Transfer Acceleration:** tăng tốc upload/download đường dài bằng cách đi qua mạng biên của AWS. Nhanh hơn đáng kể, nhưng tính **thêm** $0.04–0.08/GB **trên nền** giá data transfer thường. Dùng khi tốc độ đáng giá hơn tiền, không phải để tiết kiệm.
+- **S3 Cross-Region Replication (CRR):** tự động nhân bản object sang bucket ở region khác. Vì là lưu lượng inter-region nên tốn ~$0.02/GB cho phần data transfer (chưa kể phí lưu trữ ở region đích).
+
+Một mẹo nhớ chung cho S3 trong cùng một region: EC2 và S3 **cùng region** trao đổi với nhau thì phần data transfer là **miễn phí**. Tiền chỉ phát sinh khi đi ra internet hoặc đi sang region khác.
+
+---
+
+## 5. NAT Gateway và Gateway Endpoint: cái bẫy chi phí kinh điển
+
+Nếu chỉ được nhớ một tình huống tối ưu chi phí networking cho phòng thi, hãy nhớ tình huống này. Nó gài đúng vào chỗ "trả tiền cho cả hai nhóm phí" đã nói ở mục 1.
+
+Bối cảnh: bạn có EC2 nằm trong <Tooltip content="Subnet không có đường ra internet trực tiếp — không định tuyến tới Internet Gateway">private subnet</Tooltip> và cần gọi tới S3. Có hai cách đi, giá khác nhau một trời một vực:
+
+<ExcalidrawDiagram
+  src="/aws-networking-costs-nat-vs-endpoint.excalidraw"
+  alt="So sánh chi phí truy cập S3 từ private subnet: đường qua NAT Gateway tính 0.045 đô mỗi giờ cộng 0.045 đô mỗi GB xử lý cộng data transfer; đường qua Gateway Endpoint hoàn toàn miễn phí cho S3 cùng region."
+/>
+
+**Đường 1 — qua NAT Gateway.** **NAT Gateway** là dịch vụ quản lý cho phép tài nguyên trong private subnet đi ra internet (hoặc tới dịch vụ AWS công cộng như S3) mà không nhận kết nối ngược vào. Lưu lượng đi EC2 tới NAT Gateway, ra Internet Gateway, rồi tới S3. Vấn đề là NAT Gateway tính tiền theo hai khoản:
+
+- **~$0.045 mỗi giờ** chỉ để tồn tại (provisioned là tính tiền).
+- **~$0.045 mỗi GB** xử lý qua nó.
+
+Nghĩa là mỗi GB bạn kéo từ S3 qua NAT Gateway mất ~$0.045 phí xử lý — kể cả khi S3 nằm **cùng region** và phần data transfer thực ra là $0.00. Bạn đang trả phí cho "cái hộp" NAT một cách không cần thiết. (Nếu S3 ở region khác, bạn còn cộng thêm ~$0.09/GB egress nữa.)
+
+**Đường 2 — qua Gateway Endpoint.** **Gateway Endpoint** là một loại <Tooltip content="VPC Endpoint — cổng riêng để tài nguyên trong VPC truy cập dịch vụ AWS mà không cần đi ra internet">VPC Endpoint</Tooltip> dành riêng cho **S3 và DynamoDB**. Nó thêm một tuyến (route) trong route table để lưu lượng tới S3/DynamoDB đi thẳng qua mạng nội bộ của AWS, không chạm NAT cũng không chạm Internet Gateway. Và điểm vàng: **Gateway Endpoint hoàn toàn miễn phí** — không phí theo giờ, không phí xử lý theo GB.
+
+Vậy nên với lưu lượng S3/DynamoDB từ trong VPC, Gateway Endpoint thắng tuyệt đối: bỏ được phí xử lý của NAT, lại đi nhanh hơn và an toàn hơn (không phơi ra internet). Quy tắc thi: **"giảm chi phí NAT Gateway khi truy cập S3 hoặc DynamoDB" thì nghĩ ngay tới Gateway Endpoint.**
+
+Cần phân biệt với người anh em của nó: **Interface Endpoint** (chạy trên nền <Tooltip content="AWS PrivateLink — công nghệ phơi một dịch vụ ra VPC khác một cách riêng tư qua Elastic Network Interface, không qua internet">PrivateLink</Tooltip>) dùng cho **hầu hết các dịch vụ AWS khác** (không phải S3/DynamoDB), và nó **có tính tiền** — cả phí theo giờ mỗi AZ lẫn phí xử lý mỗi GB. Đề rất hay đánh tráo: nếu là S3/DynamoDB và muốn miễn phí thì Gateway Endpoint; nếu là dịch vụ khác (hoặc cần truy cập từ on-premises) thì Interface Endpoint và chấp nhận trả phí.
+
+Nhân tiện, về bản thân NAT: nếu bài toán là cắt chi phí NAT cho lưu lượng internet thông thường (không phải S3/DynamoDB), thì lựa chọn là cân nhắc **NAT Instance** (một EC2 tự dựng làm NAT) cho khối lượng nhỏ — rẻ hơn ở phí cố định nhưng phải tự quản lý và không co giãn tốt. Chi tiết đánh đổi giữa hai loại này nằm ở bài [NAT Instance và NAT Gateway](/vi/posts/nat-instance-vs-nat-gateway).
+
+---
+
+## 6. Phí của các "cái hộp" networking còn lại
+
+Mục 5 mới đụng tới NAT Gateway và Endpoint. Để đủ cho phòng thi, đây là bảng tổng hợp cấu trúc giá của toàn bộ các thành phần networking hay gặp. Mẫu số chung: gần như cái nào cũng có **phí theo giờ** (thuê cái hộp) cộng **phí theo GB** (lưu lượng đi qua). Cái nào miễn phí thì rất đáng nhớ vì đó thường là đáp án tối ưu.
+
+| Thành phần                           | Phí cố định (theo giờ)                                                                                                                                                           | Phí theo GB                                                                                                                                                        | Ghi nhớ cho thi                                                |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| **Gateway Endpoint**                 | Không                                                                                                                                                                            | Không                                                                                                                                                              | **Miễn phí** — luôn ưu tiên cho S3/DynamoDB                    |
+| **VPC Peering**                      | Không                                                                                                                                                                            | Theo data transfer thường (same-AZ miễn phí)                                                                                                                       | Rẻ cho ít VPC; không bắc cầu, không trùng CIDR                 |
+| **Interface Endpoint / PrivateLink** | ~$0.01/giờ mỗi AZ                                                                                                                                                                | ~$0.01/GB xử lý                                                                                                                                                    | Cho dịch vụ khác S3/DynamoDB; có tính tiền                     |
+| **NAT Gateway**                      | ~$0.045/giờ                                                                                                                                                                      | ~$0.045/GB xử lý + data transfer                                                                                                                                   | Đắt; tránh cho S3/DynamoDB bằng Gateway Endpoint               |
+| **Transit Gateway**                  | ~$0.05/giờ mỗi attachment                                                                                                                                                        | ~$0.02/GB xử lý                                                                                                                                                    | Cho hàng chục/trăm VPC; đắt hơn peering nhưng dễ quản lý       |
+| **Site-to-Site VPN**                 | ~$0.05/giờ mỗi kết nối                                                                                                                                                           | Theo data transfer thường                                                                                                                                          | Nối on-premises qua internet, mã hóa, dựng nhanh               |
+| **Direct Connect**                   | Phí cổng (port-hour) theo băng thông                                                                                                                                             | <Tooltip content="Data Transfer Out — lưu lượng đi ra qua Direct Connect">DTO</Tooltip> ~$0.02/GB (rẻ hơn nhiều egress)                                            | Đường riêng, ổn định; rẻ cho khối lượng lớn, đều đặn           |
+| **Global Accelerator**               | ~$0.025/giờ mỗi accelerator                                                                                                                                                      | <Tooltip content="Data Transfer-Premium — phụ phí cho lưu lượng đi qua mạng xương sống của AWS, tính theo cặp region và edge">DT-Premium</Tooltip> theo cặp region | Phụ phí nằm trên giá egress thường; tính theo chiều áp đảo     |
+| **Public IPv4 address**              | ~$0.005/giờ mỗi địa chỉ                                                                                                                                                          | —                                                                                                                                                                  | Tính cho **mọi** IPv4 public, kể cả EIP đang dùng (từ 02/2024) |
+| **Elastic / Application LB**         | Phí giờ + theo <Tooltip content="Load Balancer Capacity Unit — đơn vị đo dung lượng LB gồm số kết nối, lưu lượng, số rule... bạn trả theo chiều tiêu thụ cao nhất">LCU</Tooltip> | Gộp trong LCU                                                                                                                                                      | LCU đã gồm cả xử lý dữ liệu                                    |
+
+Vài điểm dễ thành câu hỏi:
+
+- **Direct Connect rẻ ở phần mỗi GB.** **Direct Connect** là đường cáp riêng nối thẳng on-premises vào AWS, không qua internet. Phần data transfer ra (DTO) chỉ ~$0.02/GB so với ~$0.09/GB của internet egress. Vì vậy với khối lượng lớn và đều đặn, Direct Connect không chỉ ổn định và bảo mật hơn mà còn **rẻ hơn** — bù lại phí cổng cố định, nên phải đủ lưu lượng mới hòa vốn.
+- **Transit Gateway tính tiền theo attachment.** **Transit Gateway** là trung tâm định tuyến nối nhiều VPC và mạng on-premises. Mỗi thứ cắm vào nó (mỗi <Tooltip content="Attachment — một kết nối từ VPC, VPN hoặc Direct Connect vào Transit Gateway">attachment</Tooltip>) tính phí theo giờ, cộng ~$0.02/GB lưu lượng xử lý. Với vài VPC thì **VPC Peering** (không phí cố định) thường rẻ hơn; nhưng khi số VPC lớn hoặc cần định tuyến bắc cầu, Transit Gateway thắng về vận hành dù tốn phí attachment.
+- **Public IPv4 giờ tốn tiền — kể cả khi đang dùng.** Từ tháng 2/2024, AWS tính ~$0.005/giờ (cỡ $3.6/tháng) cho **mỗi** địa chỉ IPv4 public, bất kể nó có gắn vào tài nguyên hay không — khác hẳn quy tắc cũ chỉ tính Elastic IP khi để không. Ngoại lệ: IP bạn tự mang lên qua <Tooltip content="Bring Your Own IP — mang dải IP của chính bạn lên AWS">BYOIP</Tooltip> thì không bị tính. Đây là lý do dọn bớt IPv4 public không dùng (và chuyển sang IPv6) trở thành một đòn tối ưu mới.
+
+---
+
+## 7. Tổng hợp cho phòng thi
+
+Những tình huống "giảm chi phí" hay gặp và chốt nhanh cho từng cái — ghim lại trước khi vào phòng thi:
+
+| Tình huống                                             | Chốt nhanh                                                                    |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| Hai EC2 trong cùng VPC nói chuyện với nhau             | Dùng **private IP** (không dùng public/Elastic IP) — rẻ và nhanh hơn          |
+| Muốn chi phí thấp nhất tuyệt đối cho lưu lượng nội bộ  | Gom về **cùng một AZ** (đánh đổi: mất HA)                                     |
+| Private subnet cần truy cập **S3 / DynamoDB** rẻ nhất  | **Gateway Endpoint** (miễn phí), thay vì đẩy qua NAT Gateway                  |
+| Cần truy cập riêng tư dịch vụ AWS **khác** S3/DynamoDB | **Interface Endpoint / PrivateLink** (có tính phí)                            |
+| Phục vụ nội dung tĩnh ra internet, rẻ và nhanh         | **CloudFront** trước S3 (origin pull miễn phí, egress rẻ hơn, cache)          |
+| Giảm egress khi xử lý dữ liệu lớn                      | Đặt **compute ngay cạnh dữ liệu**, chỉ để kết quả nhỏ rời AWS                 |
+| Truyền khối lượng lớn, đều đặn với on-premises, giá rẻ | **Direct Connect** (DTO ~$0.02/GB), không qua internet                        |
+| Nối vài VPC với chi phí thấp                           | **VPC Peering** (không phí cố định)                                           |
+| Nối hàng chục/trăm VPC, cần định tuyến tập trung       | **Transit Gateway** (chấp nhận phí attachment + xử lý)                        |
+| Hóa đơn có dòng "Public IPv4 address" lạ               | Mỗi IPv4 public ~$3.6/tháng — dọn IP không dùng, cân nhắc IPv6                |
+| Câu hỏi chỉ nói "giảm chi phí data transfer"           | Cùng AZ + private IP; Gateway Endpoint; CloudFront cho egress; DX cho on-prem |
+
+Và nếu quên hết mọi con số, chỉ cần giữ lại một câu: **ingress miễn phí, egress tốn tiền; càng giữ lưu lượng gần nhau và trong AWS thì càng rẻ.**
+
+---
+
+## Kết: cùng một byte, nhưng đường đi quyết định hóa đơn
+
+Quay lại hóa đơn cuối tháng với dòng Data Transfer và NAT Gateway phình to. Giờ bạn có bản đồ để đọc nó:
+
+- Dòng **NAT Gateway** cao? Khả năng lớn là lưu lượng S3/DynamoDB đang đi vòng qua NAT thay vì qua Gateway Endpoint miễn phí.
+- Dòng **Data Transfer** cao? Soi xem có egress ra internet không cần thiết không (phục vụ trực tiếp từ S3 thay vì CloudFront), có lưu lượng cross-AZ do trải HA, hay có ai đó đang dùng public IP cho lưu lượng lẽ ra nên đi private.
+
+Những điều cần mang theo vào phòng thi:
+
+- **Chi phí networking nằm ở "đường đi", không phải "khối lượng".** Cùng một GB: cùng AZ + private IP thì miễn phí; cross-AZ ~$0.01–0.02; inter-region ~$0.02; ra internet ~$0.09.
+- **Ingress miễn phí, egress là chiều đắt nhất.** Mọi đòn tối ưu đều xoay quanh việc giảm egress: giữ lưu lượng trong AWS, đặt compute cạnh dữ liệu, dùng CloudFront để phục vụ ra ngoài.
+- **Gateway Endpoint (S3/DynamoDB) là miễn phí** — đây là đáp án kinh điển cho bài toán "giảm chi phí NAT". Interface Endpoint cho dịch vụ khác thì có tính phí.
+- **Mỗi "cái hộp" networking có phí thuê theo giờ cộng phí theo GB.** NAT Gateway, Interface Endpoint, Transit Gateway, VPN, Global Accelerator đều thế; Gateway Endpoint và VPC Peering thì không có phí thuê cố định.
+- **Direct Connect rẻ trên mỗi GB** (DTO ~$0.02) nên hợp với khối lượng lớn đều đặn; **public IPv4 nay tốn tiền** kể cả khi đang dùng (từ 02/2024).
+
+Không cần thuộc lòng bảng giá — giá sẽ đổi. Hãy thuộc cái bậc thang đắt-rẻ và quy luật vào-ra. Khi đề đưa ra một tình huống và bốn phương án "nghe đều đúng", chính cái bản đồ này sẽ cho bạn biết byte đang chảy qua đâu, và ai là người trả tiền.

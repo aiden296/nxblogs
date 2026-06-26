@@ -100,6 +100,16 @@ Global Accelerator cho phép bạn phân phối traffic giữa nhiều Region th
 - **Gradual migration**: dần dần chuyển traffic từ Region cũ sang Region mới
 - **Blue-green deployment**: chuyển traffic giữa hai phiên bản bằng cách điều chỉnh weight
 
+### 2.5. Tăng tốc thiết lập kết nối — TCP termination tại Edge
+
+Một kết nối TCP chỉ gửi được byte dữ liệu đầu tiên sau khi client và endpoint hoàn tất <Tooltip content="Bắt tay ba bước SYN, SYN-ACK, ACK để thiết lập một kết nối TCP">three-way handshake</Tooltip>. Nếu endpoint nằm ở Region xa, mỗi bước bắt tay phải đi trọn một vòng trên internet công cộng, nên riêng pha thiết lập kết nối đã chậm trước cả khi truyền dữ liệu. Đây là lý do người dùng ở xa thường thấy lúc mở kết nối ban đầu rất lâu, dù sau đó truyền dữ liệu vẫn ổn.
+
+Global Accelerator giải quyết bằng kỹ thuật **TCP termination tại Edge**: client hoàn tất bắt tay TCP ngay với Edge Location gần nhất, gần như cùng lúc Global Accelerator mở một kết nối TCP thứ hai từ Edge đến endpoint và chạy trên backbone. Client nhận phản hồi từ Edge ở sát bên thay vì chờ trọn vòng đến tận Region, nhờ đó thời gian thiết lập kết nối giảm đáng kể.
+
+AWS đo ở <Tooltip content="Phân vị thứ 90 — 90% số phép đo có giá trị thấp hơn mức này">p90</Tooltip> bằng công cụ đo từ người dùng thật: <Tooltip content="First byte latency — thời gian khứ hồi để một packet đi từ client đến endpoint rồi quay lại">first byte latency</Tooltip> giảm tới 49%, jitter giảm tới 58%, và throughput tăng tới 60%. Với ứng dụng nhạy cảm ở pha mở phiên như video conferencing hay real-time API, đây là khác biệt cảm nhận được ngay.
+
+Đây cũng là chỗ **Route 53 latency-based routing** thua kém. Latency routing chỉ chọn Region có độ trễ thấp nhất ở tầng DNS: nó trả về IP của endpoint gần nhất, nhưng sau đó packet vẫn tự đi trên internet công cộng đến Region đó. Nó không rút ngắn pha bắt tay, không đưa traffic vào backbone, và vẫn dính các điểm yếu của DNS là cache, TTL và failover chậm. Global Accelerator vừa chọn endpoint khỏe gần nhất vừa tăng tốc chính đường đi của dữ liệu, nên với tình huống giảm latency toàn cầu cho TCP/UDP mà vẫn giữ nguyên hạ tầng NLB/EC2 sẵn có, Global Accelerator là lựa chọn đúng còn latency routing là bẫy.
+
 ---
 
 ## 3. Các use case thực tế
@@ -192,7 +202,19 @@ Khi bạn đặt CloudFront phía trước ALB cho một dynamic API không cầ
 
 ---
 
-## 5. Kết luận
+## 5. Hai loại accelerator: Standard và Custom Routing
+
+Global Accelerator có hai loại, và đề thi SAA thường nói rõ "standard accelerator" để bạn phân biệt với loại còn lại.
+
+**Standard accelerator** là loại mặc định, cũng là loại mà toàn bộ bài viết này mô tả. Endpoint là NLB, ALB, EC2 hoặc Elastic IP. Global Accelerator định tuyến mỗi client đến endpoint tối ưu dựa trên vị trí người dùng, kết quả health check và weight bạn cấu hình; khi một endpoint không healthy, traffic tự chuyển sang endpoint khỏe khác trong vài giây. Đây là loại dùng cho hầu hết bài toán giảm latency toàn cầu và multi-Region failover.
+
+**Custom Routing accelerator** giải một bài toán khác: ghim một client đến đúng một EC2 instance và port cụ thể bên trong một VPC subnet, dựa trên cặp Anycast IP và listener port mà client kết nối tới. Endpoint ở đây là VPC subnet chứa các EC2 instance, không phải load balancer. Điểm phải nhớ: Custom Routing không health-check và không failover — định tuyến là tất định, traffic luôn tới đúng instance đã ánh xạ bất kể nó còn khỏe hay không. Loại này hợp với ứng dụng cần tự quyết định user này phải vào đúng server kia, ví dụ VoIP gán nhiều người gọi vào một media server, hoặc game real-time gán nhiều người chơi vào cùng một session trên một game server.
+
+**Mẹo thi**: đề nói định tuyến toàn cầu, giảm latency, failover sang NLB/ALB/EC2 thì chọn Standard accelerator; chỉ khi đề nhấn vào việc gán client đến đúng một instance/port cụ thể cho gaming session hay VoIP mới là Custom Routing.
+
+---
+
+## 6. Kết luận
 
 **Global Accelerator** là đúng tool khi bạn cần **mang traffic về origin nhanh hơn** mà không can thiệp vào request. Nó transparent, giữ nguyên client IP, không cache, không parse, không timeout.
 

@@ -1,0 +1,212 @@
+---
+title: 'AWS Networking Costs: Same Byte, Free Here and Billed There — A Cost Map for the SAA Exam'
+date: '2026-06-25'
+tags: ['Devops', 'AWS', 'SAA', 'Exam Prep']
+description: 'An overview of AWS networking costs for the SAA exam — the data transfer rules by direction and distance (ingress/egress, same-AZ, cross-AZ, cross-region), internet egress, NAT Gateway vs Gateway Endpoint, S3 and CloudFront, plus the pricing of Transit Gateway, Direct Connect, PrivateLink, Global Accelerator and public IPv4. Remember the cheap-to-expensive ladder and the classic optimization moves.'
+enableComment: true
+---
+
+# AWS Networking Costs: Same Byte, Free Here and Billed There — A Cost Map for the SAA Exam
+
+End of the month, the AWS bill arrives. Compute and storage you could predict. But two lines have ballooned beyond expectation: **Data Transfer** and **NAT Gateway** — even though you didn't spin up a single new server all week.
+
+You open Cost Explorer and start getting confused. Two services talk to each other all day long, so why does this pair get billed while that one doesn't? An EC2 instance pulls data from S3 — sometimes $0.00, sometimes a few cents per GB. It's all "move one GB," yet the bill comes out wildly different.
+
+The root of it: on AWS, **which road the byte takes matters more than how big the byte is**. Take the same gigabyte — if it stays put within one <Tooltip content="Availability Zone — one (or a few) independent data centers within a region, each with its own power and networking">Availability Zone</Tooltip> and uses an internal IP, it's free; if it hops to another AZ, it costs a little; and if it leaves AWS for the internet, that's the most expensive direction of all. Without this "map," you both burn money by accident and lose points on the cost-optimization questions — a category that shows up steadily on the SAA exam.
+
+This post is that map. We'll start from the foundational rule of data transfer (direction and distance), move to internet egress, then to the two classic pairs the exam loves (NAT Gateway vs Gateway Endpoint; S3 vs CloudFront), and finish by summarizing the pricing of every other networking "box." The goal isn't to memorize exact numbers — prices change by region and over time — but to remember the **cheap-to-expensive ladder** and the principles you can reason from in the exam room.
+
+<ExcalidrawDiagram
+  src="/aws-networking-costs-overview.excalidraw"
+  alt="AWS networking cost map per GB: inbound traffic is free, same-AZ over private IP is free, cross-AZ is roughly $0.01 to $0.02 per GB, cross-region is roughly $0.02, and out to the internet is roughly $0.09."
+/>
+
+> **Note:** This is an overview meant to build a mental model and quick reflexes for the exam. It focuses on networking; if you want the broader picture of the tools for tracking and optimizing the bill (Cost Explorer, Budgets, Savings Plans, and so on), read [AWS Cost Management: A Complete Map of Services to Track, Control, and Optimize Spend](/en/posts/aws-cost-management-overview). For the connectivity services themselves (VPN, Direct Connect, Transit Gateway, Endpoints), see [AWS VPC Networking](/en/posts/aws-vpc-networking-overview).
+
+---
+
+## 1. Two kinds of cost: moving the data and running the "box"
+
+Every networking cost on AWS falls into exactly two groups:
+
+1. **Data transfer (per GB):** the money for the **movement** of data itself, from point A to point B. Cheap or expensive depends on where A and B sit relative to each other (same AZ, different AZ, different region, or out to the internet).
+2. **Networking infrastructure fees (per hour, plus per GB processed):** the money for **running** the network "boxes" you stand up — NAT Gateway, Interface Endpoint, Transit Gateway, VPN, Direct Connect, Global Accelerator. Each box usually has a fixed hourly rental fee (provisioned means billed, whether traffic flows or not), plus a processing charge for every GB that passes through it.
+
+A high networking bill is almost always the sum of these two groups.
+
+And here's the trap: often you pay for **both** without realizing it — for example, pulling S3 data through a NAT Gateway costs you NAT's processing fee (group 2) and data transfer (group 1), when there's another route that's free on both. We'll meet exactly this situation again in section 5.
+
+Running through both groups is one golden rule, worth memorizing:
+
+- **Inbound traffic (ingress)** — from the internet into AWS — is almost always **free**.
+- **Outbound traffic (egress)** — from AWS out to the internet — is the **most expensive** direction.
+
+The two words <Tooltip content="Ingress = traffic coming into AWS; egress = traffic leaving AWS. These are named from AWS's point of view, not the application's">ingress and egress</Tooltip> will keep showing up through the rest of this post. Remember: easy in, costly out. AWS charges almost nothing for data to flow in, but charges when it flows out — and that's why every networking cost optimization revolves around **reducing egress traffic**.
+
+---
+
+## 2. The foundational rule: cost by direction and distance
+
+This is the heart of the networking-cost questions on the SAA exam. The per-GB cost of data transfer depends on two axes:
+
+- **Direction:** going in or going out.
+- **Distance / scope:** how far apart the two ends are — same AZ, different AZ within a region, different region, or fully out to the internet.
+
+Put the two axes together and you get a "cost ladder" from cheapest to most expensive.
+
+| Traffic                                                  | Cost per GB (approx.) | Remember                                              |
+| -------------------------------------------------------- | --------------------- | ----------------------------------------------------- |
+| Inbound from the internet (ingress)                      | **$0.00**             | Always free                                           |
+| Same AZ, using a **private IP**                          | **$0.00**             | Cheapest — make the most of it                        |
+| Different AZ in the same region, **private IP**          | **~$0.01** each way   | A small fee both inbound and outbound                 |
+| Different AZ, or going through a **public / Elastic IP** | **~$0.02**            | Using a public IP for internal traffic is penalized   |
+| Different region (inter-region)                          | **~$0.02**            | Depends on the region pair                            |
+| Outbound to the internet (egress)                        | **~$0.09**            | The most expensive, with volume tiers that taper down |
+
+Two important things to read out of this table:
+
+**A private IP is almost always cheaper than a public IP.** When two EC2 instances in the same VPC talk to each other, using a <Tooltip content="An internal VPC address, e.g. 10.0.x.x — only routable inside AWS">private IP</Tooltip> keeps the traffic on AWS's internal path; if you (accidentally) use a public IP or an <Tooltip content="Elastic IP — a static public IPv4 address you hold onto and attach to a resource">Elastic IP</Tooltip>, the traffic gets pushed out to the network edge and loops back, gets charged at a higher rate, and is slower on top of that.
+
+**Same AZ is the cheapest, but trades off availability.** Cramming everything into one AZ means that when that AZ dies, the whole thing dies with it — you lose <Tooltip content="High Availability — fault tolerance that keeps the system running when one component fails">HA</Tooltip>. This is exactly the trade-off the exam likes to set up: "optimize for cost" pulls everything into one AZ, while "optimize for availability" spreads across multiple AZs and accepts the cross-AZ fee. Most real architectures choose multi-AZ and treat the cross-AZ fee as the price of HA.
+
+One thing candidates often forget: the cross-AZ fee is charged in **both directions**. If the docs say "$0.01/GB for data transfer in" and "$0.01/GB for data transfer out" between two AZs, then a round trip costs about $0.02/GB, not $0.01.
+
+---
+
+## 3. Internet egress: the most expensive direction, and why it shocks people
+
+Egress to the internet is the priciest item, so it's worth a closer look. Three things to remember:
+
+**The price is tiered, tapering down with volume.** Around $0.09/GB for the first 10 TB each month, then cheaper from there ($0.085/GB in the 10–50 TB band, down to around $0.05–0.07/GB at hundreds of TB). You don't need to memorize each threshold; just know it's a **descending ladder** — the more you push out, the cheaper per GB — but the total bill is still large.
+
+**There's 100 GB free per month.** AWS gives you 100 GB of egress to the internet each month, pooled across most services and regions (since late 2021, replacing the scattered per-service 1 GB allowance of the past). For a small system this allowance covers nearly the whole data transfer bill; for a large one it's a grain of sand.
+
+**Free to come in, costly to go out.** This asymmetry isn't an accident. It creates what's called <Tooltip content="Data gravity — the larger a dataset grows, the more it pulls compute and services toward it, and the harder/costlier it is to move it elsewhere">data gravity</Tooltip>: getting data into AWS is easy and cheap, but pulling it back out (or over to another cloud) is costly. For an architect, the practical takeaway is: **keep as much traffic within AWS as possible**, and let only the smallest truly necessary slice flow outward.
+
+That last principle leads to an important optimization — put compute right next to its data:
+
+<ExcalidrawDiagram
+  src="/aws-networking-costs-egress-minimization.excalidraw"
+  alt="Two architectures compared: when the application sits on-premises, a 100 MB query must leave AWS so egress is high; when the application runs inside AWS next to the database, only the 50 KB result leaves AWS so egress is minimized."
+/>
+
+Imagine an application that needs to query a 100 MB database and then return a 50 KB result to the user. If the application sits **outside** AWS (say, in the company's data center), all 100 MB of the query has to leave AWS to reach the application — a huge egress. If the application sits **inside** AWS, right next to the database, then the 100 MB stays internal (cheap or free), and only the 50 KB result actually leaves AWS. Same workload, but the egress differs by a factor of 2000. That's why "put the processing close to the data" is both faster (latency) and cheaper (egress).
+
+---
+
+## 4. S3 and CloudFront: serving content to the internet cheaply
+
+Because egress is the most expensive direction, and serving static content (images, videos, downloadable files) to the internet is a pure egress problem, the **S3 and CloudFront** pair shows up a lot on the exam. Here are illustrative numbers for the US region:
+
+<ExcalidrawDiagram
+  src="/aws-networking-costs-s3-data-transfer.excalidraw"
+  alt="S3 data transfer pricing: into S3 is free, S3 out to the internet is $0.09 per GB, S3 to CloudFront is $0.00, CloudFront out to the internet is $0.085, Transfer Acceleration adds $0.04 to $0.08, and Cross-Region Replication is $0.02 per GB."
+/>
+
+- **Getting data into S3 (ingress): free.** Per the golden rule.
+- **S3 straight out to the internet: ~$0.09/GB.** The standard egress price.
+- **S3 to CloudFront: $0.00/GB.** This is the crux. <Tooltip content="Amazon CloudFront — AWS's content delivery network (CDN), caching content at hundreds of edge locations near users">CloudFront</Tooltip> pulling the original data from S3 (called an <Tooltip content="Origin fetch / origin pull — when CloudFront retrieves the original from the origin on a cache miss">origin fetch</Tooltip>) is completely free. You pay nothing for the S3-to-CloudFront leg.
+- **CloudFront out to the internet: ~$0.085/GB.** A touch cheaper than S3 directly, plus there's 1 TB of egress free per month on the standard plan.
+
+Add it up and serving through CloudFront beats S3-direct on all three fronts: the origin leg is free, egress is cheaper, and because of **edge caching** most requests never reach S3 again — cutting latency and also slashing S3 request costs (CloudFront is many times cheaper on request volume). So whenever the exam asks "serve static content globally, cheaply and quickly," the answer is almost always **put CloudFront in front of S3**.
+
+The two remaining items on the diagram also get asked about:
+
+- **S3 Transfer Acceleration:** speeds up long-distance uploads/downloads by routing through AWS's edge network. Noticeably faster, but it charges an **extra** $0.04–0.08/GB **on top of** the normal data transfer price. Use it when speed is worth more than money, not to save money.
+- **S3 Cross-Region Replication (CRR):** automatically replicates objects to a bucket in another region. Because it's inter-region traffic, it costs ~$0.02/GB for the data transfer portion (on top of storage cost at the destination region).
+
+One general mnemonic for S3 within a single region: EC2 and S3 in the **same region** exchanging data is **free** for the data transfer portion. The money only starts when traffic goes out to the internet or over to another region.
+
+---
+
+## 5. NAT Gateway and Gateway Endpoint: the classic cost trap
+
+If you only remember one networking cost-optimization scenario for the exam, remember this one. It plants itself right on the "paying for both fee groups" point from section 1.
+
+The setup: you have an EC2 instance in a <Tooltip content="A subnet with no direct route to the internet — no route to an Internet Gateway">private subnet</Tooltip> that needs to call S3. There are two routes, and the prices are worlds apart:
+
+<ExcalidrawDiagram
+  src="/aws-networking-costs-nat-vs-endpoint.excalidraw"
+  alt="Cost of reaching S3 from a private subnet compared: the NAT Gateway path costs $0.045 per hour plus $0.045 per GB processed plus data transfer; the Gateway Endpoint path is entirely free for same-Region S3."
+/>
+
+**Route 1 — through a NAT Gateway.** A **NAT Gateway** is a managed service that lets resources in a private subnet reach out to the internet (or to public AWS services like S3) without accepting inbound connections back. Traffic goes from EC2 to the NAT Gateway, out the Internet Gateway, then to S3. The problem is that the NAT Gateway charges on two counts:
+
+- **~$0.045 per hour** just to exist (provisioned means billed).
+- **~$0.045 per GB** processed through it.
+
+That means every GB you pull from S3 through the NAT Gateway costs ~$0.045 in processing — even when S3 is in the **same region** and the data transfer portion is actually $0.00. You're paying for the NAT "box" needlessly. (If S3 is in another region, you also add the ~$0.09/GB egress.)
+
+**Route 2 — through a Gateway Endpoint.** A **Gateway Endpoint** is a type of <Tooltip content="VPC Endpoint — a private doorway for resources in a VPC to reach AWS services without going out to the internet">VPC Endpoint</Tooltip> dedicated to **S3 and DynamoDB**. It adds a route in the route table so that traffic to S3/DynamoDB goes straight over AWS's internal network, touching neither the NAT nor the Internet Gateway. And the golden point: **the Gateway Endpoint is completely free** — no hourly fee, no per-GB processing fee.
+
+So for S3/DynamoDB traffic from inside a VPC, the Gateway Endpoint wins outright: it drops NAT's processing fee, and it's faster and safer too (nothing exposed to the internet). Exam rule: **"reduce NAT Gateway cost when accessing S3 or DynamoDB" should make you think Gateway Endpoint immediately.**
+
+Don't confuse it with its sibling: the **Interface Endpoint** (running on <Tooltip content="AWS PrivateLink — technology that exposes a service to other VPCs privately through an Elastic Network Interface, never over the internet">PrivateLink</Tooltip>) is for **most other AWS services** (not S3/DynamoDB), and it **does cost money** — both an hourly fee per AZ and a per-GB processing fee. The exam loves the bait-and-switch: if it's S3/DynamoDB and you want free, it's a Gateway Endpoint; if it's another service (or you need access from on-premises), it's an Interface Endpoint and you accept the fee.
+
+While we're on NAT itself: if the problem is cutting NAT cost for ordinary internet traffic (not S3/DynamoDB), the option is to consider a **NAT Instance** (an EC2 you stand up as a NAT) for small volumes — cheaper on the fixed fee but you manage it yourself and it doesn't scale as well. The trade-offs between the two are detailed in [NAT Instance vs NAT Gateway](/en/posts/nat-instance-vs-nat-gateway).
+
+---
+
+## 6. The pricing of every other networking "box"
+
+Section 5 only touched NAT Gateway and Endpoint. To be complete for the exam, here's a summary of the pricing structure of all the networking components you'll commonly meet. The common denominator: nearly every one has an **hourly fee** (renting the box) plus a **per-GB fee** (traffic through it). The ones that are free are very much worth remembering, because they're usually the optimal answer.
+
+| Component                            | Fixed fee (per hour)                                                                                                                                                                                    | Per-GB fee                                                                                                                                                       | Remember for the exam                                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| **Gateway Endpoint**                 | None                                                                                                                                                                                                    | None                                                                                                                                                             | **Free** — always prefer it for S3/DynamoDB                                   |
+| **VPC Peering**                      | None                                                                                                                                                                                                    | Normal data transfer (same-AZ is free)                                                                                                                           | Cheap for a few VPCs; no transitive routing, no overlapping CIDR              |
+| **Interface Endpoint / PrivateLink** | ~$0.01/hr per AZ                                                                                                                                                                                        | ~$0.01/GB processed                                                                                                                                              | For services other than S3/DynamoDB; it costs money                           |
+| **NAT Gateway**                      | ~$0.045/hr                                                                                                                                                                                              | ~$0.045/GB processed + data transfer                                                                                                                             | Expensive; avoid it for S3/DynamoDB via a Gateway Endpoint                    |
+| **Transit Gateway**                  | ~$0.05/hr per attachment                                                                                                                                                                                | ~$0.02/GB processed                                                                                                                                              | For dozens/hundreds of VPCs; pricier than peering but easier to manage        |
+| **Site-to-Site VPN**                 | ~$0.05/hr per connection                                                                                                                                                                                | Normal data transfer                                                                                                                                             | Connects on-premises over the internet, encrypted, quick to set up            |
+| **Direct Connect**                   | Port-hour fee by bandwidth                                                                                                                                                                              | <Tooltip content="Data Transfer Out — outbound traffic over Direct Connect">DTO</Tooltip> ~$0.02/GB (much cheaper than egress)                                   | A private, stable line; cheap for large, steady volumes                       |
+| **Global Accelerator**               | ~$0.025/hr per accelerator                                                                                                                                                                              | <Tooltip content="Data Transfer-Premium — a surcharge for traffic crossing the AWS backbone, priced by region-and-edge pair">DT-Premium</Tooltip> by region pair | The surcharge sits on top of normal egress; charged on the dominant direction |
+| **Public IPv4 address**              | ~$0.005/hr per address                                                                                                                                                                                  | —                                                                                                                                                                | Charged for **every** public IPv4, including an in-use EIP (since 02/2024)    |
+| **Elastic / Application LB**         | Hourly fee + per <Tooltip content="Load Balancer Capacity Unit — a unit of LB capacity covering connections, bandwidth, and rule evaluations; you pay for whichever dimension is highest">LCU</Tooltip> | Included in the LCU                                                                                                                                              | The LCU already includes data processing                                      |
+
+A few points that easily become questions:
+
+- **Direct Connect is cheap on the per-GB part.** **Direct Connect** is a private cable running straight from on-premises into AWS, never over the internet. Its outbound data transfer (DTO) is only ~$0.02/GB versus ~$0.09/GB for internet egress. So for large, steady volumes Direct Connect isn't just more stable and more secure but also **cheaper** — offset by the fixed port fee, so you need enough traffic to break even.
+- **Transit Gateway bills per attachment.** A **Transit Gateway** is a routing hub that connects many VPCs and on-premises networks. Each thing plugged into it (each <Tooltip content="Attachment — a connection from a VPC, VPN, or Direct Connect into a Transit Gateway">attachment</Tooltip>) is charged hourly, plus ~$0.02/GB of traffic processed. For a few VPCs, **VPC Peering** (no fixed fee) is usually cheaper; but when the VPC count is large or you need transitive routing, the Transit Gateway wins on operations despite the attachment fee.
+- **Public IPv4 now costs money — even while in use.** Since February 2024, AWS charges ~$0.005/hr (about $3.6/month) for **every** public IPv4 address, whether or not it's attached to a resource — a sharp change from the old rule that only billed an Elastic IP while it sat idle. The exception: an IP you bring up yourself via <Tooltip content="Bring Your Own IP — bringing your own IP range into AWS">BYOIP</Tooltip> isn't charged. This is why cleaning up unused public IPv4 (and moving to IPv6) has become a new optimization move.
+
+---
+
+## 7. The exam-room cheat sheet
+
+The "reduce cost" scenarios you'll commonly meet, with the quick call for each — pin these before you walk into the exam:
+
+| Scenario                                                        | Quick call                                                                    |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Two EC2 instances in the same VPC talking to each other         | Use a **private IP** (not public/Elastic IP) — cheaper and faster             |
+| Want the absolute lowest cost for internal traffic              | Consolidate into the **same AZ** (trade-off: lose HA)                         |
+| A private subnet needs the cheapest access to **S3 / DynamoDB** | **Gateway Endpoint** (free), instead of pushing through a NAT Gateway         |
+| Need private access to AWS services **other than** S3/DynamoDB  | **Interface Endpoint / PrivateLink** (it costs money)                         |
+| Serve static content to the internet, cheap and fast            | **CloudFront** in front of S3 (free origin pull, cheaper egress, caching)     |
+| Reduce egress when processing large data                        | Put **compute right next to the data**, let only the small result leave AWS   |
+| Transfer large, steady volumes with on-premises, cheaply        | **Direct Connect** (DTO ~$0.02/GB), not over the internet                     |
+| Connect a few VPCs at low cost                                  | **VPC Peering** (no fixed fee)                                                |
+| Connect dozens/hundreds of VPCs, need centralized routing       | **Transit Gateway** (accept the attachment + processing fee)                  |
+| The bill has a strange "Public IPv4 address" line               | Each public IPv4 is ~$3.6/month — clean up unused IPs, consider IPv6          |
+| The question only says "reduce data transfer cost"              | Same AZ + private IP; Gateway Endpoint; CloudFront for egress; DX for on-prem |
+
+And if you forget every number, just hold onto one sentence: **ingress is free, egress costs money; the closer you keep traffic together and inside AWS, the cheaper it is.**
+
+---
+
+## Conclusion: same byte, but the route decides the bill
+
+Back to the end-of-month bill with its bloated Data Transfer and NAT Gateway lines. Now you have a map to read it:
+
+- High **NAT Gateway** line? Most likely S3/DynamoDB traffic is detouring through NAT instead of going over a free Gateway Endpoint.
+- High **Data Transfer** line? Check for unnecessary internet egress (serving directly from S3 instead of CloudFront), cross-AZ traffic from spreading for HA, or someone using a public IP for traffic that should have gone private.
+
+What to carry into the exam room:
+
+- **Networking cost lives in the "route," not the "volume."** Same GB: same AZ + private IP is free; cross-AZ ~$0.01–0.02; inter-region ~$0.02; out to the internet ~$0.09.
+- **Ingress is free, egress is the most expensive direction.** Every optimization revolves around reducing egress: keep traffic inside AWS, put compute next to the data, use CloudFront to serve outward.
+- **Gateway Endpoint (S3/DynamoDB) is free** — this is the classic answer to the "reduce NAT cost" problem. The Interface Endpoint for other services does cost money.
+- **Every networking "box" has an hourly rental fee plus a per-GB fee.** NAT Gateway, Interface Endpoint, Transit Gateway, VPN, Global Accelerator are all like this; Gateway Endpoint and VPC Peering have no fixed rental fee.
+- **Direct Connect is cheap per GB** (DTO ~$0.02), so it suits large steady volumes; **public IPv4 now costs money** even while in use (since 02/2024).
+
+You don't need to memorize the price list — prices will change. Memorize the cheap-to-expensive ladder and the in-versus-out rule. When the exam hands you a scenario and four options that all "sound right," this very map will tell you where the byte is flowing, and who's footing the bill.
