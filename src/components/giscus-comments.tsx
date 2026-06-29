@@ -13,7 +13,7 @@ const GiscusComments = ({ lang = 'vi' }: Props) => {
   return (
     <Giscus
       id="comments"
-      repo="aiden296/nxblogs"
+      repo="anhquang296/nxblogs"
       repoId="R_kgDOQ26JqQ"
       category="Announcements"
       categoryId="DIC_kwDOQ26Jqc4C0yiy"

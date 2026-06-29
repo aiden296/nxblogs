@@ -19,7 +19,7 @@ const CustomFooter = async ({ lang }: Props) => {
           <ThemeToggler />
 
           <a
-            href="https://github.com/aiden296"
+            href="https://github.com/anhquang296"
             target="_blank"
             rel="noopener noreferrer"
             className="flex size-9 items-center justify-center rounded-lg transition-all duration-200 hover:scale-110 active:scale-95 hover:bg-gray-500/15 dark:hover:bg-gray-400/20"
