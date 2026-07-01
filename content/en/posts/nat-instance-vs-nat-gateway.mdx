@@ -162,6 +162,23 @@ Minimum Security Group rules for a NAT Instance:
 
 > For comparison: NAT Gateway **does not support Security Groups** — you can only control traffic using NACLs. With a NAT Instance, you get both layers of protection: Security Group (stateful, instance-level) + NACL (stateless, subnet-level).
 
+### 2.5. Port Forwarding — A Capability NAT Gateway Lacks
+
+The packet flow in 2.3 describes **SNAT** (Source NAT) — rewriting the source IP so a resource in the private subnet can reach the internet. That is the **outbound** direction. Port forwarding is the reverse: **DNAT** (Destination NAT) for **inbound** traffic — when a packet arrives from the internet, the NAT Instance rewrites the packet's destination to route it to a specific instance in the private subnet.
+
+Because a NAT Instance is an EC2 with full iptables control, you get port forwarding by adding a single DNAT rule to the `PREROUTING` chain. A NAT Gateway cannot: it is a managed service that only does SNAT for outbound traffic, with no option to configure inbound rules.
+
+For example, a client on the internet sends a request to the NAT Instance's EIP on port 3306, and iptables rewrites the destination to an instance (or RDS) in the private subnet:
+
+```
+iptables -t nat -A PREROUTING -p tcp --dport 3306 \
+  -d 10.0.1.30 -j DNAT --to-destination 10.0.2.20:3306
+```
+
+This lets an instance with no public IP still be reachable from the outside through the NAT Instance.
+
+> **Security note**: exposing a database or internal service directly to the internet this way is risky — reserve it for controlled, administrative access, and lock it down with Security Group + NACL. To expose a service properly, use a Load Balancer rather than DNAT on a NAT Instance.
+
 ---
 
 ## 3. Zonal NAT Gateway — Managed Service (Recap)

@@ -51,7 +51,9 @@ NAT Instance thực chất là một **EC2 instance** chạy AMI có cấu hình
 3. **Disable Source/Destination Check** — chi tiết ở phần tiếp theo
 4. **Cấu hình route table** — private subnet phải có route `0.0.0.0/0 → eni-xxx` trỏ đến ENI của NAT Instance
 
-AWS từng cung cấp **pre-configured Amazon Linux AMI** cho NAT Instance, nhưng AMI này đã hết standard support từ **31/12/2020**. Hiện tại nếu muốn dùng NAT Instance, bạn có 2 lựa chọn: tìm **alternative AMI trên AWS Marketplace** (nhiều community AMI đã cấu hình sẵn NAT, ví dụ fck-nat — một open-source alternative được tối ưu chi phí), hoặc tự cấu hình từ AMI Linux thông thường — enable IP forwarding trong kernel (`net.ipv4.ip_forward = 1`) và thiết lập iptables NAT rules.
+AWS từng cung cấp **pre-configured Amazon Linux AMI** cho NAT Instance, nhưng AMI này đã hết standard support từ **31/12/2020**.
+
+Hiện tại nếu muốn dùng NAT Instance, bạn có 2 lựa chọn: tìm **alternative AMI trên AWS Marketplace** (nhiều community AMI đã cấu hình sẵn NAT, ví dụ fck-nat — một open-source alternative được tối ưu chi phí), hoặc tự cấu hình từ AMI Linux thông thường — enable IP forwarding trong kernel (`net.ipv4.ip_forward = 1`) và thiết lập iptables NAT rules.
 
 ### 2.2. Source/Destination Check — Tại sao phải tắt?
 
@@ -161,6 +163,23 @@ Security Group tối thiểu cho NAT Instance:
 | HTTPS | 443  | `0.0.0.0/0`  | Forward traffic HTTPS ra internet   |
 
 > So sánh: NAT Gateway **không hỗ trợ Security Group** — bạn chỉ có thể kiểm soát traffic qua NACL. Với NAT Instance, bạn có cả hai lớp bảo vệ: Security Group (stateful, ở tầng instance) + NACL (stateless, ở tầng subnet).
+
+### 2.5. Port Forwarding — Khả năng NAT Gateway không có
+
+Packet flow ở phần 2.3 mô tả **SNAT** (Source NAT) — thay đổi source IP để resource trong private subnet gọi được ra internet. Đây là chiều **outbound**. Port forwarding là chiều ngược lại: **DNAT** (Destination NAT) cho traffic **inbound** — khi một packet từ internet đi vào, NAT Instance thay đổi destination của packet để chuyển nó đến đúng một instance trong private subnet.
+
+Vì NAT Instance là một EC2 với quyền kiểm soát iptables đầy đủ, bạn chỉ cần thêm một DNAT rule ở chuỗi `PREROUTING` là có port forwarding. NAT Gateway thì không: nó là managed service chỉ làm SNAT cho outbound, không có bất kỳ tùy chọn nào để cấu hình rule inbound.
+
+Ví dụ, client từ internet gửi request đến EIP của NAT Instance ở port 3306, iptables sẽ rewrite destination về một instance (hoặc RDS) trong private subnet:
+
+```
+iptables -t nat -A PREROUTING -p tcp --dport 3306 \
+  -d 10.0.1.30 -j DNAT --to-destination 10.0.2.20:3306
+```
+
+Nhờ vậy, một instance không có public IP vẫn có thể được truy cập từ bên ngoài thông qua NAT Instance.
+
+> **Lưu ý bảo mật**: expose trực tiếp database hay service nội bộ ra internet theo cách này khá rủi ro — chỉ nên dùng cho truy cập quản trị có kiểm soát, và siết chặt bằng Security Group + NACL. Để expose một service đúng cách, hãy dùng Load Balancer thay vì DNAT trên NAT Instance.
 
 ---
 
