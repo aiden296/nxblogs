@@ -47,7 +47,7 @@ This is the densest part of Section 14, and the one most likely to appear on the
 
 SSE-S3 is the default and simplest form of encryption. S3 encrypts the object with the AES-256 algorithm, using a key that AWS creates, manages, and rotates. You don't see the key, don't manage the key, and don't pay extra.
 
-Worth remembering about how the keys work: each object is encrypted with its own unique key, not one shared key across the whole bucket. That key is itself encrypted with a root key that AWS manages and rotates periodically. This nested-key mechanism is called **envelope encryption** — use one key to encrypt the data, then use another key to encrypt that key, so rotating the root key doesn't require re-encrypting all the data.
+Each object is encrypted with its own unique key, not one shared key across the whole bucket. That key is itself encrypted with a root key that AWS manages and rotates periodically. This nested-key mechanism is called **envelope encryption** — use one key to encrypt the data, then use another key to encrypt that key, so rotating the root key doesn't require re-encrypting all the data.
 
 Enable SSE-S3 via the header `x-amz-server-side-encryption: AES256`.
 

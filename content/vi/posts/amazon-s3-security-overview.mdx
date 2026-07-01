@@ -47,7 +47,7 @@ Hai ý xuyên suốt cần ghim trước khi đi vào chi tiết:
 
 SSE-S3 là kiểu mã hóa mặc định và đơn giản nhất. S3 mã hóa object bằng thuật toán AES-256, dùng khóa do chính AWS tạo, quản lý và xoay vòng. Bạn không thấy khóa, không quản lý khóa, không trả thêm tiền.
 
-Điểm cần nhớ về cách khóa hoạt động: mỗi object được mã hóa bằng một khóa riêng, không dùng chung một khóa cho cả bucket. Bản thân khóa đó lại được mã hóa thêm một lần nữa bằng một root key do AWS quản lý và xoay vòng định kỳ. Cơ chế lồng khóa này gọi là **envelope encryption** — dùng một khóa để mã hóa dữ liệu, rồi dùng một khóa khác để mã hóa chính khóa đó, giúp việc xoay vòng root key không phải mã hóa lại toàn bộ dữ liệu.
+Mỗi object được mã hóa bằng một khóa riêng, không dùng chung một khóa cho cả bucket. Bản thân khóa đó lại được mã hóa thêm một lần nữa bằng một root key do AWS quản lý và xoay vòng định kỳ. Cơ chế lồng khóa này gọi là **envelope encryption** — dùng một khóa để mã hóa dữ liệu, rồi dùng một khóa khác để mã hóa chính khóa đó, giúp việc xoay vòng root key không phải mã hóa lại toàn bộ dữ liệu.
 
 Enable SSE-S3 thông qua header `x-amz-server-side-encryption: AES256`.
 
